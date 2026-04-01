@@ -15,7 +15,7 @@ if not exist "%VENV_PYTHON%" (
     exit /b 1
 )
 
-call "%VENV_PYTHON%" -m PyInstaller --name ai-agent --onefile --windowed --clean --collect-all tiktoken --collect-all langgraph --collect-all langchain --collect-all langchain_openai --collect-all langchain_google_genai --collect-all PySide6 --collect-all qtawesome --collect-all dotenv --collect-submodules tools --hidden-import=tiktoken_ext --hidden-import=tiktoken_ext.openai_public agent_cli.py
+call "%VENV_PYTHON%" -m PyInstaller --name ai-agent --onefile --windowed --clean --collect-all tiktoken --collect-all langgraph --collect-all langchain --collect-all langchain_openai --collect-all langchain_google_genai --collect-all PySide6 --collect-all qtawesome --collect-all dotenv --collect-submodules tools --hidden-import=tiktoken_ext --hidden-import=tiktoken_ext.openai_public main.py
 set "BUILD_EXIT=%ERRORLEVEL%"
 
 pause
