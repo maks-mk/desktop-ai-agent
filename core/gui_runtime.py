@@ -549,6 +549,83 @@ class AgentRunWorker(QObject):
         if callable(sync_fn):
             sync_fn(target_project_path)
 
+    def _set_current_session_active(self, session: SessionSnapshot, *, touch: bool = False) -> None:
+        self.current_session = session
+        self.current_session.approval_mode = normalize_approval_mode(self.current_session.approval_mode)
+        self.store.save_active_session(self.current_session, touch=touch, set_active=True)
+
+    def _try_change_workdir(self, target_project_path: str) -> tuple[bool, str]:
+        normalized_target = normalize_project_path(target_project_path)
+        if normalize_project_path(Path.cwd()) == normalized_target:
+            return True, ""
+        try:
+            os.chdir(normalized_target)
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, ""
+
+    def _fallback_to_current_project_session(
+        self,
+        *,
+        event_type: str,
+        reason: str,
+        notice_message: str,
+        target_session_id: str = "",
+        target_project_path: str = "",
+        error: str = "",
+    ) -> SessionSnapshot:
+        fallback_project = self._current_project_path()
+        fallback_session = self._create_new_session_for_project(fallback_project, with_project_label=True)
+        self._set_current_session_active(fallback_session, touch=False)
+        self._sync_tool_registry_workdir(fallback_project)
+
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "fallback_project_path": fallback_project,
+        }
+        if target_session_id:
+            payload["target_session_id"] = target_session_id
+        if target_project_path:
+            payload["target_project_path"] = target_project_path
+        if error:
+            payload["error"] = error
+            payload["error_type"] = error.split(":", 1)[0].strip() or "RuntimeError"
+        self._log_ui_run_event(event_type, **payload)
+        self.event_emitted.emit(StreamEvent("summary_notice", {"message": notice_message, "kind": "session_fallback"}))
+        return fallback_session
+
+    def _activate_session_with_workdir_or_fallback(
+        self,
+        target: SessionSnapshot,
+        *,
+        fallback_event_type: str,
+        notice_message: str,
+    ) -> SessionSnapshot:
+        target_project_path = normalize_project_path(target.project_path)
+        if not self._project_path_is_valid(target_project_path):
+            return self._fallback_to_current_project_session(
+                event_type=fallback_event_type,
+                reason="invalid_project_path",
+                notice_message=notice_message,
+                target_session_id=target.session_id,
+                target_project_path=target_project_path,
+            )
+
+        changed, error = self._try_change_workdir(target_project_path)
+        if not changed:
+            return self._fallback_to_current_project_session(
+                event_type=fallback_event_type,
+                reason="chdir_failed",
+                notice_message=notice_message,
+                target_session_id=target.session_id,
+                target_project_path=target_project_path,
+                error=error,
+            )
+
+        self._sync_tool_registry_workdir(target_project_path)
+        self._set_current_session_active(target, touch=False)
+        return self.current_session
+
     def _select_session_for_project(self, *, force_new_session: bool = False) -> SessionSnapshot:
         project_path = self._current_project_path()
         if force_new_session:
@@ -666,27 +743,15 @@ class AgentRunWorker(QObject):
         self.ui_run_logger = JsonlRunLogger(self.config.run_log_dir)
         self.store = SessionStore(self.config.session_state_path)
         self.agent_app, self.tool_registry = await build_agent_app(self.config)
-        self.current_session = self._select_session_for_project(force_new_session=force_new_session)
-        if not self._project_path_is_valid(self.current_session.project_path):
-            fallback_project = self._current_project_path()
-            self._log_ui_run_event(
-                "session_restore_fallback",
-                reason="invalid_project_path",
-                invalid_project_path=str(self.current_session.project_path),
-                fallback_project_path=fallback_project,
-            )
-            self.current_session = self._create_new_session_for_project(
-                fallback_project,
-                with_project_label=True,
-            )
-        target_project_path = normalize_project_path(self.current_session.project_path)
-        if normalize_project_path(Path.cwd()) != target_project_path:
-            os.chdir(target_project_path)
-        self._sync_tool_registry_workdir(target_project_path)
-        self.current_session.approval_mode = normalize_approval_mode(
-            getattr(self.current_session, "approval_mode", APPROVAL_MODE_PROMPT)
+        selected_session = self._select_session_for_project(force_new_session=force_new_session)
+        self.current_session = self._activate_session_with_workdir_or_fallback(
+            selected_session,
+            fallback_event_type="session_restore_fallback",
+            notice_message=(
+                "Не удалось открыть рабочую папку восстановленного чата. "
+                "Создан новый чат в текущем проекте."
+            ),
         )
-        self.store.save_active_session(self.current_session, touch=False, set_active=True)
 
         await self._repair_current_session_if_needed()
 
@@ -813,23 +878,14 @@ class AgentRunWorker(QObject):
         self._run(self._switch_session_async(target))
 
     async def _switch_session_async(self, target: SessionSnapshot) -> None:
-        if not self._project_path_is_valid(target.project_path):
-            self._log_ui_run_event(
-                "session_switch_fallback",
-                reason="invalid_project_path",
-                invalid_project_path=str(target.project_path),
-                target_session_id=target.session_id,
-            )
-            fallback_project = self._current_project_path()
-            target = self._create_new_session_for_project(fallback_project, with_project_label=True)
-
-        target_project_path = normalize_project_path(target.project_path)
-        if normalize_project_path(Path.cwd()) != target_project_path:
-            os.chdir(target_project_path)
-        self._sync_tool_registry_workdir(target_project_path)
-        self.current_session = target
-        self.current_session.approval_mode = normalize_approval_mode(self.current_session.approval_mode)
-        self.store.save_active_session(self.current_session, touch=False, set_active=True)
+        self.current_session = self._activate_session_with_workdir_or_fallback(
+            target,
+            fallback_event_type="session_switch_fallback",
+            notice_message=(
+                "Не удалось открыть рабочую папку выбранного чата. "
+                "Создан новый чат в текущем проекте."
+            ),
+        )
         await self._repair_current_session_if_needed()
         self.event_emitted.emit(StreamEvent("chat_reset", {}))
         await self._emit_session_payload(include_transcript=True)
@@ -866,14 +922,14 @@ class AgentRunWorker(QObject):
             fallback_project = self._current_project_path()
             replacement = self._create_new_session_for_project(fallback_project, with_project_label=True)
 
-        target_project_path = normalize_project_path(replacement.project_path)
-        if normalize_project_path(Path.cwd()) != target_project_path:
-            os.chdir(target_project_path)
-        self._sync_tool_registry_workdir(target_project_path)
-
-        self.current_session = replacement
-        self.current_session.approval_mode = normalize_approval_mode(self.current_session.approval_mode)
-        self.store.save_active_session(self.current_session, touch=False, set_active=True)
+        self.current_session = self._activate_session_with_workdir_or_fallback(
+            replacement,
+            fallback_event_type="session_delete_fallback",
+            notice_message=(
+                "Не удалось открыть рабочую папку следующего чата. "
+                "Создан новый чат в текущем проекте."
+            ),
+        )
 
         await self._repair_current_session_if_needed()
         self.event_emitted.emit(StreamEvent("chat_reset", {}))

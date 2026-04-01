@@ -671,6 +671,118 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SessionStore(session_path).load_active_session().session_id, second.session_id)
         chdir_mock.assert_called_once_with(str((tmp / "project-b").resolve()))
 
+    async def test_worker_initialize_fallbacks_when_chdir_fails(self):
+        tmp = self._workspace_tempdir()
+        session_path = tmp / "session.json"
+        store = SessionStore(session_path)
+        blocked_project = tmp / "blocked-project"
+        fallback_project = tmp / "fallback-project"
+        blocked_project.mkdir()
+        fallback_project.mkdir()
+        blocked = store.new_session("sqlite", "demo.sqlite", project_path=blocked_project, title="Blocked")
+        store.save_active_session(blocked, touch=False, set_active=True)
+
+        worker = gui_runtime.AgentRunWorker()
+        events = []
+        worker.event_emitted.connect(events.append)
+        config = self._make_config(SESSION_STATE_PATH=session_path)
+        fake_app = type("FakeApp", (), {"get_state": lambda self, _config: type("State", (), {"values": {}})()})()
+        tool_registry = type(
+            "ToolRegistryStub",
+            (),
+            {
+                "checkpoint_info": {"resolved_backend": "sqlite", "target": "demo.sqlite"},
+                "tools": [],
+                "tool_metadata": {},
+                "mcp_server_status": [],
+                "get_runtime_status_lines": lambda self: [],
+                "sync_working_directory": lambda self, _path: None,
+            },
+        )()
+
+        with (
+            mock.patch.object(gui_runtime, "setup_runtime", return_value=config),
+            mock.patch.object(gui_runtime, "build_agent_app", new=mock.AsyncMock(return_value=(fake_app, tool_registry))),
+            mock.patch.object(gui_runtime, "repair_session_if_needed", new=mock.AsyncMock(return_value=[])),
+            mock.patch.object(gui_runtime.Path, "cwd", return_value=fallback_project),
+            mock.patch.object(gui_runtime.os, "chdir", side_effect=PermissionError("denied")),
+            mock.patch.object(worker, "_log_ui_run_event") as log_mock,
+        ):
+            await worker._initialize_async()
+
+        self.assertNotEqual(worker.current_session.session_id, blocked.session_id)
+        self.assertEqual(worker.current_session.project_path, str(fallback_project.resolve()))
+        self.assertEqual(SessionStore(session_path).load_active_session().session_id, worker.current_session.session_id)
+        fallback_notices = [
+            event
+            for event in events
+            if getattr(event, "type", "") == "summary_notice" and (event.payload or {}).get("kind") == "session_fallback"
+        ]
+        self.assertTrue(fallback_notices)
+        self.assertTrue(any(call.args and call.args[0] == "session_restore_fallback" for call in log_mock.call_args_list))
+        self.assertTrue(
+            any(call.kwargs.get("reason") == "chdir_failed" and "PermissionError" in call.kwargs.get("error", "") for call in log_mock.call_args_list)
+        )
+
+    async def test_worker_switch_session_fallbacks_when_chdir_raises(self):
+        tmp = self._workspace_tempdir()
+        session_path = tmp / "session.json"
+        store = SessionStore(session_path)
+        project_a = tmp / "project-a"
+        project_b = tmp / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        first = store.new_session("sqlite", "demo.sqlite", project_path=project_a, title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=project_b, title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        worker = gui_runtime.AgentRunWorker()
+        events = []
+        worker.event_emitted.connect(events.append)
+        worker.store = store
+        worker.config = self._make_config(SESSION_STATE_PATH=session_path)
+        worker.tool_registry = type(
+            "ToolRegistryStub",
+            (),
+            {
+                "checkpoint_info": {"resolved_backend": "sqlite", "target": "demo.sqlite"},
+                "tools": [],
+                "tool_metadata": {},
+                "mcp_server_status": [],
+                "get_runtime_status_lines": lambda self: [],
+                "sync_working_directory": lambda self, _path: None,
+            },
+        )()
+        worker.agent_app = type(
+            "FakeApp",
+            (),
+            {"get_state": lambda self, _config: type("State", (), {"values": {}})()},
+        )()
+        worker.current_session = first
+
+        with (
+            mock.patch.object(gui_runtime, "repair_session_if_needed", new=mock.AsyncMock(return_value=[])),
+            mock.patch.object(gui_runtime.Path, "cwd", return_value=project_a),
+            mock.patch.object(gui_runtime.os, "chdir", side_effect=OSError("network share denied")),
+            mock.patch.object(worker, "_log_ui_run_event") as log_mock,
+        ):
+            await worker._switch_session_async(second)
+
+        self.assertNotEqual(worker.current_session.session_id, second.session_id)
+        self.assertEqual(worker.current_session.project_path, str(project_a.resolve()))
+        self.assertEqual(SessionStore(session_path).load_active_session().session_id, worker.current_session.session_id)
+        fallback_notices = [
+            event
+            for event in events
+            if getattr(event, "type", "") == "summary_notice" and (event.payload or {}).get("kind") == "session_fallback"
+        ]
+        self.assertTrue(fallback_notices)
+        self.assertTrue(any(call.args and call.args[0] == "session_switch_fallback" for call in log_mock.call_args_list))
+        self.assertTrue(
+            any(call.kwargs.get("reason") == "chdir_failed" and "OSError" in call.kwargs.get("error", "") for call in log_mock.call_args_list)
+        )
+
     def test_worker_selects_global_last_active_session_on_initialize(self):
         tmp = self._workspace_tempdir()
         session_path = tmp / "session.json"
@@ -780,6 +892,67 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(worker.current_session.session_id, first.session_id)
         self.assertIsNone(SessionStore(session_path).get_session(second.session_id))
+
+    async def test_worker_delete_active_session_fallbacks_when_replacement_chdir_fails(self):
+        tmp = self._workspace_tempdir()
+        session_path = tmp / "session.json"
+        store = SessionStore(session_path)
+        project_a = tmp / "project-a"
+        project_b = tmp / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        first = store.new_session("sqlite", "demo.sqlite", project_path=project_a, title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=project_b, title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        worker = gui_runtime.AgentRunWorker()
+        events = []
+        worker.event_emitted.connect(events.append)
+        worker.store = store
+        worker.config = self._make_config(SESSION_STATE_PATH=session_path)
+        worker.current_session = second
+        worker.tool_registry = type(
+            "ToolRegistryStub",
+            (),
+            {
+                "checkpoint_info": {"resolved_backend": "sqlite", "target": "demo.sqlite"},
+                "tools": [],
+                "tool_metadata": {},
+                "mcp_server_status": [],
+                "get_runtime_status_lines": lambda self: [],
+                "sync_working_directory": lambda self, _path: None,
+            },
+        )()
+        worker.agent_app = type(
+            "FakeApp",
+            (),
+            {"get_state": lambda self, _config: type("State", (), {"values": {}})()},
+        )()
+
+        with (
+            mock.patch.object(gui_runtime, "repair_session_if_needed", new=mock.AsyncMock(return_value=[])),
+            mock.patch.object(gui_runtime.Path, "cwd", return_value=project_b),
+            mock.patch.object(gui_runtime.os, "chdir", side_effect=OSError("access denied")),
+            mock.patch.object(worker, "_log_ui_run_event") as log_mock,
+        ):
+            await worker._delete_session_async(second.session_id)
+
+        self.assertIsNone(SessionStore(session_path).get_session(second.session_id))
+        self.assertEqual(worker.current_session.project_path, str(project_b.resolve()))
+        self.assertNotEqual(worker.current_session.session_id, first.session_id)
+        self.assertNotEqual(worker.current_session.session_id, second.session_id)
+        self.assertEqual(SessionStore(session_path).load_active_session().session_id, worker.current_session.session_id)
+        fallback_notices = [
+            event
+            for event in events
+            if getattr(event, "type", "") == "summary_notice" and (event.payload or {}).get("kind") == "session_fallback"
+        ]
+        self.assertTrue(fallback_notices)
+        self.assertTrue(any(call.args and call.args[0] == "session_delete_fallback" for call in log_mock.call_args_list))
+        self.assertTrue(
+            any(call.kwargs.get("reason") == "chdir_failed" and "OSError" in call.kwargs.get("error", "") for call in log_mock.call_args_list)
+        )
 
     def test_stop_background_process_denies_external_pid_by_default(self):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})
