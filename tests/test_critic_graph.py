@@ -36,6 +36,18 @@ class ProviderSafeFakeLLM(FakeLLM):
         return await super().ainvoke(context)
 
 
+class StrictToolOrderFakeLLM(FakeLLM):
+    async def ainvoke(self, context):
+        last_visible = None
+        for message in context:
+            if isinstance(message, SystemMessage):
+                continue
+            if isinstance(last_visible, ToolMessage) and isinstance(message, HumanMessage):
+                raise AssertionError("unexpected role 'user' after role 'tool'")
+            last_visible = message
+        return await super().ainvoke(context)
+
+
 class FakeTool:
     def __init__(self, name, result):
         self.name = name
@@ -51,7 +63,16 @@ class FakeTool:
 
 
 class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
-    def _make_config(self, *, model_supports_tools=True, max_loops=6, max_retries=3, retry_delay=0):
+    def _make_config(
+        self,
+        *,
+        model_supports_tools=True,
+        max_loops=6,
+        max_retries=3,
+        retry_delay=0,
+        critic_mode="always",
+        critic_max_retries_per_turn=1,
+    ):
         return AgentConfig(
             provider="openai",
             openai_api_key="test-key",
@@ -59,6 +80,8 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
             max_loops=max_loops,
             max_retries=max_retries,
             retry_delay=retry_delay,
+            critic_mode=critic_mode,
+            critic_max_retries_per_turn=critic_max_retries_per_turn,
             prompt_path=Path(__file__).resolve().parents[1] / "prompt.txt",
         )
 
@@ -72,6 +95,8 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
         max_loops=6,
         max_retries=3,
         retry_delay=0,
+        critic_mode="always",
+        critic_max_retries_per_turn=1,
         agent_llm_cls=FakeLLM,
     ):
         config = self._make_config(
@@ -79,6 +104,8 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
             max_loops=max_loops,
             max_retries=max_retries,
             retry_delay=retry_delay,
+            critic_mode=critic_mode,
+            critic_max_retries_per_turn=critic_max_retries_per_turn,
         )
         agent_llm = agent_llm_cls(agent_responses)
         critic_llm = FakeLLM(critic_responses)
@@ -253,6 +280,190 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertEqual(len(agent_llm.invocations), 1)
         self.assertEqual(len(critic_llm.invocations), 1)
+
+    async def test_hybrid_mode_chat_only_skips_critic(self):
+        app, agent_llm, critic_llm, _ = self._build_app(
+            agent_responses=[AIMessage(content="Готово без инструментов.")],
+            critic_responses=[],
+            tools=[],
+            model_supports_tools=False,
+            critic_mode="hybrid",
+        )
+
+        result = await app.ainvoke(self._initial_state("Ответь без tools"), config={"recursion_limit": 24})
+
+        self.assertEqual(result["messages"][-1].content, "Готово без инструментов.")
+        self.assertEqual(len(agent_llm.invocations), 1)
+        self.assertEqual(len(critic_llm.invocations), 0)
+
+    async def test_hybrid_mode_open_tool_issue_and_user_question_finishes_turn_without_retry(self):
+        failing_tool = FakeTool("demo_tool", "ERROR[NOT_FOUND]: File not found")
+        app, agent_llm, critic_llm, _ = self._build_app(
+            agent_responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "demo_tool", "args": {"path": "missing.py"}, "id": "tc-hybrid-1"}],
+                ),
+                AIMessage(content="Файл не найден. Пожалуйста, укажите правильный путь к файлу."),
+            ],
+            critic_responses=[
+                AIMessage(
+                    content=(
+                        "STATUS: INCOMPLETE\n"
+                        "REASON: Need one more retry.\n"
+                        "NEXT_STEP: retry immediately\n"
+                        "CONTROL: RETRY_AGENT"
+                    )
+                )
+            ],
+            tools=[failing_tool],
+            critic_mode="hybrid",
+        )
+
+        result = await app.ainvoke(self._initial_state("Обработай файл"), config={"recursion_limit": 36})
+
+        self.assertIn("укажите правильный путь", str(result["messages"][-1].content).lower())
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(len(agent_llm.invocations), 2)
+        self.assertEqual(len(critic_llm.invocations), 1)
+
+    async def test_hybrid_mode_blocks_tool_retries_after_validation_issue_and_handoffs(self):
+        failing_tool = FakeTool(
+            "edit_file",
+            "ERROR[VALIDATION]: Missing required field: new_string. Accepted aliases: new_text, replace_text, replacement.",
+        )
+        app, agent_llm, critic_llm, _ = self._build_app(
+            agent_responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "edit_file", "args": {"path": "demo.py", "old_string": "a"}, "id": "tc-val-1"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "edit_file", "args": {"path": "demo.py", "old_string": "a"}, "id": "tc-val-2"}],
+                ),
+            ],
+            critic_responses=[
+                AIMessage(
+                    content=(
+                        "STATUS: INCOMPLETE\n"
+                        "REASON: Needs one more retry.\n"
+                        "NEXT_STEP: retry\n"
+                        "CONTROL: RETRY_AGENT"
+                    )
+                )
+            ],
+            tools=[failing_tool],
+            critic_mode="hybrid",
+        )
+
+        result = await app.ainvoke(self._initial_state("Обнови файл"), config={"recursion_limit": 36})
+
+        self.assertIn("укажите путь", str(result["messages"][-1].content).lower())
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(len(agent_llm.invocations), 2)
+        self.assertEqual(len(critic_llm.invocations), 1)
+        self.assertEqual(len(failing_tool.calls), 1)
+
+    async def test_hybrid_mode_suppresses_repeated_retry_on_same_response_fingerprint(self):
+        failing_tool = FakeTool("demo_tool", "ERROR[EXECUTION]: boom")
+        repeated_answer = "Не удалось завершить задачу из-за ошибки инструмента."
+        app, agent_llm, critic_llm, _ = self._build_app(
+            agent_responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "demo_tool", "args": {"action": "x"}, "id": "tc-hybrid-2"}],
+                ),
+                AIMessage(content=repeated_answer),
+                AIMessage(content=repeated_answer),
+            ],
+            critic_responses=[
+                AIMessage(
+                    content=(
+                        "STATUS: INCOMPLETE\n"
+                        "REASON: Try again.\n"
+                        "NEXT_STEP: retry\n"
+                        "CONTROL: RETRY_AGENT"
+                    )
+                ),
+                AIMessage(
+                    content=(
+                        "STATUS: INCOMPLETE\n"
+                        "REASON: Try again once more.\n"
+                        "NEXT_STEP: retry\n"
+                        "CONTROL: RETRY_AGENT"
+                    )
+                ),
+            ],
+            tools=[failing_tool],
+            critic_mode="hybrid",
+            critic_max_retries_per_turn=1,
+        )
+
+        result = await app.ainvoke(self._initial_state("Обработай файл"), config={"recursion_limit": 36})
+
+        self.assertEqual(result["messages"][-1].content, repeated_answer)
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(len(agent_llm.invocations), 3)
+        self.assertEqual(len(critic_llm.invocations), 2)
+
+    async def test_planning_tool_budget_blocks_third_call_even_with_different_args(self):
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[FakeTool("sequentialthinking", "ok")],
+            llm_with_tools=FakeLLM([]),
+        )
+        state = self._initial_state("Сделай задачу")
+        recent_calls = [
+            {"name": "sequentialthinking", "args": {"thought": "first"}},
+            {"name": "sequentialthinking", "args": {"thought": "second"}},
+        ]
+        tool_call = {"name": "sequentialthinking", "args": {"thought": "third"}, "id": "tc-plan-3"}
+
+        tool_msg, had_error, issue = await nodes._process_tool_call(
+            tool_call,
+            recent_calls,
+            state,
+            {},
+            1,
+        )
+
+        self.assertTrue(had_error)
+        self.assertIn("ERROR[LOOP_DETECTED]", str(tool_msg.content))
+        self.assertIn("Planning tool budget reached", str(tool_msg.content))
+        self.assertEqual(issue["error_type"], "LOOP_DETECTED")
+        self.assertEqual(issue["tool_names"], ["sequentialthinking"])
+
+    async def test_process_tool_call_persists_tool_args_in_tool_message_metadata(self):
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[FakeTool("read_file", "contents")],
+            llm_with_tools=FakeLLM([]),
+        )
+        state = self._initial_state("Покажи файл")
+        tool_call = {
+            "name": "read_file",
+            "args": {"path": "demo.txt", "line_start": 1, "line_end": 5},
+            "id": "tc-meta-1",
+        }
+
+        tool_msg, had_error, issue = await nodes._process_tool_call(
+            tool_call,
+            [],
+            state,
+            {},
+            1,
+        )
+
+        self.assertFalse(had_error)
+        self.assertIsNone(issue)
+        self.assertEqual(tool_msg.tool_call_id, "tc-meta-1")
+        self.assertEqual(
+            (tool_msg.additional_kwargs or {}).get("tool_args"),
+            {"path": "demo.txt", "line_start": 1, "line_end": 5},
+        )
 
     async def test_malformed_critic_verdict_finishes_turn_conservatively(self):
         app, agent_llm, critic_llm, _ = self._build_app(
@@ -448,6 +659,7 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
             tools=[],
             model_supports_tools=False,
             max_loops=5,
+            critic_max_retries_per_turn=2,
             agent_llm_cls=ProviderSafeFakeLLM,
         )
 
@@ -563,6 +775,44 @@ class CriticGraphTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, SystemMessage) and "UNRESOLVED TOOL FAILURE" in str(message.content)
         ]
         self.assertTrue(unresolved_messages)
+
+    async def test_agent_context_inserts_bridge_when_user_follows_tool_message(self):
+        config = self._make_config(model_supports_tools=True)
+        strict_llm = StrictToolOrderFakeLLM([AIMessage(content="Продолжаю выполнение после tool-результата.")])
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[FakeTool("demo_tool", "ok")],
+            llm_with_tools=strict_llm,
+        )
+
+        result = await nodes.agent_node(
+            {
+                **self._initial_state("Почини проблему"),
+                "messages": [
+                    HumanMessage(content="Почини проблему"),
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"name": "demo_tool", "args": {"action": "x"}, "id": "tc-order-1"}],
+                    ),
+                    ToolMessage(content="ERROR[NOT_FOUND]: boom", tool_call_id="tc-order-1", name="demo_tool"),
+                    HumanMessage(content="продолжай"),
+                ],
+                "open_tool_issue": {
+                    "turn_id": 2,
+                    "kind": "tool_error",
+                    "summary": "boom",
+                    "tool_names": ["demo_tool"],
+                    "source": "tools",
+                },
+                "critic_source": "tools",
+            }
+        )
+
+        self.assertEqual(result["messages"][-1].content, "Продолжаю выполнение после tool-результата.")
+        non_system = [m for m in strict_llm.invocations[0] if not isinstance(m, SystemMessage)]
+        for prev, curr in zip(non_system, non_system[1:]):
+            self.assertFalse(isinstance(prev, ToolMessage) and isinstance(curr, HumanMessage))
 
     async def test_unresolved_tool_issue_requires_retry_until_critic_finishes(self):
         failing_tool = FakeTool("demo_tool", "ERROR[EXECUTION]: boom")

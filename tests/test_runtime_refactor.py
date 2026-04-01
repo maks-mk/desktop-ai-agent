@@ -484,6 +484,34 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.get_active_session_for_project(tmp / "project-b").session_id, second.session_id)
         self.assertCountEqual([entry.title for entry in store.list_sessions()], ["First", "Second"])
 
+    def test_session_store_tracks_global_last_active_session(self):
+        tmp = self._workspace_tempdir()
+        store = SessionStore(tmp / "session.json")
+        first = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-a", title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-b", title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        last_active = store.get_last_active_session()
+
+        self.assertIsNotNone(last_active)
+        self.assertEqual(last_active.session_id, second.session_id)
+
+    def test_session_store_delete_session_soft_removes_from_index_and_updates_last_active(self):
+        tmp = self._workspace_tempdir()
+        store = SessionStore(tmp / "session.json")
+        first = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-a", title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-b", title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        deleted = store.delete_session(second.session_id)
+
+        self.assertTrue(deleted)
+        self.assertIsNone(store.get_session(second.session_id))
+        self.assertEqual(store.get_last_active_session().session_id, first.session_id)
+        self.assertEqual(SessionStore(tmp / "session.json").load_active_session().session_id, first.session_id)
+
     def test_session_store_migrates_legacy_session_into_index(self):
         tmp = self._workspace_tempdir()
         session_path = tmp / "session.json"
@@ -602,8 +630,12 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         tmp = self._workspace_tempdir()
         session_path = tmp / "session.json"
         store = SessionStore(session_path)
-        first = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-a", title="First")
-        second = store.new_session("sqlite", "demo.sqlite", project_path=tmp / "project-b", title="Second")
+        project_a = tmp / "project-a"
+        project_b = tmp / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        first = store.new_session("sqlite", "demo.sqlite", project_path=project_a, title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=project_b, title="Second")
         store.save_active_session(first, touch=False)
         store.save_active_session(second, touch=False)
 
@@ -638,6 +670,34 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.current_session.session_id, second.session_id)
         self.assertEqual(SessionStore(session_path).load_active_session().session_id, second.session_id)
         chdir_mock.assert_called_once_with(str((tmp / "project-b").resolve()))
+
+    def test_worker_selects_global_last_active_session_on_initialize(self):
+        tmp = self._workspace_tempdir()
+        session_path = tmp / "session.json"
+        store = SessionStore(session_path)
+        project_a = tmp / "project-a"
+        project_b = tmp / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+
+        first = store.new_session("sqlite", "demo.sqlite", project_path=project_a, title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=project_b, title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        worker = gui_runtime.AgentRunWorker()
+        worker.store = store
+        worker.config = self._make_config(SESSION_STATE_PATH=session_path)
+        worker.tool_registry = type(
+            "ToolRegistryStub",
+            (),
+            {"checkpoint_info": {"resolved_backend": "sqlite", "target": "demo.sqlite"}},
+        )()
+
+        with mock.patch.object(gui_runtime.Path, "cwd", return_value=project_a):
+            selected = worker._select_session_for_project()
+
+        self.assertEqual(selected.session_id, second.session_id)
 
     async def test_new_user_turn_ignores_old_open_tool_issue(self):
         agent_llm = FakeLLM([AIMessage(content="Короткая сводка на экране.")])
@@ -675,6 +735,51 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             if "UNRESOLVED TOOL FAILURE" in str(message.content) or "TOOL EXECUTION DENIED BY USER" in str(message.content)
         ]
         self.assertFalse(unresolved_messages)
+
+    async def test_worker_delete_active_session_switches_to_fallback_session(self):
+        tmp = self._workspace_tempdir()
+        session_path = tmp / "session.json"
+        store = SessionStore(session_path)
+        project_a = tmp / "project-a"
+        project_b = tmp / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        first = store.new_session("sqlite", "demo.sqlite", project_path=project_a, title="First")
+        second = store.new_session("sqlite", "demo.sqlite", project_path=project_b, title="Second")
+        store.save_active_session(first, touch=False, set_active=True)
+        store.save_active_session(second, touch=False, set_active=True)
+
+        worker = gui_runtime.AgentRunWorker()
+        worker.store = store
+        worker.config = self._make_config(SESSION_STATE_PATH=session_path)
+        worker.current_session = second
+        worker.tool_registry = type(
+            "ToolRegistryStub",
+            (),
+            {
+                "checkpoint_info": {"resolved_backend": "sqlite", "target": "demo.sqlite"},
+                "tools": [],
+                "tool_metadata": {},
+                "mcp_server_status": [],
+                "get_runtime_status_lines": lambda self: [],
+                "sync_working_directory": lambda self, _path: None,
+            },
+        )()
+        worker.agent_app = type(
+            "FakeApp",
+            (),
+            {"get_state": lambda self, _config: type("State", (), {"values": {}})()},
+        )()
+
+        with (
+            mock.patch.object(gui_runtime, "repair_session_if_needed", new=mock.AsyncMock(return_value=[])),
+            mock.patch.object(gui_runtime.Path, "cwd", return_value=(tmp / "project-a")),
+            mock.patch.object(gui_runtime.os, "chdir"),
+        ):
+            await worker._delete_session_async(second.session_id)
+
+        self.assertEqual(worker.current_session.session_id, first.session_id)
+        self.assertIsNone(SessionStore(session_path).get_session(second.session_id))
 
     def test_stop_background_process_denies_external_pid_by_default(self):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})

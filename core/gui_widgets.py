@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import qtawesome as qta
-from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QRect, QRegularExpression, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QPoint, QRect, QRegularExpression, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeyEvent, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListView,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -468,6 +469,14 @@ class SessionListModel(QAbstractListModel):
     def session_row_count(self) -> int:
         return sum(1 for item in self._items if item.get("kind") == "session")
 
+    def title_for_session(self, session_id: str) -> str:
+        if not session_id:
+            return ""
+        for item in self._items:
+            if item.get("kind") == "session" and item.get("session_id") == session_id:
+                return str(item.get("title", "") or "")
+        return ""
+
 
 class SessionItemDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:  # type: ignore[override]
@@ -539,6 +548,7 @@ class SessionItemDelegate(QStyledItemDelegate):
 
 class SessionSidebarWidget(QWidget):
     session_activated = Signal(str)
+    session_delete_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -559,12 +569,14 @@ class SessionSidebarWidget(QWidget):
         self.list_view.setSelectionBehavior(QListView.SelectRows)
         self.list_view.setVerticalScrollMode(QListView.ScrollPerPixel)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_view.setContextMenuPolicy(Qt.CustomContextMenu)
 
         self.model = SessionListModel()
         self.delegate = SessionItemDelegate()
         self.list_view.setModel(self.model)
         self.list_view.setItemDelegate(self.delegate)
         self.list_view.clicked.connect(self._emit_clicked_session)
+        self.list_view.customContextMenuRequested.connect(self._show_context_menu)
         root.addWidget(self.list_view, 1)
 
     def set_sessions(self, sessions: list[dict[str, str]], active_session_id: str) -> None:
@@ -583,6 +595,26 @@ class SessionSidebarWidget(QWidget):
         session_id = self.model.session_id_at(index)
         if session_id:
             self.session_activated.emit(session_id)
+
+    def title_for_session(self, session_id: str) -> str:
+        return self.model.title_for_session(session_id)
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        index = self.list_view.indexAt(pos)
+        if not index.isValid():
+            return
+        if str(index.data(SessionListModel.KindRole) or "session") != "session":
+            return
+
+        session_id = self.model.session_id_at(index)
+        if not session_id:
+            return
+
+        menu = QMenu(self.list_view)
+        delete_action = menu.addAction("Удалить чат")
+        selected = menu.exec(self.list_view.viewport().mapToGlobal(pos))
+        if selected is delete_action:
+            self.session_delete_requested.emit(session_id)
 
 
 class OverviewPanelWidget(QWidget):
@@ -1045,9 +1077,8 @@ class ToolCardWidget(QFrame):
         self.args_view.setObjectName("InlineCodeView")
         self.args_view.setReadOnly(True)
         self.args_view.setFont(_make_mono_font())
-        self.args_view.setPlainText(json.dumps(payload.get("args", {}), ensure_ascii=False, indent=2))
         self.args_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        _sync_plain_text_height(self.args_view, min_lines=2, max_lines=8, extra_padding=14)
+        self._set_args(payload.get("args", {}))
 
         self.args_container = QWidget()
         args_layout = QHBoxLayout(self.args_container)
@@ -1059,16 +1090,32 @@ class ToolCardWidget(QFrame):
 
         self.diff_section: CollapsibleSection | None = None
 
+    @staticmethod
+    def _normalize_args(args: Any) -> dict[str, Any]:
+        return dict(args) if isinstance(args, dict) else {}
+
+    def _set_args(self, args: Any) -> None:
+        normalized = self._normalize_args(args)
+        rendered = json.dumps(normalized, ensure_ascii=False, indent=2)
+        if self.args_view.toPlainText() != rendered:
+            self.args_view.setPlainText(rendered)
+        _sync_plain_text_height(self.args_view, min_lines=2, max_lines=8, extra_padding=14)
+
     def finish(self, payload: dict[str, Any]) -> None:
         previous_display = self.tool_button.text()
-        self.payload = payload
+        normalized_args = self._normalize_args(payload.get("args", self.payload.get("args", {})))
+        merged_payload = dict(self.payload)
+        merged_payload.update(payload)
+        merged_payload["args"] = normalized_args
+        self.payload = merged_payload
         is_error = payload.get("is_error", False)
         icon_name = "fa5s.circle" if not is_error else "fa5s.times-circle"
         color = SUCCESS_GREEN if not is_error else ERROR_RED
         self.icon_label.setPixmap(qta.icon(icon_name, color=color).pixmap(7, 7))
-        self.tool_button.setText(payload.get("display", "") or previous_display or payload.get("name", "tool"))
+        self.tool_button.setText(self.payload.get("display", "") or previous_display or self.payload.get("name", "tool"))
+        self._set_args(normalized_args)
 
-        duration = payload.get("duration")
+        duration = self.payload.get("duration")
         if duration is not None:
             self.timing_label.setText(f"{duration:.1f}s")
             self.timing_label.setVisible(True)
@@ -1082,13 +1129,14 @@ class ToolCardWidget(QFrame):
             if self.output_section is None:
                 self.output_section = CollapsibleSection("Output", self.output_view, expanded=True)
                 self.layout().insertWidget(1, self.output_section)
-            self.output_view.setPlainText(payload.get("content", ""))
+            self.output_section.setVisible(True)
+            self.output_view.setPlainText(self.payload.get("content", ""))
             _sync_plain_text_height(self.output_view, min_lines=2, max_lines=10, extra_padding=14)
             self.output_section.set_expanded(True)
         elif self.output_section is not None:
             self.output_section.setVisible(False)
 
-        diff_text = payload.get("diff", "")
+        diff_text = self.payload.get("diff", "")
         if diff_text and self.diff_section is None:
             self.diff_section = CollapsibleSection("Diff", CodeBlockWidget(diff_text, "diff"), expanded=False)
             self.layout().addWidget(self.diff_section)

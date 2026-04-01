@@ -92,6 +92,7 @@ class SessionStore:
             "version": INDEX_VERSION,
             "sessions": [],
             "active_session_by_project": {},
+            "last_active_session_id": "",
         }
 
     def _load_index_payload(self) -> dict:
@@ -99,12 +100,14 @@ class SessionStore:
         payload.setdefault("version", INDEX_VERSION)
         payload.setdefault("sessions", [])
         payload.setdefault("active_session_by_project", {})
+        payload.setdefault("last_active_session_id", "")
         return payload
 
     def _save_index_payload(self, payload: dict) -> None:
         payload["version"] = INDEX_VERSION
         payload["sessions"] = list(payload.get("sessions", []))
         payload["active_session_by_project"] = dict(payload.get("active_session_by_project", {}))
+        payload["last_active_session_id"] = str(payload.get("last_active_session_id") or "")
         self._write_json(self.index_path, payload)
 
     def _all_snapshots_from_index(self) -> list[SessionSnapshot]:
@@ -135,6 +138,9 @@ class SessionStore:
             if active_map.get(project_key) != active_snapshot.session_id:
                 active_map[project_key] = active_snapshot.session_id
                 payload["active_session_by_project"] = active_map
+                changed = True
+            if payload.get("last_active_session_id") != active_snapshot.session_id:
+                payload["last_active_session_id"] = active_snapshot.session_id
                 changed = True
         payload["sessions"] = sessions
         if changed:
@@ -167,6 +173,7 @@ class SessionStore:
             active_map = dict(payload.get("active_session_by_project", {}))
             active_map[normalize_project_path(snapshot.project_path)] = snapshot.session_id
             payload["active_session_by_project"] = active_map
+            payload["last_active_session_id"] = snapshot.session_id
         self._save_index_payload(payload)
 
     def load_active_session(self) -> Optional[SessionSnapshot]:
@@ -223,6 +230,20 @@ class SessionStore:
             return None
         return self.get_session(sessions[0].session_id)
 
+    def get_last_active_session(self) -> Optional[SessionSnapshot]:
+        self._ensure_index_initialized()
+        payload = self._load_index_payload()
+        last_active_session_id = str(payload.get("last_active_session_id") or "").strip()
+        if last_active_session_id:
+            session = self.get_session(last_active_session_id)
+            if session is not None:
+                return session
+
+        sessions = self.list_sessions()
+        if not sessions:
+            return None
+        return self.get_session(sessions[0].session_id)
+
     def update_session_title(self, session_id: str, title: str) -> Optional[SessionSnapshot]:
         snapshot = self.get_session(session_id)
         if snapshot is None:
@@ -235,6 +256,60 @@ class SessionStore:
             return active
         self._upsert_session(snapshot, set_active=False, touch=False)
         return snapshot
+
+    def delete_session(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+
+        self._ensure_index_initialized()
+        payload = self._load_index_payload()
+        sessions = payload.get("sessions", [])
+
+        remaining_raw: list[dict] = []
+        removed_any = False
+        for raw in sessions:
+            snapshot = self._coerce_snapshot(raw)
+            if snapshot is None:
+                continue
+            if snapshot.session_id == session_id:
+                removed_any = True
+                continue
+            remaining_raw.append(asdict(snapshot))
+
+        if not removed_any:
+            return False
+
+        payload["sessions"] = remaining_raw
+        remaining_snapshots = [snapshot for snapshot in (self._coerce_snapshot(raw) for raw in remaining_raw) if snapshot is not None]
+        remaining_snapshots.sort(
+            key=lambda snapshot: (snapshot.updated_at, snapshot.created_at, snapshot.session_id),
+            reverse=True,
+        )
+
+        active_map = {
+            project: sid
+            for project, sid in dict(payload.get("active_session_by_project", {})).items()
+            if str(sid) != session_id
+        }
+        payload["active_session_by_project"] = active_map
+
+        if str(payload.get("last_active_session_id") or "") == session_id:
+            payload["last_active_session_id"] = remaining_snapshots[0].session_id if remaining_snapshots else ""
+
+        self._save_index_payload(payload)
+
+        active_snapshot = self._load_active_session_file()
+        if active_snapshot is not None and active_snapshot.session_id == session_id:
+            replacement = remaining_snapshots[0] if remaining_snapshots else None
+            if replacement is not None:
+                self._write_json(self.path, asdict(replacement))
+            else:
+                try:
+                    self.path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        return True
 
     def new_session(
         self,

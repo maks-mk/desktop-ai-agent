@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QFrame, QToolBar
 
-import agent_cli
+import main as agent_cli
 from core.gui_runtime import build_runtime_snapshot, summarize_approval_request
 from core.stream_processor import StreamEvent
 from core.tool_policy import ToolMetadata
@@ -69,6 +69,7 @@ class FakeController(QObject):
         self.resume_calls: list[tuple[bool, bool]] = []
         self.new_session_calls = 0
         self.switch_session_calls: list[str] = []
+        self.delete_session_calls: list[str] = []
         self.reinitialize_calls: list[bool] = []
         self.shutdown_calls = 0
         self.initialize_calls = 0
@@ -87,6 +88,9 @@ class FakeController(QObject):
 
     def switch_session(self, session_id: str):
         self.switch_session_calls.append(session_id)
+
+    def delete_session(self, session_id: str):
+        self.delete_session_calls.append(session_id)
 
     def reinitialize(self, force_new_session: bool = False):
         self.reinitialize_calls.append(force_new_session)
@@ -459,6 +463,24 @@ class GuiUxTests(unittest.TestCase):
         self.window.sidebar._emit_clicked_session(index)
 
         self.assertEqual(self.controller.switch_session_calls, ["session-older"])
+
+    def test_delete_session_requests_controller_after_confirmation(self):
+        payload = self._snapshot_payload()
+        self.window._handle_initialized(payload)
+
+        with mock.patch.object(agent_cli.QMessageBox, "question", return_value=agent_cli.QMessageBox.Yes):
+            self.window._request_delete_session("session-older")
+
+        self.assertEqual(self.controller.delete_session_calls, ["session-older"])
+
+    def test_delete_session_is_cancelled_without_confirmation(self):
+        payload = self._snapshot_payload()
+        self.window._handle_initialized(payload)
+
+        with mock.patch.object(agent_cli.QMessageBox, "question", return_value=agent_cli.QMessageBox.No):
+            self.window._request_delete_session("session-older")
+
+        self.assertEqual(self.controller.delete_session_calls, [])
 
     def test_menu_bar_uses_corner_buttons_and_compact_composer(self):
         self.assertEqual(self.window.send_button.text(), "")

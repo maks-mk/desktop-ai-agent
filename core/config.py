@@ -69,6 +69,7 @@ class AgentConfig(BaseSettings):
         env_file=_env_file_candidates(),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Paths
@@ -107,6 +108,12 @@ class AgentConfig(BaseSettings):
     # Common Logic
     temperature: float = Field(default=0.2, alias="TEMPERATURE")
     max_loops: int = Field(default=50, alias="MAX_LOOPS", description="Limit steps per request")
+    critic_mode: Literal["hybrid", "always", "off"] = Field(default="hybrid", alias="CRITIC_MODE")
+    critic_max_retries_per_turn: int = Field(
+        default=1,
+        alias="CRITIC_MAX_RETRIES_PER_TURN",
+        description="Max critic-triggered retries in the same user turn",
+    )
     tool_loop_window: Optional[int] = Field(default=None, alias="TOOL_LOOP_WINDOW")
     tool_loop_limit_mutating: Optional[int] = Field(default=None, alias="TOOL_LOOP_LIMIT_MUTATING")
     tool_loop_limit_readonly: Optional[int] = Field(default=None, alias="TOOL_LOOP_LIMIT_READONLY")
@@ -208,6 +215,27 @@ class AgentConfig(BaseSettings):
             return 1
         if value > 10000:
             return 10000
+        return value
+
+    @field_validator("critic_mode", mode="before")
+    @classmethod
+    def normalize_critic_mode(cls, v: str) -> str:
+        value = str(v or "hybrid").strip().lower()
+        if value not in {"hybrid", "always", "off"}:
+            return "hybrid"
+        return value
+
+    @field_validator("critic_max_retries_per_turn", mode="before")
+    @classmethod
+    def parse_critic_max_retries_per_turn(cls, v: Union[int, float, str]) -> int:
+        try:
+            value = int(float(v))
+        except (TypeError, ValueError):
+            return 1
+        if value < 0:
+            return 0
+        if value > 100:
+            return 100
         return value
 
     @field_validator("checkpoint_backend", mode="before")

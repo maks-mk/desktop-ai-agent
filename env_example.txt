@@ -32,6 +32,13 @@ GEMINI_MODEL=gemini-1.5-flash
 # ===========================
 TEMPERATURE=0.2
 MAX_LOOPS=50
+# Critic routing mode:
+# - hybrid: run critic only for tool/result-risk branches (recommended)
+# - always: run critic after every non-tool assistant answer
+# - off: disable critic node usage
+CRITIC_MODE=hybrid
+# Max number of critic-triggered retries inside one user turn.
+CRITIC_MAX_RETRIES_PER_TURN=1
 # Optional: перезаписать настройки per-tool loop guard.
 # Если оставить пустыми, значения вычисляются от MAX_LOOPS:
 # mutating = max(3, min(8, MAX_LOOPS // 10))

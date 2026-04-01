@@ -19,6 +19,7 @@ from core.config import AgentConfig
 from core.constants import AGENT_VERSION
 from core.logging_config import setup_logging
 from core.message_utils import is_tool_message_error, stringify_content
+from core.run_logger import JsonlRunLogger
 from core.session_store import (
     DEFAULT_CHAT_TITLE,
     SessionListEntry,
@@ -79,6 +80,9 @@ def build_initial_state(user_input: str, session_id: str, safety_mode: str = "de
         "turn_id": 1,
         "pending_approval": None,
         "open_tool_issue": None,
+        "has_protocol_error": False,
+        "critic_retry_count": 0,
+        "critic_last_retry_fingerprint": "",
         "last_tool_error": "",
         "last_tool_result": "",
         "safety_mode": safety_mode,
@@ -482,6 +486,7 @@ class AgentRunWorker(QObject):
         self.agent_app = None
         self.tool_registry = None
         self.current_session: SessionSnapshot | None = None
+        self.ui_run_logger: JsonlRunLogger | None = None
         self._is_busy = False
         self._awaiting_approval = False
 
@@ -518,30 +523,62 @@ class AgentRunWorker(QObject):
     def _current_project_path(self) -> str:
         return normalize_project_path(Path.cwd())
 
-    def _select_session_for_project(self, *, force_new_session: bool = False) -> SessionSnapshot:
+    @staticmethod
+    def _project_path_is_valid(project_path: str | Path | None) -> bool:
+        if not project_path:
+            return False
+        path = Path(str(project_path))
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return False
+        return resolved.exists() and resolved.is_dir()
+
+    def _create_new_session_for_project(self, project_path: str, *, with_project_label: bool = False) -> SessionSnapshot:
         checkpoint_info = self.tool_registry.checkpoint_info
-        project_path = self._current_project_path()
-        if force_new_session:
-            return self.store.new_session(
-                checkpoint_backend=checkpoint_info.get("resolved_backend", self.config.checkpoint_backend),
-                checkpoint_target=checkpoint_info.get("target", "unknown"),
-                project_path=project_path,
-                title=append_project_label(CHAT_TITLE_FALLBACK, project_path),
-            )
-
-        active_session = self.store.load_active_session()
-        if active_session is not None and normalize_project_path(active_session.project_path) == project_path:
-            return active_session
-
-        existing = self.store.get_active_session_for_project(project_path)
-        if existing is not None:
-            return existing
-
+        title = append_project_label(CHAT_TITLE_FALLBACK, project_path) if with_project_label else CHAT_TITLE_FALLBACK
         return self.store.new_session(
             checkpoint_backend=checkpoint_info.get("resolved_backend", self.config.checkpoint_backend),
             checkpoint_target=checkpoint_info.get("target", "unknown"),
             project_path=project_path,
+            title=title,
         )
+
+    def _sync_tool_registry_workdir(self, target_project_path: str) -> None:
+        sync_fn = getattr(self.tool_registry, "sync_working_directory", None)
+        if callable(sync_fn):
+            sync_fn(target_project_path)
+
+    def _select_session_for_project(self, *, force_new_session: bool = False) -> SessionSnapshot:
+        project_path = self._current_project_path()
+        if force_new_session:
+            return self._create_new_session_for_project(project_path, with_project_label=True)
+
+        seen_ids: set[str] = set()
+        candidates: list[SessionSnapshot] = []
+
+        last_active = self.store.get_last_active_session()
+        if last_active is not None and last_active.session_id not in seen_ids:
+            candidates.append(last_active)
+            seen_ids.add(last_active.session_id)
+
+        project_active = self.store.get_active_session_for_project(project_path)
+        if project_active is not None and project_active.session_id not in seen_ids:
+            candidates.append(project_active)
+            seen_ids.add(project_active.session_id)
+
+        all_sessions = self.store.list_sessions()
+        if all_sessions:
+            newest = self.store.get_session(all_sessions[0].session_id)
+            if newest is not None and newest.session_id not in seen_ids:
+                candidates.append(newest)
+                seen_ids.add(newest.session_id)
+
+        for candidate in candidates:
+            if self._project_path_is_valid(candidate.project_path):
+                return candidate
+
+        return self._create_new_session_for_project(project_path, with_project_label=True)
 
     def _maybe_set_session_title(self, user_text: str) -> bool:
         if not self.current_session:
@@ -571,14 +608,34 @@ class AgentRunWorker(QObject):
         self.session_changed.emit(payload)
         return payload
 
-    async def _repair_current_session_if_needed(self) -> None:
-        await repair_session_if_needed(
+    async def _repair_current_session_if_needed(self) -> list[str]:
+        notices = await repair_session_if_needed(
             self.agent_app,
             self.current_session.thread_id,
             notifier=lambda message: self.event_emitted.emit(
                 StreamEvent("summary_notice", {"message": message, "kind": "session_repair"})
             ),
         )
+        return notices
+
+    def _log_ui_run_event(self, event_type: str, **payload: Any) -> None:
+        if not self.ui_run_logger or not self.current_session:
+            return
+        normalized_payload = dict(payload)
+        normalized_payload.pop("session_id", None)
+        try:
+            self.ui_run_logger.log_event(self.current_session.session_id, event_type, **normalized_payload)
+        except Exception:
+            logger.debug("Failed to write UI run event '%s'", event_type, exc_info=True)
+
+    def _emit_stream_event(self, event: StreamEvent) -> None:
+        self.event_emitted.emit(event)
+        if event.type in {"tool_args_missing"}:
+            self._log_ui_run_event(
+                event.type,
+                thread_id=getattr(self.current_session, "thread_id", ""),
+                **dict(event.payload or {}),
+            )
 
     @Slot()
     def initialize(self) -> None:
@@ -606,21 +663,32 @@ class AgentRunWorker(QObject):
 
     async def _initialize_async(self, force_new_session: bool = False) -> None:
         self.config = setup_runtime()
+        self.ui_run_logger = JsonlRunLogger(self.config.run_log_dir)
         self.store = SessionStore(self.config.session_state_path)
         self.agent_app, self.tool_registry = await build_agent_app(self.config)
         self.current_session = self._select_session_for_project(force_new_session=force_new_session)
+        if not self._project_path_is_valid(self.current_session.project_path):
+            fallback_project = self._current_project_path()
+            self._log_ui_run_event(
+                "session_restore_fallback",
+                reason="invalid_project_path",
+                invalid_project_path=str(self.current_session.project_path),
+                fallback_project_path=fallback_project,
+            )
+            self.current_session = self._create_new_session_for_project(
+                fallback_project,
+                with_project_label=True,
+            )
+        target_project_path = normalize_project_path(self.current_session.project_path)
+        if normalize_project_path(Path.cwd()) != target_project_path:
+            os.chdir(target_project_path)
+        self._sync_tool_registry_workdir(target_project_path)
         self.current_session.approval_mode = normalize_approval_mode(
             getattr(self.current_session, "approval_mode", APPROVAL_MODE_PROMPT)
         )
         self.store.save_active_session(self.current_session, touch=False, set_active=True)
 
-        await repair_session_if_needed(
-            self.agent_app,
-            self.current_session.thread_id,
-            notifier=lambda message: self.event_emitted.emit(
-                StreamEvent("summary_notice", {"message": message, "kind": "session_repair"})
-            ),
-        )
+        await self._repair_current_session_if_needed()
 
         payload = await build_ui_payload(
             self.config,
@@ -647,6 +715,12 @@ class AgentRunWorker(QObject):
             self._set_busy(False)
 
     async def _start_run_async(self, user_text: str) -> None:
+        repair_notices = await self._repair_current_session_if_needed()
+        if repair_notices:
+            self._log_ui_run_event(
+                "pre_run_session_repair",
+                repaired_count=len(repair_notices),
+            )
         self.event_emitted.emit(StreamEvent("run_started", {"text": user_text}))
         await self._run_graph_payload(build_initial_state(user_text, session_id=self.current_session.session_id))
 
@@ -659,7 +733,7 @@ class AgentRunWorker(QObject):
                     stream_mode=["messages", "updates"],
                     version="v2",  # required for stable StreamPart dict format and __interrupt__ behaviour
                 )
-                processor = StreamProcessor(self.event_emitted.emit)
+                processor = StreamProcessor(self._emit_stream_event)
                 result = await processor.process_stream(stream)
 
                 if result.interrupt is None:
@@ -725,6 +799,7 @@ class AgentRunWorker(QObject):
         )
         self.current_session.approval_mode = APPROVAL_MODE_PROMPT
         self.store.save_active_session(self.current_session, touch=False, set_active=True)
+        self._sync_tool_registry_workdir(self.current_session.project_path)
         self.event_emitted.emit(StreamEvent("chat_reset", {}))
         self._run(self._emit_session_payload(include_transcript=True))
 
@@ -738,12 +813,68 @@ class AgentRunWorker(QObject):
         self._run(self._switch_session_async(target))
 
     async def _switch_session_async(self, target: SessionSnapshot) -> None:
+        if not self._project_path_is_valid(target.project_path):
+            self._log_ui_run_event(
+                "session_switch_fallback",
+                reason="invalid_project_path",
+                invalid_project_path=str(target.project_path),
+                target_session_id=target.session_id,
+            )
+            fallback_project = self._current_project_path()
+            target = self._create_new_session_for_project(fallback_project, with_project_label=True)
+
         target_project_path = normalize_project_path(target.project_path)
         if normalize_project_path(Path.cwd()) != target_project_path:
             os.chdir(target_project_path)
+        self._sync_tool_registry_workdir(target_project_path)
         self.current_session = target
         self.current_session.approval_mode = normalize_approval_mode(self.current_session.approval_mode)
         self.store.save_active_session(self.current_session, touch=False, set_active=True)
+        await self._repair_current_session_if_needed()
+        self.event_emitted.emit(StreamEvent("chat_reset", {}))
+        await self._emit_session_payload(include_transcript=True)
+
+    @Slot(str)
+    def delete_session(self, session_id: str) -> None:
+        if not session_id or self._is_busy or self._awaiting_approval:
+            return
+        self._run(self._delete_session_async(session_id))
+
+    async def _delete_session_async(self, session_id: str) -> None:
+        if not self.store or not self.current_session:
+            return
+
+        deleted = self.store.delete_session(session_id)
+        if not deleted:
+            self.event_emitted.emit(
+                StreamEvent("summary_notice", {"message": "Чат не найден в истории.", "kind": "session_delete"})
+            )
+            return
+
+        active_deleted = self.current_session.session_id == session_id
+        self.event_emitted.emit(
+            StreamEvent("summary_notice", {"message": "Чат удалён из истории.", "kind": "session_delete"})
+        )
+
+        if not active_deleted:
+            self.store.save_active_session(self.current_session, touch=False, set_active=True)
+            await self._emit_session_payload(include_transcript=False)
+            return
+
+        replacement = self.store.get_last_active_session()
+        if replacement is None or not self._project_path_is_valid(replacement.project_path):
+            fallback_project = self._current_project_path()
+            replacement = self._create_new_session_for_project(fallback_project, with_project_label=True)
+
+        target_project_path = normalize_project_path(replacement.project_path)
+        if normalize_project_path(Path.cwd()) != target_project_path:
+            os.chdir(target_project_path)
+        self._sync_tool_registry_workdir(target_project_path)
+
+        self.current_session = replacement
+        self.current_session.approval_mode = normalize_approval_mode(self.current_session.approval_mode)
+        self.store.save_active_session(self.current_session, touch=False, set_active=True)
+
         await self._repair_current_session_if_needed()
         self.event_emitted.emit(StreamEvent("chat_reset", {}))
         await self._emit_session_payload(include_transcript=True)
@@ -760,6 +891,7 @@ class AgentRunWorker(QObject):
 
     async def _shutdown_async(self) -> None:
         await close_runtime_resources(self.tool_registry)
+        self.ui_run_logger = None
 
 
 class AgentRuntimeController(QObject):
@@ -776,6 +908,7 @@ class AgentRuntimeController(QObject):
     _resume_requested = Signal(bool, bool)
     _new_session_requested = Signal()
     _switch_session_requested = Signal(str)
+    _delete_session_requested = Signal(str)
     _reinitialize_requested = Signal(bool)
     _shutdown_requested = Signal()
 
@@ -792,6 +925,7 @@ class AgentRuntimeController(QObject):
         self._resume_requested.connect(self._worker.resume_approval)
         self._new_session_requested.connect(self._worker.new_session)
         self._switch_session_requested.connect(self._worker.switch_session)
+        self._delete_session_requested.connect(self._worker.delete_session)
         self._shutdown_requested.connect(self._worker.shutdown)
 
         self._worker.initialized.connect(self.initialized)
@@ -825,6 +959,9 @@ class AgentRuntimeController(QObject):
 
     def switch_session(self, session_id: str) -> None:
         self._switch_session_requested.emit(session_id)
+
+    def delete_session(self, session_id: str) -> None:
+        self._delete_session_requested.emit(session_id)
 
     def shutdown(self) -> None:
         if self._thread.isRunning():

@@ -108,6 +108,21 @@ class ToolRegistry:
         if self.config.mcp_config_path.exists():
             await self._load_mcp_tools()
 
+    def sync_working_directory(self, cwd: str | Path | None = None) -> None:
+        """Propagate runtime cwd to local tool modules that cache workspace roots."""
+        target_cwd = str(Path(cwd or Path.cwd()).resolve())
+        for module_name in ("tools.filesystem", "tools.local_shell", "tools.process_tools"):
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            setter = getattr(module, "set_working_directory", None)
+            if callable(setter):
+                try:
+                    setter(target_cwd)
+                except Exception:
+                    logger.debug("Failed to sync cwd for %s", module_name, exc_info=True)
+
     def _loader_specs(self) -> List[ToolLoaderSpec]:
         return [
             ToolLoaderSpec(

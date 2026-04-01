@@ -5,12 +5,14 @@ Tool names and imports stay stable while the implementation lives in smaller int
 
 import asyncio
 import logging
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiofiles
 import httpx
 from langchain_core.tools import tool
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from core.config import DEFAULT_MAX_FILE_SIZE
 from core.errors import ErrorType, format_error
@@ -28,6 +30,77 @@ def set_safety_policy(policy: SafetyPolicy):
 
 def set_working_directory(cwd: str):
     fs_manager.cwd = Path(cwd).resolve()
+
+
+_EDIT_FILE_ALIAS_MAP = {
+    "old_string": ("old_text", "search_text", "find_text", "target_text", "old", "before", "from"),
+    "new_string": ("new_text", "replace_text", "replacement", "replace_with", "new", "after", "to"),
+}
+
+
+def _cleanup_edit_path(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    text = text.strip("\"'")
+    text = text.splitlines()[0].strip()
+    text = re.sub(r"^(?:path|file_path|filepath)\s*[:=]\s*", "", text, flags=re.IGNORECASE)
+
+    # Defensive cleanup for malformed LLM arguments where browser UA lands in `path`.
+    for marker in (" Mozilla/", " AppleWebKit/", " Safari/", " Chrome/", " Firefox/", " Edg/"):
+        if marker in text:
+            text = text.split(marker, 1)[0].rstrip(" ,;")
+            break
+
+    return text or None
+
+
+class EditFileInput(BaseModel):
+    """Tolerant input schema for edit_file to reduce LLM argument-shape failures."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    path: str | None = Field(
+        default=None,
+        description="Path to the file to edit.",
+    )
+    old_string: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("old_string", *_EDIT_FILE_ALIAS_MAP["old_string"]),
+        description="Exact old text block to replace.",
+    )
+    new_string: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("new_string", *_EDIT_FILE_ALIAS_MAP["new_string"]),
+        description="Replacement text block.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+
+        for field_name, aliases in _EDIT_FILE_ALIAS_MAP.items():
+            if data.get(field_name) is not None:
+                continue
+            for alias in aliases:
+                if data.get(alias) is not None:
+                    data[field_name] = data[alias]
+                    break
+
+        data["path"] = _cleanup_edit_path(data.get("path"))
+
+        for key in ("old_string", "new_string"):
+            if data.get(key) is None:
+                continue
+            text = str(data[key]).replace("\r\n", "\n")
+            data[key] = text
+
+        return data
 
 
 @tool("file_info")
@@ -48,9 +121,21 @@ def write_file_tool(path: str, content: str) -> str:
     return fs_manager.write_file(path, content)
 
 
-@tool("edit_file")
-def edit_file_tool(path: str, old_string: str, new_string: str) -> str:
+@tool("edit_file", args_schema=EditFileInput)
+def edit_file_tool(path: str | None = None, old_string: str | None = None, new_string: str | None = None) -> str:
     """Replaces text in a file with exact-match and safe heuristic fallback modes."""
+    if not path:
+        return format_error(ErrorType.VALIDATION, "Missing required field: path.")
+    if old_string is None or not str(old_string).strip():
+        return format_error(
+            ErrorType.VALIDATION,
+            "Missing required field: old_string. Accepted aliases: old_text, search_text, find_text.",
+        )
+    if new_string is None:
+        return format_error(
+            ErrorType.VALIDATION,
+            "Missing required field: new_string. Accepted aliases: new_text, replace_text, replacement.",
+        )
     return fs_manager.edit_file(path, old_string, new_string)
 
 

@@ -79,6 +79,22 @@ def create_agent_workflow(
         workflow.add_node("approval", nodes.approval_node)
         workflow.add_node("tools", nodes.tools_node)
 
+    def should_run_critic_after_agent(state: AgentState) -> bool:
+        mode = str(getattr(config, "critic_mode", "hybrid") or "hybrid").strip().lower()
+        if mode == "always":
+            return True
+        if mode == "off":
+            return False
+        # Hybrid mode: run critic only for higher-risk branches.
+        critic_source = str(state.get("critic_source", "") or "").strip().lower()
+        if critic_source == "tools":
+            return True
+        if state.get("open_tool_issue"):
+            return True
+        if bool(state.get("has_protocol_error")):
+            return True
+        return False
+
     def route_after_agent(state: AgentState):
         steps = state.get("steps", 0)
 
@@ -98,7 +114,7 @@ def create_agent_workflow(
                 return "approval"
             return "tools"
 
-        return "critic"
+        return "critic" if should_run_critic_after_agent(state) else END
 
     def route_after_critic(state: AgentState):
         if state.get("turn_outcome") == "finish_turn":

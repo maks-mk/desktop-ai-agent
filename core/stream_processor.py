@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import time
@@ -204,15 +205,61 @@ class StreamProcessor:
         tool_id = tool_call.get("id")
         if not tool_id:
             return
+        existing = self.tool_buffer.get(tool_id, {})
+        existing_args = existing.get("args", {})
+        incoming_args = tool_call.get("args", {})
+        merged_args = self._merge_tool_args(existing_args, incoming_args)
+        tool_name = (
+            str(tool_call.get("name") or "").strip()
+            or str(existing.get("name") or "").strip()
+            or "unknown_tool"
+        )
         self.tool_buffer[tool_id] = {
-            "name": tool_call.get("name", "unknown_tool"),
-            "args": tool_call.get("args", {}),
+            "name": tool_name,
+            "args": merged_args,
         }
+
+    def _merge_tool_args(self, current_args: Any, incoming_args: Any) -> Dict[str, Any]:
+        current = dict(current_args) if isinstance(current_args, dict) else {}
+        incoming = dict(incoming_args) if isinstance(incoming_args, dict) else {}
+        if not incoming:
+            return current
+
+        merged = dict(current)
+        for key, value in incoming.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if not value.strip():
+                    continue
+                merged[key] = value
+                continue
+            if isinstance(value, dict):
+                base = merged.get(key)
+                merged[key] = self._merge_tool_args(base if isinstance(base, dict) else {}, value)
+                continue
+            if isinstance(value, list):
+                if not value:
+                    continue
+                merged[key] = value
+                continue
+            merged[key] = value
+
+        return merged
 
     def _emit_tool_started(self, tool_call: Dict[str, Any]) -> None:
         tool_id = tool_call.get("id")
         if not tool_id or tool_id in self.printed_tool_ids:
             return
+
+        tool_info = self.tool_buffer.get(tool_id, {})
+        tool_name = (
+            str(tool_call.get("name") or "").strip()
+            or str(tool_info.get("name") or "").strip()
+            or "unknown_tool"
+        )
+        tool_args = self._merge_tool_args(tool_info.get("args", {}), tool_call.get("args", {}))
+        self.tool_buffer[tool_id] = {"name": tool_name, "args": tool_args}
 
         self.tool_start_times[tool_id] = time.time()
         self.printed_tool_ids.add(tool_id)
@@ -222,23 +269,49 @@ class StreamProcessor:
             "tool_started",
             {
                 "tool_id": tool_id,
-                "name": tool_call.get("name", "unknown_tool"),
-                "args": tool_call.get("args", {}),
+                "name": tool_name,
+                "args": tool_args,
                 "display": format_tool_display(
-                    tool_call.get("name", "unknown_tool"),
-                    tool_call.get("args", {}),
+                    tool_name,
+                    tool_args,
                 ),
             },
         )
 
     def _handle_tool_result(self, message: ToolMessage) -> None:
-        tool_id = message.tool_call_id
+        tool_id = str(message.tool_call_id or "")
+        message_args = self._extract_tool_args_from_message(message)
+        if tool_id and message_args:
+            self._remember_tool_call(
+                {
+                    "id": tool_id,
+                    "name": str(message.name or "").strip() or "unknown_tool",
+                    "args": message_args,
+                }
+            )
         if tool_id in self.tool_buffer and tool_id not in self.printed_tool_ids:
             self._emit_tool_started({"id": tool_id, **self.tool_buffer[tool_id]})
 
+        tool_info = self.tool_buffer.get(tool_id, {})
+        tool_name = (
+            str(tool_info.get("name") or "").strip()
+            or str(message.name or "").strip()
+            or "unknown_tool"
+        )
+        tool_args = self._merge_tool_args(tool_info.get("args", {}), message_args)
+        if not tool_args:
+            self._emit(
+                "tool_args_missing",
+                {
+                    "tool_id": tool_id,
+                    "name": tool_name,
+                    "message": "No canonical tool args were available when tool result arrived.",
+                },
+            )
+
         content_str = stringify_content(message.content)
         is_error = is_tool_message_error(message)
-        summary = format_tool_output(message.name, content_str, is_error)
+        summary = format_tool_output(tool_name, content_str, is_error)
 
         elapsed = None
         start_time = self.tool_start_times.pop(tool_id, None)
@@ -248,7 +321,9 @@ class StreamProcessor:
         diff_blocks = [match.group(1).strip() for match in DIFF_REGEX.finditer(content_str)]
         payload = {
             "tool_id": tool_id,
-            "name": message.name,
+            "name": tool_name,
+            "args": tool_args,
+            "display": format_tool_display(tool_name, tool_args),
             "content": content_str,
             "summary": summary,
             "is_error": is_error,
@@ -257,11 +332,39 @@ class StreamProcessor:
             "diff_blocks": diff_blocks,
         }
         self._emit("tool_finished", payload)
+        if tool_id:
+            self.tool_buffer.pop(tool_id, None)
         if diff_blocks:
             self._emit("tool_diff", {"tool_id": tool_id, "diff": diff_blocks[0], "diff_blocks": diff_blocks})
 
         self.active_node = "agent"
         self._emit_status(force=True)
+
+    @staticmethod
+    def _extract_tool_args_from_message(message: ToolMessage) -> Dict[str, Any]:
+        metadata = getattr(message, "additional_kwargs", {}) or {}
+        candidates = []
+        if isinstance(metadata, dict):
+            candidates.append(metadata.get("tool_args"))
+            candidates.append(metadata.get("args"))
+            tool_call_obj = metadata.get("tool_call")
+            if isinstance(tool_call_obj, dict):
+                candidates.append(tool_call_obj.get("args"))
+
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return dict(candidate)
+            if isinstance(candidate, str):
+                raw = candidate.strip()
+                if not raw:
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
 
     def _status_label(self) -> str:
         node_labels = {
