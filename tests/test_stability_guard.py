@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.config import AgentConfig
 from core.nodes import AgentNodes
+from core.tool_policy import ToolMetadata
 from core.self_correction_engine import build_repair_plan
 
 
@@ -39,7 +40,7 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         defaults.update(overrides)
         return AgentConfig(**defaults)
 
-    def _build_nodes(self, **config_overrides) -> AgentNodes:
+    def _build_nodes(self, *, tool_metadata=None, **config_overrides) -> AgentNodes:
         config = self._make_config(**config_overrides)
         llm = _DummyLLM()
         tools = [
@@ -52,11 +53,28 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
             llm=llm,
             tools=tools,
             llm_with_tools=llm,
+            tool_metadata=tool_metadata,
         )
 
-    def test_hard_loop_ceiling_uses_effective_maximum_formula(self):
+    def test_hard_loop_ceiling_matches_max_loops(self):
         nodes = self._build_nodes(MAX_LOOPS=7, SELF_CORRECTION_HARD_CEILING=5)
-        self.assertEqual(nodes._hard_loop_ceiling(), 21)
+        self.assertEqual(nodes._hard_loop_ceiling(), 7)
+
+    def test_mutating_tools_require_approval(self):
+        nodes = self._build_nodes(
+            ENABLE_APPROVALS=True,
+            tool_metadata={
+                "edit_file": ToolMetadata(name="edit_file", mutating=True),
+                "write_file": ToolMetadata(name="write_file", mutating=True),
+            },
+        )
+        self.assertTrue(nodes._tool_requires_approval("edit_file", {"path": "demo.txt"}))
+        self.assertTrue(nodes._tool_requires_approval("write_file", {"path": "demo.txt"}))
+
+    def test_cli_exec_approval_depends_on_command_profile(self):
+        nodes = self._build_nodes(ENABLE_APPROVALS=True)
+        self.assertTrue(nodes._tool_requires_approval("cli_exec", {"command": "Copy-Item a.txt b.txt"}))
+        self.assertFalse(nodes._tool_requires_approval("cli_exec", {"command": "Get-ChildItem"}))
 
     @staticmethod
     def _base_state(task: str) -> dict:
@@ -179,7 +197,7 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["self_correction_retry_count"], 1)
         self.assertIn("read_file", str(result["recovery_state"]["strategy_queue"][0]["suggested_tool_name"]))
 
-    async def test_stability_guard_stops_on_repeated_fingerprint(self):
+    async def test_stability_guard_retries_on_repeated_fingerprint_before_loop_budget(self):
         nodes = self._build_nodes()
         state = self._base_state("проверь порт")
         state["open_tool_issue"] = {
@@ -210,13 +228,10 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         }
 
         result = await nodes.stability_guard_node(state)
-        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(result["turn_outcome"], "recover_agent")
         self.assertGreaterEqual(result["self_correction_retry_count"], 1)
-        self.assertIsNone(result["open_tool_issue"])
-        handoff_text = str(result["messages"][-1].content).lower()
-        self.assertIn("стагнац", handoff_text)
-        self.assertNotIn("prepared arguments", handoff_text)
-        self.assertNotIn("suggested next tool", handoff_text)
+        self.assertIsNotNone(result["open_tool_issue"])
+        self.assertTrue(result["recovery_state"]["strategy_queue"])
 
     async def test_stability_guard_stops_on_workspace_boundary_violation(self):
         nodes = self._build_nodes()
@@ -239,7 +254,7 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["open_tool_issue"])
         self.assertIn("рабоч", str(result["messages"][-1].content).lower())
 
-    async def test_stability_guard_pauses_on_repeated_identical_successful_tool_results(self):
+    async def test_stability_guard_continues_on_repeated_identical_successful_tool_results_before_loop_budget(self):
         nodes = self._build_nodes()
         tool_args = {"path": "demo.txt"}
         state = self._base_state("проверь файл")
@@ -255,15 +270,11 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await nodes.stability_guard_node(state)
 
-        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(result["turn_outcome"], "continue_agent")
         self.assertEqual(result["completion_reason"], "successful_tool_stagnation")
         self.assertEqual(result["successful_tool_repeat_count"], 3)
         self.assertEqual(result["successful_tool_name"], "read_file")
         self.assertIsNone(result["open_tool_issue"])
-        handoff_text = str(result["messages"][-1].content).lower()
-        self.assertIn("по кругу", handoff_text)
-        internal = result["messages"][-1].additional_kwargs["agent_internal"]
-        self.assertIn("пау", str(internal.get("ui_notice", "")).lower())
 
     async def test_stability_guard_loop_budget_handoff_uses_soft_specific_notice(self):
         nodes = self._build_nodes(MAX_LOOPS=2)

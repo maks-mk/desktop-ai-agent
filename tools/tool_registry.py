@@ -148,10 +148,10 @@ class ToolRegistry:
                     "file_info_tool": ToolMetadata(name="file_info", read_only=True),
                     "read_file_tool": ToolMetadata(name="read_file", read_only=True),
                     "write_file_tool": ToolMetadata(
-                        name="write_file", mutating=True
+                        name="write_file", mutating=True, requires_approval=True
                     ),
                     "edit_file_tool": ToolMetadata(
-                        name="edit_file", mutating=True
+                        name="edit_file", mutating=True, requires_approval=True
                     ),
                     "list_directory_tool": ToolMetadata(name="list_directory", read_only=True),
                     "safe_delete_file": ToolMetadata(
@@ -170,6 +170,7 @@ class ToolRegistry:
                         name="download_file",
                         mutating=True,
                         networked=True,
+                        requires_approval=True,
                     ),
                     "search_in_file_tool": ToolMetadata(name="search_in_file", read_only=True),
                     "search_in_directory_tool": ToolMetadata(
@@ -247,6 +248,7 @@ class ToolRegistry:
                     "run_background_process": ToolMetadata(
                         name="run_background_process",
                         mutating=True,
+                        requires_approval=True,
                     ),
                     "stop_background_process": ToolMetadata(
                         name="stop_background_process",

@@ -102,7 +102,15 @@ def build_initial_state(user_input: str, session_id: str, safety_mode: str = "de
 
 
 def build_graph_config(thread_id: str, max_loops: int) -> dict:
-    recursion_limit = max(12, max_loops * 6)
+    # LangGraph recursion_limit counts graph supersteps, not our logical `steps`.
+    # Keep this as a technical translation layer so MAX_LOOPS remains the only
+    # user-facing step budget enforced by the workflow state.
+    graph_supersteps_per_logical_step = 6
+    graph_superstep_overhead = 8
+    recursion_limit = max(
+        16,
+        int(max_loops or 0) * graph_supersteps_per_logical_step + graph_superstep_overhead,
+    )
     return {"configurable": {"thread_id": thread_id}, "recursion_limit": recursion_limit}
 
 

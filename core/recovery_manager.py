@@ -293,7 +293,7 @@ class RecoveryManager:
                 "drop_trailing_tool_call": True,
                 "next_open_tool_issue": None,
             }
-        elif loop_budget_reached and step_count >= hard_loop_ceiling:
+        elif loop_budget_reached:
             next_open_tool_issue = None
             next_recovery_state["external_blocker"] = {
                 "reason": "loop_budget_exhausted",
@@ -321,19 +321,10 @@ class RecoveryManager:
                 successful_tool_repeat_count = self._count_repeated_successful_tool_results(messages)
                 successful_tool_name = str(last_message.name or "").strip()
                 if successful_tool_repeat_count >= max(2, int(successful_tool_stagnation_limit or 0)):
-                    next_recovery_state["external_blocker"] = {
-                        "reason": "successful_tool_stagnation",
-                        "issue_summary": f"Repeated successful tool result for {successful_tool_name or 'tool'}",
-                    }
                     branch = {
                         "completion_reason": "successful_tool_stagnation",
-                        "turn_outcome": "finish_turn",
+                        "turn_outcome": "continue_agent",
                         "next_open_tool_issue": None,
-                        "handoff_message": self.build_successful_tool_stagnation_handoff_text(
-                            current_task,
-                            tool_name=successful_tool_name,
-                            repeat_count=successful_tool_repeat_count,
-                        ),
                     }
                 else:
                     branch = {
@@ -522,19 +513,12 @@ class RecoveryManager:
 
         next_recovery_state["active_issue"] = open_tool_issue
         next_recovery_state["active_strategy"] = None
-        next_recovery_state["strategy_queue"] = []
-        next_recovery_state["external_blocker"] = {
-            "reason": "recovery_stagnated",
-            "issue_summary": str(open_tool_issue.get("summary", "")),
-        }
+        next_recovery_state["strategy_queue"] = [strategy_payload]
+        next_recovery_state["external_blocker"] = None
         return {
-            "completion_reason": "recovery_stagnated",
-            "turn_outcome": "finish_turn",
-            "next_open_tool_issue": None,
-            "handoff_message": self.build_tool_issue_handoff_text(
-                open_tool_issue,
-                repair_plan=repair_plan,
-            ),
+            "completion_reason": f"recover_{repair_plan.strategy}",
+            "turn_outcome": "recover_agent",
+            "next_open_tool_issue": open_tool_issue,
             "next_retry_count": max(int(value or 0) for value in attempts_by_strategy.values()),
             "next_fingerprint_history": list(progress_markers),
         }

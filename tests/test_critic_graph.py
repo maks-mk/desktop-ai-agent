@@ -9,6 +9,7 @@ from agent import create_agent_workflow
 from core.config import AgentConfig
 from core.nodes import AgentNodes
 from core.tool_policy import ToolMetadata
+from ui.runtime import build_graph_config
 
 
 class FakeLLM:
@@ -212,7 +213,8 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(agent_llm.invocations), 1)
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertIsNone(result["open_tool_issue"])
-        self.assertIn("could not complete the task", str(result["messages"][-1].content).lower())
+        self.assertEqual(result["steps"], 8)
+        self.assertIn("boom", str(result["messages"][-1].content).lower())
 
     async def test_read_only_cli_probe_failure_returns_to_agent_instead_of_handoff(self):
         cli_tool = FakeTool(
@@ -275,7 +277,8 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(agent_llm.invocations), 1)
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertIsNone(result["open_tool_issue"])
-        self.assertIn("find_file", str(result["messages"][-1].content).lower())
+        self.assertEqual(result["steps"], 8)
+        self.assertIn("missing required field", str(result["messages"][-1].content).lower())
 
     async def test_edit_file_match_failure_returns_to_agent_and_allows_alternate_tool_path(self):
         def _edit_result(args):
@@ -470,7 +473,38 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent_llm.invocations), 1)
         self.assertEqual(resumed["turn_outcome"], "finish_turn")
         self.assertIsNone(resumed["open_tool_issue"])
-        self.assertIn("you chose no", str(resumed["messages"][-1].content).lower())
+        self.assertIn("отклонили", str(resumed["messages"][-1].content).lower())
+
+    async def test_mutating_tool_interrupts_and_executes_only_after_approval(self):
+        tool = FakeTool("edit_file", "Success: updated")
+        app, agent_llm = self._build_app(
+            agent_responses=[
+                AIMessage(content="", tool_calls=[{"name": "edit_file", "args": {"path": "demo.txt"}, "id": "tc-e1"}]),
+                AIMessage(content="Готово."),
+            ],
+            tools=[tool],
+            enable_approvals=True,
+            tool_metadata={
+                "edit_file": ToolMetadata(
+                    name="edit_file",
+                    mutating=True,
+                )
+            },
+        )
+
+        thread_config = {"configurable": {"thread_id": "approval-approve-thread"}, "recursion_limit": 36}
+        interrupted = await app.ainvoke(self._initial_state("Сделай изменение"), config=thread_config)
+
+        self.assertIn("__interrupt__", interrupted)
+        self.assertEqual(tool.calls, [])
+
+        resumed = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
+
+        self.assertEqual(tool.calls, [{"path": "demo.txt"}])
+        self.assertEqual(len(agent_llm.invocations), 2)
+        self.assertEqual(resumed["turn_outcome"], "finish_turn")
+        self.assertIsNone(resumed["open_tool_issue"])
+        self.assertIn("готово", str(resumed["messages"][-1].content).lower())
 
     async def test_provider_safe_order_is_kept_during_internal_retry(self):
         cli_tool = FakeTool(
@@ -565,11 +599,18 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.calls, [])
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertIsNone(result["open_tool_issue"])
+        self.assertEqual(result["steps"], 1)
 
         messages = result.get("messages", [])
         self.assertTrue(messages)
-        self.assertIn("hard limit for internal steps", str(messages[-1].content).lower())
+        self.assertIn("лимит", str(messages[-1].content).lower())
         self.assertFalse(any(isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) for msg in messages))
+
+    def test_build_graph_config_keeps_recursion_limit_as_technical_overhead(self):
+        config = build_graph_config("thread-1", 50)
+        self.assertEqual(config["configurable"]["thread_id"], "thread-1")
+        self.assertGreater(config["recursion_limit"], 50)
+        self.assertEqual(config["recursion_limit"], 308)
 
     def test_workflow_routes_update_step_to_agent_without_selector(self):
         config = self._make_config()

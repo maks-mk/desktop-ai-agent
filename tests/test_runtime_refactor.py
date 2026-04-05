@@ -183,7 +183,14 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             saved_state = await app2.aget_state({"configurable": {"thread_id": "persist-thread"}})
             saved_messages = saved_state.values["messages"]
             self.assertTrue(any(isinstance(msg, HumanMessage) and msg.content == "Первая задача" for msg in saved_messages))
-            self.assertTrue(any(isinstance(msg, AIMessage) and msg.content == "Первый ответ." for msg in saved_messages))
+            self.assertTrue(
+                any(
+                    isinstance(msg, AIMessage)
+                    and "STATUS: FINISHED" in str(msg.content)
+                    and "REASON: ok" in str(msg.content)
+                    for msg in saved_messages
+                )
+            )
         finally:
             await runtime2.aclose()
 
@@ -349,7 +356,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.calls, [{"command": "git status"}])
         self.assertEqual(resumed["messages"][-1].content, "MCP команда выполнена после подтверждения.")
 
-    async def test_regular_edit_runs_without_approval_interrupt(self):
+    async def test_regular_edit_requires_resume_before_execution(self):
         config = self._make_config(ENABLE_APPROVALS=True)
         tool = FakeTool("edit_file", "Success: File edited.")
         nodes = AgentNodes(
@@ -372,17 +379,23 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
         app = create_agent_workflow(nodes, config, tools_enabled=True).compile(checkpointer=MemorySaver())
 
-        result = await app.ainvoke(
+        thread_config = {"configurable": {"thread_id": "plain-edit-approval"}, "recursion_limit": 36}
+
+        interrupted = await app.ainvoke(
             self._initial_state("Исправь файл"),
-            config={"configurable": {"thread_id": "plain-edit-no-approval"}, "recursion_limit": 36},
+            config=thread_config,
         )
 
-        self.assertNotIn("__interrupt__", result)
-        self.assertEqual(tool.calls, [{"path": "demo.txt", "old_string": "a", "new_string": "b"}])
-        self.assertEqual(result["turn_outcome"], "finish_turn")
-        self.assertIn("без дополнительного approval", str(result["messages"][-1].content).lower())
+        self.assertIn("__interrupt__", interrupted)
+        self.assertEqual(tool.calls, [])
 
-    async def test_mutating_non_destructive_tool_error_enters_recovery_without_approval(self):
+        resumed = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
+
+        self.assertEqual(tool.calls, [{"path": "demo.txt", "old_string": "a", "new_string": "b"}])
+        self.assertEqual(resumed["turn_outcome"], "finish_turn")
+        self.assertIn("без дополнительного approval", str(resumed["messages"][-1].content).lower())
+
+    async def test_mutating_non_destructive_tool_error_enters_recovery_after_approval(self):
         config = self._make_config(ENABLE_APPROVALS=True)
 
         def _edit_result(args):
@@ -411,12 +424,25 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
         app = create_agent_workflow(nodes, config, tools_enabled=True).compile(checkpointer=MemorySaver())
 
-        result = await app.ainvoke(
+        thread_config = {"configurable": {"thread_id": "mutating-recovery-approval"}, "recursion_limit": 64}
+
+        interrupted = await app.ainvoke(
             self._initial_state("Исправь файл"),
-            config={"configurable": {"thread_id": "mutating-recovery-no-approval"}, "recursion_limit": 64},
+            config=thread_config,
         )
 
-        self.assertNotIn("__interrupt__", result)
+        self.assertIn("__interrupt__", interrupted)
+        self.assertEqual(edit_tool.calls, [])
+        self.assertEqual(read_tool.calls, [])
+
+        second_interrupt = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
+
+        self.assertIn("__interrupt__", second_interrupt)
+        self.assertEqual(len(edit_tool.calls), 1)
+        self.assertEqual(len(read_tool.calls), 1)
+
+        result = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
+
         self.assertEqual(len(edit_tool.calls), 2)
         self.assertEqual(len(read_tool.calls), 1)
         self.assertEqual(result["turn_outcome"], "finish_turn")

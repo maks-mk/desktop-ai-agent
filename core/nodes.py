@@ -33,7 +33,7 @@ from core.tool_results import parse_tool_execution_result
 from core.utils import truncate_output
 from core.errors import format_error, ErrorType
 from core.message_context import MessageContextHelper
-from core.policy_engine import PolicyEngine, classify_shell_command
+from core.policy_engine import PolicyEngine, classify_shell_command, shell_command_requires_approval, tool_requires_approval
 from core.message_utils import compact_text, is_error_text, stringify_content
 from core.self_correction_engine import RepairPlan, build_repair_plan, normalize_tool_args, repair_fingerprint
 from core.text_utils import format_exception_friendly
@@ -267,22 +267,26 @@ class AgentNodes:
             return metadata
 
         profile = classify_shell_command(command)
+        approval_required = shell_command_requires_approval(command)
+        inspect_only = bool(profile.get("inspect_only") and not profile.get("long_running_service"))
         return ToolMetadata(
             name=metadata.name,
-            read_only=metadata.read_only,
-            mutating=bool(metadata.mutating or profile.get("mutating") or profile.get("long_running_service")),
-            destructive=bool(metadata.destructive or profile.get("destructive")),
-            requires_approval=bool(metadata.requires_approval or profile.get("destructive")),
+            read_only=inspect_only,
+            mutating=bool(profile.get("mutating") or profile.get("long_running_service")),
+            destructive=bool(profile.get("destructive")),
+            requires_approval=approval_required,
             networked=bool(metadata.networked or profile.get("network_diagnostic") or profile.get("http_probe")),
             source=metadata.source,
         )
 
     def _tool_requires_approval(self, tool_name: str, tool_args: Dict[str, Any] | None = None) -> bool:
-        """Approval gate: only destructive/HITL actions should interrupt the graph."""
-        if not self.config.enable_approvals:
-            return False
         metadata = self._effective_tool_metadata(tool_name, tool_args)
-        return metadata.requires_approval or metadata.destructive
+        return tool_requires_approval(
+            tool_name,
+            tool_args,
+            metadata=metadata,
+            approvals_enabled=self.config.enable_approvals,
+        )
 
     def _tool_error_requires_recovery_gate(
         self,
@@ -935,10 +939,7 @@ class AgentNodes:
             raise
 
     def _hard_loop_ceiling(self) -> int:
-        return max(
-            int(self.config.max_loops or 0) * 3,
-            int(self.config.self_correction_hard_ceiling or 0) * 2,
-        )
+        return max(1, int(self.config.max_loops or 1))
 
     def _handle_pending_tool_budget_exhaustion(
         self,

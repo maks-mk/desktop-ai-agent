@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List
 from langchain_core.messages import BaseMessage
 
 from core.message_context import IsInternalRetry
+from core.tool_policy import ToolMetadata
 
 
 _INSPECT_ONLY_COMMAND_PATTERNS = (
@@ -138,6 +139,42 @@ def classify_shell_command(command: str) -> Dict[str, Any]:
         "network_diagnostic": is_network_diagnostic,
         "http_probe": _is_http_probe_command(normalized),
     }
+
+
+def shell_command_requires_approval(command: str) -> bool:
+    profile = classify_shell_command(command)
+    if profile.get("inspect_only") and not profile.get("long_running_service"):
+        return False
+    return bool(
+        profile.get("mutating")
+        or profile.get("destructive")
+        or profile.get("long_running_service")
+    )
+
+
+def tool_requires_approval(
+    tool_name: str,
+    tool_args: Dict[str, Any] | None = None,
+    *,
+    metadata: ToolMetadata | None = None,
+    approvals_enabled: bool = True,
+) -> bool:
+    if not approvals_enabled:
+        return False
+
+    normalized_name = str(tool_name or "").strip().lower()
+    effective_metadata = metadata or ToolMetadata(name=str(tool_name or "unknown_tool"))
+    if normalized_name == "cli_exec":
+        command = str(((tool_args or {}).get("command")) or "").strip()
+        if not command:
+            return True
+        return shell_command_requires_approval(command)
+
+    return bool(
+        effective_metadata.requires_approval
+        or effective_metadata.destructive
+        or effective_metadata.mutating
+    )
 
 
 class PolicyEngine:
