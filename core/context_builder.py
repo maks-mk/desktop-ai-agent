@@ -198,6 +198,75 @@ class ContextBuilder:
             )
         return sanitized
 
+    def detect_tool_history_mismatch(
+        self,
+        messages: List[BaseMessage],
+    ) -> Dict[str, Any] | None:
+        pending_calls: Dict[str, Dict[str, Any]] = {}
+        pending_order: List[str] = []
+        duplicate_ids: List[str] = []
+        orphan_tool_results: List[str] = []
+        pending_interleaving: List[str] = []
+
+        for message in messages:
+            if isinstance(message, HumanMessage):
+                if self._is_internal_retry(message):
+                    continue
+                if pending_calls:
+                    pending_interleaving.append("human_before_tool_result")
+                continue
+
+            if isinstance(message, ToolMessage):
+                tool_call_id = str(message.tool_call_id or "").strip()
+                if not tool_call_id:
+                    orphan_tool_results.append("<missing>")
+                    continue
+                if tool_call_id in pending_calls:
+                    pending_calls.pop(tool_call_id, None)
+                    pending_order = [item for item in pending_order if item != tool_call_id]
+                else:
+                    orphan_tool_results.append(tool_call_id)
+                continue
+
+            if not isinstance(message, (AIMessage, AIMessageChunk)):
+                continue
+
+            tool_calls = list(getattr(message, "tool_calls", []) or [])
+            if not tool_calls:
+                if pending_calls:
+                    pending_interleaving.append("assistant_before_tool_result")
+                continue
+
+            if pending_calls:
+                pending_interleaving.append("tool_call_before_previous_tool_result")
+
+            for tool_call in tool_calls:
+                tool_call_id = str(tool_call.get("id") or "").strip()
+                tool_name = str(tool_call.get("name") or "").strip()
+                tool_args = dict(tool_call.get("args") or {}) if isinstance(tool_call.get("args"), dict) else {}
+                if not tool_call_id or not tool_name:
+                    continue
+                if tool_call_id in pending_calls:
+                    duplicate_ids.append(tool_call_id)
+                pending_calls[tool_call_id] = {
+                    "id": tool_call_id,
+                    "name": tool_name,
+                    "args": tool_args,
+                }
+                if tool_call_id not in pending_order:
+                    pending_order.append(tool_call_id)
+
+        unresolved_calls = [pending_calls[tool_call_id] for tool_call_id in pending_order if tool_call_id in pending_calls]
+        if not unresolved_calls and not duplicate_ids and not orphan_tool_results and not pending_interleaving:
+            return None
+
+        return {
+            "pending_tool_calls": unresolved_calls,
+            "duplicate_tool_call_ids": duplicate_ids,
+            "orphan_tool_results": orphan_tool_results,
+            "interleaving_markers": pending_interleaving,
+        }
+
     def normalize_system_prefix(self, context: List[BaseMessage]) -> List[BaseMessage]:
         system_messages: List[BaseMessage] = []
         non_system_messages: List[BaseMessage] = []
@@ -285,7 +354,10 @@ class ContextBuilder:
             return ""
         overlay_lines: List[str] = []
         overlay_lines.append(
-            "MANDATORY: Before every tool call, write 1-2 short plain-text sentences describing your immediate action."
+            "TOOL MODE: Before every tool call, write one short sentence stating your immediate intention."
+        )
+        overlay_lines.append(
+            "TOOL MODE: When a concrete action requires tools, write that short intention and then emit a valid structured tool call instead of only describing the action in prose."
         )
         overlay_lines.append(
             "SAFETY POLICY: Any write, delete, move, or process-launch working directory must stay inside the active workspace."

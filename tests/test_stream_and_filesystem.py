@@ -61,6 +61,27 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("package main", rendered)
         self.assertIn("fmt.Println", rendered)
 
+    def test_prepare_markdown_normalizes_simple_latex_symbols(self):
+        source = (
+            'При загрузке страницы звук не инициализируется $\\rightarrow$ браузер не ругается.\n'
+            'При нажатии на «СТАРТ» $\\Rightarrow$ звук активируется.'
+        )
+
+        rendered = prepare_markdown_for_render(source)
+
+        self.assertIn("→", rendered)
+        self.assertIn("⇒", rendered)
+        self.assertNotIn("$\\rightarrow$", rendered)
+        self.assertNotIn("$\\Rightarrow$", rendered)
+
+    def test_prepare_markdown_keeps_latex_symbols_literal_inside_code(self):
+        source = 'Текст `$\\\\rightarrow$` и блок:\n```text\n$\\\\Rightarrow$\n```'
+
+        rendered = prepare_markdown_for_render(source)
+
+        self.assertIn("`$\\\\rightarrow$`", rendered)
+        self.assertIn("```text\n$\\\\Rightarrow$\n```", rendered)
+
     def test_download_headers_request_binary_content(self):
         self.assertEqual(_DOWNLOAD_HEADERS["Accept"], "*/*")
 
@@ -192,6 +213,17 @@ class StreamAndFilesystemTests(unittest.TestCase):
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
         self.assertEqual(len(deltas), 1)
         self.assertIn("Автовыполнение остановлено", deltas[0]["full_text"])
+
+    def test_stream_processor_marks_stability_guard_as_self_correcting(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages((AIMessage(content=""), {"langgraph_node": "stability_guard"}))
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "stability_guard")
+        self.assertEqual(statuses[-1]["label"], "Self-correcting")
 
     def test_stream_processor_does_not_parse_choice_requests_from_plain_text(self):
         events = []
@@ -487,6 +519,52 @@ class StreamAndFilesystemTests(unittest.TestCase):
         result = manager.read_file("model_info.md, ", show_line_numbers=False)
 
         self.assertEqual(result, "hello")
+
+    def test_search_in_file_matches_plain_literal_substrings(self):
+        tmp = self._workspace_tempdir()
+        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
+        target = tmp / "script.js"
+        target.write_text(
+            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
+            encoding="utf-8",
+        )
+
+        result = manager.search_in_file("script.js", "resumeBtn.addEventListener")
+
+        self.assertIn("Found 1 match(es)", result)
+        self.assertIn('resumeBtn.addEventListener("click", playSound)', result)
+
+    def test_search_in_file_accepts_regex_escaped_literals_in_plain_mode(self):
+        tmp = self._workspace_tempdir()
+        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
+        target = tmp / "script.js"
+        target.write_text(
+            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
+            encoding="utf-8",
+        )
+
+        result = manager.search_in_file("script.js", r"playSound\(")
+        dotted = manager.search_in_file("script.js", r"resumeBtn\.addEventListener")
+
+        self.assertIn("Found 1 match(es)", result)
+        self.assertIn("function playSound() {}", result)
+        self.assertIn("Found 1 match(es)", dotted)
+        self.assertIn('resumeBtn.addEventListener("click", playSound)', dotted)
+
+    def test_search_in_directory_accepts_regex_escaped_literals_in_plain_mode(self):
+        tmp = self._workspace_tempdir()
+        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
+        nested = tmp / "src"
+        nested.mkdir()
+        (nested / "script.js").write_text(
+            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
+            encoding="utf-8",
+        )
+
+        result = manager.search_in_directory(".", r"resumeBtn\.addEventListener")
+
+        self.assertIn("Found 1 match(es)", result)
+        self.assertIn('script.js:2  resumeBtn.addEventListener("click", playSound)', result)
 
     def test_module_filesystem_switches_workspace_after_directory_change(self):
         first = self._workspace_tempdir()

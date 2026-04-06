@@ -9,7 +9,9 @@ _CLEAN_MD_RE = re.compile(r"\n{3,}")
 _CRAWL_PAGES_RE = re.compile(r"(\d+) pages processed")
 _CRAWL_DEPTH_RE = re.compile(r"max_depth: (\d+)")
 _FENCED_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _FILE_EXT_RE = re.compile(r"\.([a-z0-9]+)\b", re.IGNORECASE)
+_SIMPLE_LATEX_INLINE_RE = re.compile(r"\$\s*(\\[A-Za-z]+)\s*\$")
 
 # Matches Markdown links whose href is a local file path (not http/https/ftp/mailto).
 # Rich URL-encodes non-ASCII hrefs, which breaks Cyrillic filenames in output.
@@ -18,6 +20,61 @@ _LOCAL_LINK_RE = re.compile(
     r"\[([^\]]+)\]\((?!https?://|ftp://|mailto:)([^)]+)\)",
     re.IGNORECASE,
 )
+_SIMPLE_LATEX_SYMBOLS = {
+    r"\to": "→",
+    r"\rightarrow": "→",
+    r"\gets": "←",
+    r"\leftarrow": "←",
+    r"\leftrightarrow": "↔",
+    r"\Rightarrow": "⇒",
+    r"\Leftarrow": "⇐",
+    r"\Leftrightarrow": "⇔",
+    r"\uparrow": "↑",
+    r"\downarrow": "↓",
+    r"\ge": "≥",
+    r"\geq": "≥",
+    r"\le": "≤",
+    r"\leq": "≤",
+    r"\neq": "≠",
+    r"\pm": "±",
+    r"\times": "×",
+    r"\cdot": "·",
+    r"\approx": "≈",
+    r"\infty": "∞",
+}
+
+
+def _rewrite_outside_code(text: str, replacer: Callable[[str], str]) -> str:
+    parts: list[str] = []
+    last = 0
+    for block in _FENCED_BLOCK_RE.finditer(text):
+        parts.append(_rewrite_outside_inline_code(text[last:block.start()], replacer))
+        parts.append(block.group(0))
+        last = block.end()
+    parts.append(_rewrite_outside_inline_code(text[last:], replacer))
+    return "".join(parts)
+
+
+def _rewrite_outside_inline_code(text: str, replacer: Callable[[str], str]) -> str:
+    parts: list[str] = []
+    last = 0
+    for block in _INLINE_CODE_RE.finditer(text):
+        parts.append(replacer(text[last:block.start()]))
+        parts.append(block.group(0))
+        last = block.end()
+    parts.append(replacer(text[last:]))
+    return "".join(parts)
+
+
+def _normalize_simple_latex_inline(text: str) -> str:
+    def _replace_segment(segment: str) -> str:
+        def _replace_match(match: re.Match) -> str:
+            command = str(match.group(1) or "").strip()
+            return _SIMPLE_LATEX_SYMBOLS.get(command, match.group(0))
+
+        return _SIMPLE_LATEX_INLINE_RE.sub(_replace_match, segment)
+
+    return _rewrite_outside_code(text, _replace_segment)
 
 
 def _rewrite_local_file_links(text: str) -> str:
@@ -35,16 +92,7 @@ def _rewrite_local_file_links(text: str) -> str:
         # Otherwise emit: `href` (label)
         return f"`{href}` ({label})"
 
-    # Only rewrite outside fenced code blocks
-    parts: list[str] = []
-    last = 0
-    for block in _FENCED_BLOCK_RE.finditer(text):
-        segment = text[last:block.start()]
-        parts.append(_LOCAL_LINK_RE.sub(_replace, segment))
-        parts.append(block.group(0))
-        last = block.end()
-    parts.append(_LOCAL_LINK_RE.sub(_replace, text[last:]))
-    return "".join(parts)
+    return _rewrite_outside_code(text, lambda segment: _LOCAL_LINK_RE.sub(_replace, segment))
 
 _LANG_BY_EXTENSION = {
     "py": "python",
@@ -331,6 +379,7 @@ def normalize_markdown_code_blocks(text: str) -> str:
 
 
 def prepare_markdown_for_render(text: str) -> str:
+    text = _normalize_simple_latex_inline(text)
     text = _rewrite_local_file_links(text)
     return normalize_markdown_code_blocks(clean_markdown_text(text))
 

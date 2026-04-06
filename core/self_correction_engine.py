@@ -272,14 +272,16 @@ def build_repair_plan(
         return None
 
     tool_names = [str(name).strip() for name in (open_tool_issue.get("tool_names") or []) if str(name).strip()]
+    details = _issue_details(open_tool_issue)
+    protocol_reason = str(details.get("protocol_reason") or "").strip().lower()
     if not tool_names:
-        return None
+        fallback_tool_name = str(details.get("suggested_tool_name") or "unknown_tool").strip() or "unknown_tool"
+        tool_names = [fallback_tool_name]
     tool_name = tool_names[0]
 
     summary = str(open_tool_issue.get("summary") or "").strip()
     error_type = str(open_tool_issue.get("error_type") or "").strip().upper()
     original_args = _normalize_args_dict(open_tool_issue.get("tool_args") or {})
-    details = _issue_details(open_tool_issue)
     missing_fields = _missing_required_fields(details)
     patched_args, normalized_changes = normalize_tool_args(tool_name, original_args, current_task=current_task)
     fingerprint = str(open_tool_issue.get("fingerprint") or "").strip() or repair_fingerprint(
@@ -302,6 +304,42 @@ def build_repair_plan(
             max_auto_repairs=max_auto_repairs,
             terminal_reason="approval_denied",
             needs_external_input=True,
+        )
+
+    if issue_kind == "protocol_error":
+        guidance = (
+            "Rebuild the next step from repository state and issue a valid structured tool call. "
+            "Do not narrate intended actions as plain text."
+        )
+        notes = "Protocol mismatch detected."
+        if protocol_reason == "history_tool_mismatch":
+            notes = "Tool-call history is inconsistent. Resume from the last confirmed repository state."
+            guidance = (
+                "Do not continue from the broken tool chain. Inspect confirmed repository state and issue a fresh valid tool call."
+            )
+        elif protocol_reason == "action_requires_tools":
+            notes = "The task still requires tool-backed execution or verification."
+            guidance = (
+                "The user requested a concrete action or verifiable check. Continue with tools instead of ending with prose."
+            )
+        elif protocol_reason == "tool_not_allowed_for_turn":
+            notes = "The model requested a tool outside the active tool set."
+            guidance = (
+                "Use only currently allowed tools and emit one fresh valid tool call."
+            )
+        elif protocol_reason == "tool_protocol_error":
+            notes = "The model emitted malformed tool-calling payload."
+        return _repair_plan(
+            strategy="llm_replan",
+            reason=protocol_reason or "tool_protocol_error",
+            fingerprint=fingerprint,
+            tool_name=tool_name,
+            suggested_tool_name=tool_name,
+            original_args=original_args,
+            patched_args=original_args,
+            notes=notes,
+            max_auto_repairs=max_auto_repairs,
+            llm_guidance=guidance,
         )
 
     if bool(details.get("safety_violation")):

@@ -256,10 +256,10 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.transcript, 1)
 
         # ---- Bottom composer bar ----
-        composer_shell = QHBoxLayout()
-        composer_shell.setContentsMargins(0, 8, 0, 12)
-        composer_shell.setSpacing(0)
-        composer_shell.addStretch(1)
+        self.composer_shell = QHBoxLayout()
+        self.composer_shell.setContentsMargins(0, 18, 0, 12)
+        self.composer_shell.setSpacing(0)
+        self.composer_shell.addStretch(1)
 
         self.composer_container = QWidget()
         self.composer_container.setObjectName("CenteredComposerRow")
@@ -362,9 +362,9 @@ class MainWindow(QMainWindow):
         pill_layout.addLayout(control_row)
 
         outer_layout.addWidget(self.composer_pill)
-        composer_shell.addWidget(self.composer_container, 3)
-        composer_shell.addStretch(1)
-        right_layout.addLayout(composer_shell)
+        self.composer_shell.addWidget(self.composer_container, 3)
+        self.composer_shell.addStretch(1)
+        right_layout.addLayout(self.composer_shell)
 
         self.splitter.addWidget(self.sidebar_container)
         self.splitter.addWidget(right_panel)
@@ -462,6 +462,7 @@ class MainWindow(QMainWindow):
         self._summarize_in_progress = False
         if self.current_turn is not None:
             self.current_turn.set_status("Thinking")
+            self.transcript.notify_content_changed(force=True)
         self._set_status_visual("Thinking…", busy=True)
 
     def _on_status_changed(self, payload: dict) -> None:
@@ -471,15 +472,17 @@ class MainWindow(QMainWindow):
             return
 
         self._set_status_visual(label, busy=node != "approval")
+        transcript_changed = False
         if self.current_turn is not None:
             self.current_turn.set_status(label)
+            transcript_changed = True
             if node == "summarize":
                 self._summarize_in_progress = True
                 self.current_turn.set_summary_notice("Контекст автоматически сжимается…", level="info")
-                self.transcript.notify_content_changed()
             elif self._summarize_in_progress:
                 self._summarize_in_progress = False
                 self.current_turn.set_summary_notice("Контекст сжат", level="success")
+            if transcript_changed:
                 self.transcript.notify_content_changed()
 
     def _on_assistant_delta(self, payload: dict) -> None:
@@ -537,7 +540,11 @@ class MainWindow(QMainWindow):
     def _on_approval_resolved(self, payload: dict) -> None:
         if self.current_turn is None:
             return
+        auto_resolved = bool(payload.get("auto"))
         if payload.get("approved"):
+            if auto_resolved:
+                self.transcript.notify_content_changed()
+                return
             message = "Protected action approved."
             if payload.get("always"):
                 message = "Protected action approved for this and future actions in the current session."

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from core.message_context import IsInternalRetry
 from core.tool_policy import ToolMetadata
@@ -83,6 +83,114 @@ _HTTP_WRITE_FLAG_PATTERNS = (
     re.compile(r"(^|[\s;|&])-(?:d|f|t)\b", re.IGNORECASE),
     re.compile(r"--(?:data(?:-raw|-binary|-ascii|-urlencode)?|form|string|upload-file|json)\b", re.IGNORECASE),
 )
+_PATH_HINT_RE = re.compile(r"(?:[A-Za-z]:\\|[./~]|[\w\-]+\.[A-Za-z0-9]{1,8}\b)")
+_ACTION_KEYWORDS = (
+    "исправ",
+    "измени",
+    "обнови",
+    "запиши",
+    "сохрани",
+    "создай",
+    "удали",
+    "перемести",
+    "переимен",
+    "запусти",
+    "останов",
+    "убей процесс",
+    "проверь",
+    "поищи",
+    "найди",
+    "прочитай",
+    "открой файл",
+    "покажи содержимое",
+    "list ",
+    "read ",
+    "edit ",
+    "write ",
+    "fix ",
+    "change ",
+    "update ",
+    "save ",
+    "create ",
+    "delete ",
+    "remove ",
+    "rename ",
+    "move ",
+    "run ",
+    "start ",
+    "stop ",
+    "kill ",
+    "check ",
+    "verify ",
+    "inspect ",
+    "search ",
+    "find ",
+    "read file",
+)
+_MUTATING_KEYWORDS = (
+    "исправ",
+    "измени",
+    "обнови",
+    "запиши",
+    "сохрани",
+    "создай",
+    "удали",
+    "перемести",
+    "переимен",
+    "установ",
+    "запусти",
+    "останов",
+    "внеси правки",
+    "fix ",
+    "change ",
+    "update ",
+    "write ",
+    "save ",
+    "create ",
+    "delete ",
+    "remove ",
+    "rename ",
+    "move ",
+    "install ",
+    "run ",
+    "start ",
+    "stop ",
+)
+_READ_ONLY_KEYWORDS = (
+    "проверь",
+    "покажи содержимое",
+    "прочитай",
+    "открой файл",
+    "поищи",
+    "найди",
+    "покажи лог",
+    "какой процесс",
+    "статус",
+    "check ",
+    "verify ",
+    "inspect ",
+    "read ",
+    "search ",
+    "find ",
+    "list ",
+    "tail ",
+    "show file",
+)
+_CHAT_ONLY_KEYWORDS = (
+    "объясни",
+    "почему",
+    "что думаешь",
+    "ответь",
+    "покажи коротко",
+    "на экран",
+    "summarize",
+    "explain",
+    "why ",
+    "answer ",
+    "reply ",
+    "on screen",
+)
+_CONTINUE_KEYWORDS = ("продолж", "continue", "дальше", "go on", "ещё", "еще")
 
 
 @dataclass(frozen=True)
@@ -186,10 +294,66 @@ class PolicyEngine:
         current_turn_id: int,
         is_internal_retry: IsInternalRetry,
     ) -> TurnPolicyDecision:
-        _ = task
-        _ = messages
-        _ = current_turn_id
-        _ = is_internal_retry
+        normalized_task = " ".join(str(task or "").strip().lower().split())
+        if not normalized_task:
+            return TurnPolicyDecision(
+                inspect_only=False,
+                requires_operational_evidence=False,
+                prefer_read_only_fallback=False,
+                intent="chat",
+                should_force_tools=False,
+            )
+
+        has_path_hint = bool(_PATH_HINT_RE.search(normalized_task))
+        previous_turn_had_tools = self._previous_turn_had_tools(
+            messages,
+            current_turn_id=current_turn_id,
+            is_internal_retry=is_internal_retry,
+        )
+        continue_request = any(keyword in normalized_task for keyword in _CONTINUE_KEYWORDS)
+        chat_only = any(keyword in normalized_task for keyword in _CHAT_ONLY_KEYWORDS)
+        mutating = any(keyword in normalized_task for keyword in _MUTATING_KEYWORDS)
+        read_only = any(keyword in normalized_task for keyword in _READ_ONLY_KEYWORDS)
+        action_like = has_path_hint or mutating or read_only or any(
+            keyword in normalized_task for keyword in _ACTION_KEYWORDS
+        )
+
+        if continue_request and previous_turn_had_tools:
+            return TurnPolicyDecision(
+                inspect_only=False,
+                requires_operational_evidence=True,
+                prefer_read_only_fallback=False,
+                intent="continue_action",
+                should_force_tools=True,
+            )
+
+        if mutating:
+            return TurnPolicyDecision(
+                inspect_only=False,
+                requires_operational_evidence=True,
+                prefer_read_only_fallback=False,
+                intent="mutating_action",
+                should_force_tools=True,
+            )
+
+        if read_only and not chat_only:
+            return TurnPolicyDecision(
+                inspect_only=True,
+                requires_operational_evidence=True,
+                prefer_read_only_fallback=True,
+                intent="inspect",
+                should_force_tools=True,
+            )
+
+        if action_like and not chat_only:
+            return TurnPolicyDecision(
+                inspect_only=False,
+                requires_operational_evidence=True,
+                prefer_read_only_fallback=False,
+                intent="action",
+                should_force_tools=True,
+            )
+
         return TurnPolicyDecision(
             inspect_only=False,
             requires_operational_evidence=False,
@@ -197,6 +361,33 @@ class PolicyEngine:
             intent="chat",
             should_force_tools=False,
         )
+
+    @staticmethod
+    def _previous_turn_had_tools(
+        messages: List[BaseMessage],
+        *,
+        current_turn_id: int,
+        is_internal_retry: IsInternalRetry,
+    ) -> bool:
+        previous_turn_id = max(0, int(current_turn_id or 0) - 1)
+        if previous_turn_id <= 0:
+            return False
+
+        human_seen = 0
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                if is_internal_retry(message):
+                    continue
+                human_seen += 1
+                if human_seen >= 2:
+                    break
+                continue
+            if human_seen == 1 and isinstance(message, ToolMessage):
+                return True
+            if human_seen == 1 and isinstance(message, AIMessage):
+                if getattr(message, "tool_calls", None):
+                    return True
+        return False
 
     @staticmethod
     def tool_call_allowed_for_turn(

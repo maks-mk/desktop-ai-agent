@@ -90,7 +90,6 @@ class RuntimePromptPolicyBuilder:
             f"Workspace root: {environment.workspace_root}",
             f"Current working directory: {environment.current_working_directory}",
             f"Local timezone: {environment.timezone_name} ({environment.utc_offset})",
-            "Always respond in Russian.",
             (
                 "Execute user requests exactly as stated. Do not add, assume, or infer extra work beyond the explicit "
                 "request."

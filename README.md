@@ -1,6 +1,6 @@
 # Autonomous AI Agent (GUI)
 
-Версия: `v0.65.5b`
+Версия: `v0.65.6b`
 
 Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PySide6`.
 Приложение ориентировано на повседневную разработку: работа с файлами проекта, запуск инструментов, безопасные approvals для рискованных действий, структурированный user-choice flow через `interrupt()` и удобная история чатов по проектам.
@@ -8,7 +8,7 @@ Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PyS
 ## Структура проекта
 
 ```text
-v0.62.3b_gui/
+v0.65.6b/
 ├─ agent.py
 ├─ main.py
 ├─ prompt.txt
@@ -26,6 +26,9 @@ v0.62.3b_gui/
 ## Ключевые возможности
 
 - Чат-интерфейс с persistent-сессиями по проектам.
+- Надежное восстановление transcript после перезапуска:
+  - сохраняются и корректно рендерятся не только tool-блоки, но и текстовые ответы assistant,
+  - поддерживаются mixed-форматы assistant content (`str`/`list`/вложенные блоки).
 - Sidebar с историей чатов, быстрым переключением и удалением сессий.
 - Transcript с компактным отображением шагов агента и инструментов.
 - Inline-карточка выбора для `request_user_input`:
@@ -46,6 +49,7 @@ v0.62.3b_gui/
 - Отдельный user-choice flow для обычных вопросов к пользователю, не требующий approval.
 - Поддержка MCP-инструментов (включая Context7 при соответствующей конфигурации).
 - Runtime-статусы (`Thinking`, `Self-correcting`, `Ready`, ошибки) в UI.
+- Inline-статус `Thinking` стабильно показывается перед выводом в каждом новом run (включая длинный transcript и повторные запросы).
 - Профили моделей в GUI:
   - окно `Settings` (CRUD профилей),
   - селектор активной модели рядом с `+` в composer,
@@ -69,7 +73,7 @@ v0.62.3b_gui/
 - [`ui/visibility.py`](ui/visibility.py): контракт внутренних assistant/recovery сообщений и политика их показа в UI.
 - [`core/nodes.py`](core/nodes.py): узлы графа, recovery-loop (`stability_guard` + `recovery`), structured repair strategies, loop-guards, tool-preflight и safety flow.
 - [`core/context_builder.py`](core/context_builder.py): сборка и нормализация LLM-контекста с provider-safe ordering.
-- [`core/runtime_prompt_policy.py`](core/runtime_prompt_policy.py): runtime policy overlays и динамические system-инструкции (OS/shell/path style, workspace/cwd, timezone, tool-access, `request_user_input` rules).
+- [`core/runtime_prompt_policy.py`](core/runtime_prompt_policy.py): runtime policy overlays и динамические system-инструкции (OS/shell/path style, workspace/cwd, timezone, tool-access, `request_user_input` rules). Языковая политика по умолчанию задается в `prompt.txt`.
 - [`core/session_store.py`](core/session_store.py): хранение и индекс сессий.
 - [`core/config.py`](core/config.py): загрузка env-конфигурации.
 - [`tools/tool_registry.py`](tools/tool_registry.py): локальные и MCP инструменты, метаданные, политика безопасности.
@@ -139,6 +143,7 @@ v0.62.3b_gui/
 - Отдельный `tool selector` удалён: агент получает полный набор доступных инструментов на turn.
 - Безопасность исполнения обеспечивают метаданные инструментов, `PolicyEngine`, `stability_guard` и реальные platform/workspace boundaries.
 - `request_user_input` всегда доступен и не проходит через approval flow.
+- Для tool-mode в системном overlay зафиксировано требование: перед каждым tool-call агент формулирует короткое намерение, после чего отправляет структурированный вызов инструмента.
 - Словарный `intent` больше не участвует в боевом control flow; живая message-context логика вынесена в `MessageContextHelper`, а `IntentEngine` оставлен только для совместимости.
 - Если turn-policy требует инструменты, а модель отвечает без tool-calls, включается детерминированный путь self-correction/handoff (reason: `action_requires_tools`).
 - Для коротких follow-up (`продолжай`, `еще раз`) при наличии tool-контекста приоритет отдаётся контексту предыдущего turn, а не только словарю ключевых фраз.
@@ -216,7 +221,7 @@ python main.py
 
 ### Runtime и persistence
 
-- `PROMPT_PATH`
+- `PROMPT_PATH` (включая языковую политику ответа; например `Always respond in Russian.`)
 - `MCP_CONFIG_PATH`
 - `CHECKPOINT_BACKEND=sqlite|memory|postgres`
 - `CHECKPOINT_SQLITE_PATH`

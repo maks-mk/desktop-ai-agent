@@ -296,12 +296,7 @@ def serialize_session_entries(entries: list[SessionListEntry]) -> list[dict[str,
 
 
 def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
-    content = message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(item.get("text", "") for item in content if isinstance(item, dict))
-    return stringify_content(content)
+    return stringify_content(message.content)
 
 
 def _diff_from_tool_content(content: str) -> str:

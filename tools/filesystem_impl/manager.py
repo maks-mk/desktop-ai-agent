@@ -24,6 +24,7 @@ from .pathing import (
 
 class FilesystemManager:
     __slots__ = ("cwd", "virtual_mode", "safety_policy")
+    _LITERAL_ESCAPE_RE = re.compile(r"\\([.^$*+?{}\[\]()|\\])")
 
     def __init__(self, root_dir: Union[str, Path] = None, virtual_mode: bool = True):
         self.cwd = Path(root_dir).resolve() if root_dir else Path.cwd()
@@ -151,6 +152,26 @@ class FilesystemManager:
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
         return edit_text_file(self._resolve_path(path), path, old_string, new_string)
 
+    @classmethod
+    def _literal_search_candidates(cls, pattern: str, *, ignore_case: bool) -> list[str]:
+        raw_pattern = str(pattern or "")
+        candidates: list[str] = []
+        for candidate in (
+            raw_pattern,
+            cls._LITERAL_ESCAPE_RE.sub(r"\1", raw_pattern),
+        ):
+            normalized = candidate.lower() if ignore_case else candidate
+            if normalized not in candidates:
+                candidates.append(normalized)
+        return candidates
+
+    def _line_matches_literal_pattern(self, line: str, pattern: str, *, ignore_case: bool) -> bool:
+        target_line = line.lower() if ignore_case else line
+        for candidate in self._literal_search_candidates(pattern, ignore_case=ignore_case):
+            if candidate and candidate in target_line:
+                return True
+        return False
+
     def search_in_file(self, path: str, pattern: str, use_regex: bool = False, ignore_case: bool = False) -> str:
         try:
             target = self._resolve_path(path)
@@ -183,10 +204,9 @@ class FilesystemManager:
                         display_line = content[line_start:line_end]
                     matches.append((line_no, display_line))
             else:
-                needle = pattern.lower() if ignore_case else pattern
                 with open(target, "r", encoding="utf-8", errors="replace") as file_obj:
                     for index, line in enumerate(file_obj):
-                        if needle in (line.lower() if ignore_case else line):
+                        if self._line_matches_literal_pattern(line, pattern, ignore_case=ignore_case):
                             matches.append((index + 1, line.rstrip("\n").rstrip("\r")))
 
             if not matches:
@@ -223,15 +243,12 @@ class FilesystemManager:
 
             flags = re.IGNORECASE if ignore_case else 0
             compiled_regex = None
-            needle = None
             if use_regex:
                 flags |= re.MULTILINE
                 try:
                     compiled_regex = re.compile(pattern, flags)
                 except re.error as exc:
                     return format_error(ErrorType.VALIDATION, f"Invalid regex pattern: {exc}")
-            else:
-                needle = pattern.lower() if ignore_case else pattern
 
             all_results: list[str] = []
             files_scanned = 0
@@ -305,8 +322,11 @@ class FilesystemManager:
                                 else:
                                     with open(file_path, "r", encoding="utf-8", errors="replace") as file_obj:
                                         for index, line in enumerate(file_obj):
-                                            target_line = line.lower() if ignore_case else line
-                                            if needle in target_line:
+                                            if self._line_matches_literal_pattern(
+                                                line,
+                                                pattern,
+                                                ignore_case=ignore_case,
+                                            ):
                                                 all_results.append(f"{rel_path}:{index + 1}  {line.rstrip()}")
                                                 if len(all_results) >= max_matches:
                                                     truncated = True

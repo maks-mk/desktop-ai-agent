@@ -562,6 +562,20 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsNotNone(self.window.current_turn.status_widget)
         self.assertEqual(self.window.current_turn.status_widget.label.text(), "Self-correcting")
 
+    def test_run_started_requeues_autofollow_after_inserting_thinking_status(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        with mock.patch.object(
+            self.window.transcript,
+            "notify_content_changed",
+            wraps=self.window.transcript.notify_content_changed,
+        ) as notify_mock:
+            self.window._handle_event(StreamEvent("run_started", {"text": "Ещё запрос"}))
+
+        self.assertIsNotNone(self.window.current_turn.status_widget)
+        self.assertEqual(self.window.current_turn.status_widget.label.text(), "Thinking")
+        self.assertGreaterEqual(notify_mock.call_count, 2)
+        self.assertEqual(notify_mock.call_args_list[-1].kwargs.get("force"), True)
+
     def test_status_is_rendered_below_existing_output_when_agent_keeps_thinking(self):
         self.window._handle_initialized(self._snapshot_payload())
 
@@ -1155,6 +1169,20 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertEqual(self.controller.resume_calls, [(True, True)])
 
+    def test_auto_approval_after_always_mode_does_not_repeat_notice(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Исправь файл"}))
+
+        self.window._handle_event(
+            StreamEvent("approval_resolved", {"approved": True, "always": True, "auto": False})
+        )
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
+
+        self.window._handle_event(
+            StreamEvent("approval_resolved", {"approved": True, "always": True, "auto": True})
+        )
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
+
     def test_new_session_clears_transcript_and_calls_controller(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "hello"}))
@@ -1356,6 +1384,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(self.window.transcript.column.objectName(), "TranscriptColumn")
         self.assertEqual(self.window.composer_container.maximumWidth(), TRANSCRIPT_MAX_WIDTH)
         self.assertEqual(self.window.composer_container.objectName(), "CenteredComposerRow")
+        self.assertGreaterEqual(self.window.composer_shell.contentsMargins().top(), 16)
 
     def test_composer_buttons_have_correct_tooltips(self):
         self.assertEqual(self.window.attach_button.toolTip(), "Attach file")

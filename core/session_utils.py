@@ -35,35 +35,48 @@ async def repair_session_if_needed(
         if not messages:
             return notices
 
-        last_ai_msg = None
-        last_ai_idx = -1
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if isinstance(message, (AIMessage, AIMessageChunk)) and message.tool_calls:
-                last_ai_msg = message
-                last_ai_idx = index
-                break
+        pending_tool_calls: dict[str, dict[str, Any]] = {}
+        pending_order: list[str] = []
+        pending_segment_start_idx: int | None = None
 
-        if not last_ai_msg:
-            return notices
-
-        existing_tool_outputs = set()
-        for index in range(last_ai_idx + 1, len(messages)):
-            message = messages[index]
-            if isinstance(message, ToolMessage):
-                existing_tool_outputs.add(message.tool_call_id)
-
-        missing_tool_calls = []
-        for tool_call in last_ai_msg.tool_calls:
-            tool_call_id = tool_call.get("id")
-            if not tool_call_id:
-                logger.warning(
-                    "Session repair skipped malformed tool call without id in thread %s",
-                    thread_id,
-                )
+        for index, message in enumerate(messages):
+            if isinstance(message, (AIMessage, AIMessageChunk)) and getattr(message, "tool_calls", None):
+                if pending_segment_start_idx is None:
+                    pending_segment_start_idx = index
+                for tool_call in message.tool_calls:
+                    tool_call_id = str(tool_call.get("id") or "").strip()
+                    tool_name = str(tool_call.get("name") or "").strip()
+                    if not tool_call_id or not tool_name:
+                        logger.warning(
+                            "Session repair skipped malformed tool call without id/name in thread %s",
+                            thread_id,
+                        )
+                        continue
+                    pending_tool_calls[tool_call_id] = {
+                        "id": tool_call_id,
+                        "name": tool_name,
+                        "args": dict(tool_call.get("args") or {}) if isinstance(tool_call.get("args"), dict) else {},
+                    }
+                    if tool_call_id not in pending_order:
+                        pending_order.append(tool_call_id)
                 continue
-            if tool_call_id not in existing_tool_outputs:
-                missing_tool_calls.append(tool_call)
+
+            if not isinstance(message, ToolMessage):
+                continue
+
+            tool_call_id = str(message.tool_call_id or "").strip()
+            if not tool_call_id:
+                continue
+            pending_tool_calls.pop(tool_call_id, None)
+            pending_order = [item for item in pending_order if item != tool_call_id]
+            if not pending_tool_calls:
+                pending_segment_start_idx = None
+
+        missing_tool_calls = [
+            pending_tool_calls[tool_call_id]
+            for tool_call_id in pending_order
+            if tool_call_id in pending_tool_calls
+        ]
 
         if not missing_tool_calls:
             return notices
@@ -71,7 +84,8 @@ async def repair_session_if_needed(
         # If the run already produced an explicit internal handoff after the
         # dangling tool-call message, do not inject synthetic tool outputs.
         handoff_after_tool_call = False
-        for index in range(last_ai_idx + 1, len(messages)):
+        repair_window_start = (pending_segment_start_idx + 1) if pending_segment_start_idx is not None else 0
+        for index in range(repair_window_start, len(messages)):
             message = messages[index]
             if not isinstance(message, (AIMessage, AIMessageChunk)):
                 continue

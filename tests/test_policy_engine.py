@@ -68,17 +68,17 @@ class PolicyEngineTests(unittest.TestCase):
         )
         self.assertEqual(chosen, ["find_process_by_port"])
 
-    def test_evaluate_turn_is_neutral_without_phrase_lexicon(self):
+    def test_evaluate_turn_detects_read_only_action_request(self):
         decision = self.engine.evaluate_turn(
             task="Проверь статус процесса на порту 8080",
             messages=[],
             current_turn_id=1,
             is_internal_retry=lambda _msg: False,
         )
-        self.assertFalse(decision.inspect_only)
-        self.assertFalse(decision.requires_operational_evidence)
-        self.assertFalse(decision.should_force_tools)
-        self.assertEqual(decision.intent, "chat")
+        self.assertTrue(decision.inspect_only)
+        self.assertTrue(decision.requires_operational_evidence)
+        self.assertTrue(decision.should_force_tools)
+        self.assertEqual(decision.intent, "inspect")
 
 
 if __name__ == "__main__":

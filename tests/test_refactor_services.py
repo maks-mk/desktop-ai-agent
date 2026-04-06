@@ -81,7 +81,7 @@ class RefactorServicesTests(unittest.TestCase):
         system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
         joined = "\n".join(system_texts)
         self.assertIn("RUNTIME CONTRACT:", joined)
-        self.assertIn("Always respond in Russian.", joined)
+        self.assertNotIn("Always respond in Russian.", joined)
         self.assertIn("After any system change", joined)
         self.assertIn("TOOL ACCESS FOR THIS REQUEST:", joined)
         self.assertIn("Execution environment: os=windows;", joined)
@@ -89,6 +89,36 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("Workspace root:", joined)
         self.assertIn("Current working directory:", joined)
         self.assertIn("Local timezone:", joined)
+
+    def test_prompt_file_controls_default_response_language(self):
+        prompt_text = (Path(__file__).resolve().parents[1] / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("Always respond in Russian.", prompt_text)
+
+    def test_context_builder_hardcodes_short_intention_before_tool_call(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Проверь задачу",
+            tools_available=True,
+            active_tool_names=["read_file"],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
+        joined = "\n".join(system_texts)
+        self.assertIn("Before every tool call, write one short sentence stating your immediate intention.", joined)
+        self.assertIn("write that short intention and then emit a valid structured tool call", joined)
 
     def test_runtime_prompt_policy_maps_supported_operating_systems(self):
         builder = RuntimePromptPolicyBuilder(config=self._make_config())

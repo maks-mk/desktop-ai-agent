@@ -45,6 +45,7 @@ from core.summarize_policy import (
     should_summarize,
 )
 from core.tool_executor import ToolExecutor
+from core.tool_issues import build_tool_issue
 
 
 class ProviderContextError(RuntimeError):
@@ -707,6 +708,65 @@ class AgentNodes:
     ) -> List[BaseMessage]:
         return self.context_builder.sanitize_messages(messages, state=state)
 
+    def _build_protocol_open_tool_issue(
+        self,
+        *,
+        current_turn_id: int,
+        summary: str,
+        reason: str,
+        source: str,
+        tool_names: List[str] | None = None,
+        tool_args: Dict[str, Any] | None = None,
+        details: Dict[str, Any] | None = None,
+        response_preview: str = "",
+    ) -> Dict[str, Any]:
+        normalized_tool_names = [
+            str(name).strip()
+            for name in (tool_names or [])
+            if str(name).strip()
+        ]
+        primary_tool_name = normalized_tool_names[0] if normalized_tool_names else "unknown_tool"
+        primary_tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+        issue_details = dict(details or {}) if isinstance(details, dict) else {}
+        if reason:
+            issue_details["protocol_reason"] = reason
+        if response_preview:
+            issue_details["response_preview"] = compact_text(response_preview, 220)
+        fingerprint_payload = dict(primary_tool_args)
+        if reason:
+            fingerprint_payload["__protocol_reason"] = reason
+        return build_tool_issue(
+            current_turn_id=current_turn_id,
+            kind="protocol_error",
+            summary=summary,
+            tool_names=normalized_tool_names or [primary_tool_name],
+            tool_args=primary_tool_args,
+            source=source,
+            error_type="PROTOCOL",
+            fingerprint=repair_fingerprint(primary_tool_name, fingerprint_payload, "PROTOCOL"),
+            progress_fingerprint=repair_fingerprint(primary_tool_name, fingerprint_payload, "PROTOCOL"),
+            details=issue_details,
+        )
+
+    def _summarize_history_tool_mismatch(self, history_issue: Dict[str, Any]) -> str:
+        pending_count = len(history_issue.get("pending_tool_calls") or [])
+        orphan_count = len(history_issue.get("orphan_tool_results") or [])
+        duplicate_count = len(history_issue.get("duplicate_tool_call_ids") or [])
+        interleaving = len(history_issue.get("interleaving_markers") or [])
+
+        fragments: List[str] = []
+        if pending_count:
+            fragments.append(f"{pending_count} незавершенный(ых) tool call")
+        if orphan_count:
+            fragments.append(f"{orphan_count} orphan tool result")
+        if duplicate_count:
+            fragments.append(f"{duplicate_count} duplicate tool_call_id")
+        if interleaving:
+            fragments.append("обнаружены сообщения между tool call и tool result")
+        if not fragments:
+            fragments.append("история tool call повреждена")
+        return "Нарушен внутренний контракт истории инструментов: " + ", ".join(fragments) + "."
+
     def _build_agent_result(
         self,
         response: AIMessage,
@@ -717,6 +777,8 @@ class AgentNodes:
         open_tool_issue: Dict[str, Any] | None = None,
         recovery_state: Dict[str, Any] | None = None,
         allowed_tool_names: List[str] | None = None,
+        should_force_tools: bool = False,
+        current_turn_has_tool_evidence: bool = False,
     ) -> Dict[str, Any]:
         token_usage_update = {}
         if getattr(response, "usage_metadata", None):
@@ -724,6 +786,7 @@ class AgentNodes:
 
         has_tool_calls = False
         protocol_error = ""
+        protocol_issue: Dict[str, Any] | None = None
         outbound_messages: List[BaseMessage] = self._collect_internal_retry_removals(messages)
 
         if isinstance(response, AIMessage):
@@ -737,6 +800,32 @@ class AgentNodes:
             ]
             if missing_fields or invalid_calls:
                 protocol_error = self._build_tool_protocol_error(missing_fields, invalid_calls)
+                tool_names = [
+                    str(tc.get("name") or "").strip()
+                    for tc in t_calls
+                    if str(tc.get("name") or "").strip()
+                ]
+                first_args = next(
+                    (
+                        dict(tc.get("args") or {})
+                        for tc in t_calls
+                        if isinstance(tc.get("args"), dict)
+                    ),
+                    {},
+                )
+                protocol_issue = self._build_protocol_open_tool_issue(
+                    current_turn_id=turn_id,
+                    summary=protocol_error,
+                    reason="tool_protocol_error",
+                    source="agent",
+                    tool_names=tool_names,
+                    tool_args=first_args,
+                    details={
+                        "invalid_tool_call_count": len(invalid_calls),
+                        "missing_field_tool_call_count": len(missing_fields),
+                    },
+                    response_preview=stringify_content(response.content),
+                )
                 response = AIMessage(
                     content=self._merge_protocol_error_into_content(response.content, protocol_error),
                     additional_kwargs=response.additional_kwargs,
@@ -754,6 +843,7 @@ class AgentNodes:
                     t_calls,
                     messages,
                 )
+                original_tool_calls = list(t_calls)
                 t_calls = self._filter_tool_calls_for_turn(
                     t_calls,
                     allowed_tool_names=allowed_tool_names,
@@ -763,6 +853,32 @@ class AgentNodes:
                         protocol_error,
                         user_input_protocol_error,
                     )
+                    response = response.model_copy(update={"tool_calls": t_calls})
+                filtered_out_count = len(original_tool_calls) - len(t_calls)
+                if filtered_out_count:
+                    dropped_names = [
+                        str(tool_call.get("name") or "").strip()
+                        for tool_call in original_tool_calls
+                        if self._normalize_tool_name(tool_call.get("name") or "") not in {
+                            self._normalize_tool_name(name) for name in (allowed_tool_names or [])
+                        }
+                    ]
+                    dropped_error = (
+                        "INTERNAL TOOL PROTOCOL ERROR: model requested tool(s) that are not available in the current turn. "
+                        "Issue a fresh valid tool call using only allowed tools."
+                    )
+                    protocol_error = self._merge_protocol_error_text(protocol_error, dropped_error)
+                    if not t_calls:
+                        protocol_issue = self._build_protocol_open_tool_issue(
+                            current_turn_id=turn_id,
+                            summary=dropped_error,
+                            reason="tool_not_allowed_for_turn",
+                            source="agent",
+                            tool_names=dropped_names,
+                            tool_args={},
+                            details={"allowed_tool_names": list(allowed_tool_names or [])},
+                            response_preview=stringify_content(response.content),
+                        )
                     response = response.model_copy(update={"tool_calls": t_calls})
 
             has_tool_calls = bool(tools_available and t_calls)
@@ -776,6 +892,33 @@ class AgentNodes:
                 )
                 has_tool_calls = False
 
+            if (
+                tools_available
+                and should_force_tools
+                and not has_tool_calls
+                and not current_turn_has_tool_evidence
+                and protocol_issue is None
+            ):
+                response_preview = stringify_content(response.content).strip()
+                if response_preview:
+                    protocol_issue = self._build_protocol_open_tool_issue(
+                        current_turn_id=turn_id,
+                        summary=(
+                            "Запрос требует проверяемого действия или инструментального подтверждения, "
+                            "но модель завершила шаг обычным текстом без валидного tool call."
+                        ),
+                        reason="action_requires_tools",
+                        source="agent",
+                        tool_names=list(allowed_tool_names or []),
+                        tool_args={},
+                        details={"allowed_tool_names": list(allowed_tool_names or [])},
+                        response_preview=response_preview,
+                    )
+                    protocol_error = self._merge_protocol_error_text(
+                        protocol_error,
+                        "ACTION REQUIRES TOOLS: do not stop at prose. Continue with a valid tool call or a real blocking reason."
+                    )
+
         outbound_messages.append(response)
 
         return {
@@ -785,9 +928,9 @@ class AgentNodes:
             "turn_outcome": "run_tools" if has_tool_calls else "",
             "recovery_state": recovery_state,
             "pending_approval": None,
-            "open_tool_issue": open_tool_issue,
+            "open_tool_issue": protocol_issue or open_tool_issue,
             "has_protocol_error": bool(protocol_error),
-            "last_tool_error": "",
+            "last_tool_error": protocol_error,
             "last_tool_result": "",
             "_retry_user_input_turn": retry_user_input_turn,
             **token_usage_update,
@@ -911,7 +1054,10 @@ class AgentNodes:
         if active_tool_names == list(self._all_tool_names):
             llm_for_turn = self.llm_with_tools if active_tool_names else self.llm
         elif active_tools:
-            llm_for_turn = self.llm.bind_tools(active_tools)
+            if hasattr(self.llm, "bind_tools"):
+                llm_for_turn = self.llm.bind_tools(active_tools)
+            else:
+                llm_for_turn = self.llm_with_tools
         else:
             llm_for_turn = self.llm
         tools_available = bool(active_tool_names)
@@ -946,6 +1092,54 @@ class AgentNodes:
         )
         try:
             validation_handoff_reason = ""
+            history_issue = self.context_builder.detect_tool_history_mismatch(messages)
+            if history_issue:
+                validation_handoff_reason = "history_tool_mismatch"
+                protocol_issue = self._build_protocol_open_tool_issue(
+                    current_turn_id=current_turn_id,
+                    summary=self._summarize_history_tool_mismatch(history_issue),
+                    reason="history_tool_mismatch",
+                    source="history",
+                    tool_names=[
+                        str(item.get("name") or "").strip()
+                        for item in (history_issue.get("pending_tool_calls") or [])
+                        if str(item.get("name") or "").strip()
+                    ],
+                    tool_args=(
+                        dict((history_issue.get("pending_tool_calls") or [{}])[0].get("args") or {})
+                        if history_issue.get("pending_tool_calls")
+                        else {}
+                    ),
+                    details=history_issue,
+                )
+                self._log_run_event(
+                    state,
+                    "history_tool_mismatch_detected",
+                    run_id=state.get("run_id", ""),
+                    issue=protocol_issue,
+                )
+                self._log_node_end(
+                    state,
+                    "agent",
+                    node_timer,
+                    tool_calls=0,
+                    tools_available=tools_available,
+                    active_tool_count=len(active_tool_names),
+                    validation_handoff_reason=validation_handoff_reason,
+                    has_open_tool_issue=True,
+                )
+                return {
+                    "current_task": current_task,
+                    "turn_id": current_turn_id,
+                    "turn_outcome": "",
+                    "recovery_state": recovery_state,
+                    "pending_approval": None,
+                    "open_tool_issue": protocol_issue,
+                    "has_protocol_error": True,
+                    "last_tool_error": str(protocol_issue.get("summary") or ""),
+                    "last_tool_result": "",
+                }
+
             full_context = self._build_agent_context(
                 messages,
                 summary,
@@ -973,6 +1167,8 @@ class AgentNodes:
                 open_tool_issue=open_tool_issue,
                 recovery_state=recovery_state,
                 allowed_tool_names=active_tool_names,
+                should_force_tools=turn_policy.should_force_tools,
+                current_turn_has_tool_evidence=current_turn_has_tool_evidence,
             )
             if result.pop("_retry_user_input_turn", False):
                 self._log_run_event(
@@ -1010,8 +1206,21 @@ class AgentNodes:
                     open_tool_issue=open_tool_issue,
                     recovery_state=recovery_state,
                     allowed_tool_names=active_tool_names,
+                    should_force_tools=turn_policy.should_force_tools,
+                    current_turn_has_tool_evidence=current_turn_has_tool_evidence,
                 )
                 result.pop("_retry_user_input_turn", None)
+            if result.get("open_tool_issue") and result.get("has_protocol_error"):
+                validation_handoff_reason = str(
+                    ((result.get("open_tool_issue") or {}).get("details") or {}).get("protocol_reason")
+                    or "tool_protocol_error"
+                )
+                self._log_run_event(
+                    state,
+                    "protocol_recovery_requested",
+                    run_id=state.get("run_id", ""),
+                    issue=result.get("open_tool_issue"),
+                )
             tool_calls_count = len(getattr(response, "tool_calls", []) or [])
             self._log_run_event(
                 state,

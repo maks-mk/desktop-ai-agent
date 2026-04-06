@@ -1,9 +1,12 @@
 import types
 import unittest
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.session_utils import repair_session_if_needed
+from core.config import AgentConfig
+from core.nodes import AgentNodes
 
 
 class _FakeAgentApp:
@@ -86,6 +89,60 @@ class SessionRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notices, [])
         self.assertEqual(app.update_calls, [])
         self.assertFalse(any(isinstance(message, ToolMessage) for message in app.values["messages"]))
+
+    async def test_repair_inserts_all_missing_tool_outputs_in_unresolved_tail(self):
+        app = _FakeAgentApp(
+            [
+                HumanMessage(content="Сделай шаг"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc-1", "name": "read_file", "args": {"path": "a.txt"}}],
+                ),
+                ToolMessage(content="ok", tool_call_id="tc-1", name="read_file"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc-2", "name": "read_file", "args": {"path": "b.txt"}}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc-3", "name": "read_file", "args": {"path": "c.txt"}}],
+                ),
+            ]
+        )
+
+        notices = await repair_session_if_needed(app, "thread-multi")
+
+        self.assertGreaterEqual(len(notices), 2)
+        tool_messages = [message for message in app.values["messages"] if isinstance(message, ToolMessage)]
+        repaired_ids = [message.tool_call_id for message in tool_messages if "Execution interrupted" in str(message.content)]
+        self.assertEqual(repaired_ids, ["tc-2", "tc-3"])
+
+    async def test_repair_preserves_tool_call_identity_for_next_provider_sanitization(self):
+        long_tool_id = "chatcmpl-tool-9d8dc0bbe38d6202"
+        app = _FakeAgentApp(
+            [
+                HumanMessage(content="Сделай шаг"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": long_tool_id, "name": "read_file", "args": {"path": "README.md"}}],
+                ),
+            ]
+        )
+
+        await repair_session_if_needed(app, "thread-remap")
+
+        config = AgentConfig(
+            PROVIDER="openai",
+            OPENAI_API_KEY="test-key",
+            PROMPT_PATH=Path(__file__).resolve().parents[1] / "prompt.txt",
+        )
+        nodes = AgentNodes(config=config, llm=types.SimpleNamespace(), tools=[], llm_with_tools=types.SimpleNamespace())
+        sanitized = nodes._sanitize_messages_for_model(app.values["messages"])
+
+        ai_message = next(message for message in sanitized if isinstance(message, AIMessage))
+        tool_message = next(message for message in sanitized if isinstance(message, ToolMessage))
+        self.assertEqual(ai_message.tool_calls[0]["id"], tool_message.tool_call_id)
+        self.assertRegex(tool_message.tool_call_id, r"^[A-Za-z0-9]{9}$")
 
 
 if __name__ == "__main__":

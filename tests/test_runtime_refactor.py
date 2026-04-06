@@ -984,6 +984,29 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         legacy_choice_key = "_".join(("pending", "user", "choice"))
         self.assertNotIn(legacy_choice_key, payload)
 
+    def test_build_transcript_payload_restores_assistant_text_from_list_content(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Подведи итог"),
+                    AIMessage(
+                        content=[
+                            "Я завершил основную часть задачи. ",
+                            {"type": "text", "text": "Изменения уже внесены."},
+                            {"content": [" Проверка пройдена."]},
+                        ]
+                    ),
+                ],
+            }
+        )
+
+        self.assertEqual(len(payload["turns"]), 1)
+        blocks = payload["turns"][0]["blocks"]
+        self.assertEqual([block["type"] for block in blocks], ["assistant"])
+        self.assertIn("Я завершил основную часть задачи.", blocks[0]["markdown"])
+        self.assertIn("Изменения уже внесены.", blocks[0]["markdown"])
+        self.assertIn("Проверка пройдена.", blocks[0]["markdown"])
+
     def test_build_user_choice_payload_adapts_interrupt_options_for_card(self):
         payload = build_user_choice_payload(
             {
@@ -1320,6 +1343,94 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, HumanMessage)
         ]
         self.assertIn("проверь list_mistral_models.py", visible_humans)
+
+    async def test_agent_node_forces_recovery_when_action_turn_ends_with_prose_only(self):
+        agent_llm = FakeLLM([AIMessage(content="Сейчас исправлю файл и внесу правки.")])
+        edit_tool = FakeTool("edit_file", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[edit_tool],
+            llm_with_tools=agent_llm,
+            tool_metadata={
+                "edit_file": ToolMetadata(name="edit_file", mutating=True, requires_approval=False),
+            },
+        )
+
+        result = await nodes.agent_node(self._initial_state("исправь файл demo.txt"))
+
+        self.assertEqual(result["turn_outcome"], "")
+        self.assertTrue(result["has_protocol_error"])
+        self.assertIsNotNone(result["open_tool_issue"])
+        self.assertEqual(result["open_tool_issue"]["kind"], "protocol_error")
+        self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "action_requires_tools")
+        self.assertEqual(len(agent_llm.invocations), 1)
+
+        guard_result = await nodes.stability_guard_node({**self._initial_state("исправь файл demo.txt"), **result})
+        self.assertEqual(guard_result["turn_outcome"], "recover_agent")
+
+    async def test_agent_node_marks_malformed_tool_payload_as_protocol_error(self):
+        agent_llm = FakeLLM(
+            [
+                AIMessage(
+                    content="Открываю файл.",
+                    invalid_tool_calls=[
+                        {
+                            "id": "tc-invalid-1",
+                            "name": "read_file",
+                            "args": "{path: README.md}",
+                            "error": "malformed arguments",
+                        }
+                    ],
+                )
+            ]
+        )
+        read_tool = FakeTool("read_file", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[read_tool],
+            llm_with_tools=agent_llm,
+            tool_metadata={"read_file": ToolMetadata(name="read_file", read_only=True)},
+        )
+
+        result = await nodes.agent_node(self._initial_state("прочитай README.md"))
+
+        self.assertEqual(result["turn_outcome"], "")
+        self.assertTrue(result["has_protocol_error"])
+        self.assertEqual(result["open_tool_issue"]["kind"], "protocol_error")
+        self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "tool_protocol_error")
+
+        guard_result = await nodes.stability_guard_node({**self._initial_state("прочитай README.md"), **result})
+        self.assertEqual(guard_result["turn_outcome"], "recover_agent")
+
+    async def test_agent_node_detects_history_tool_mismatch_before_llm_invoke(self):
+        agent_llm = FakeLLM([AIMessage(content="Это сообщение не должно быть вызвано.")])
+        read_tool = FakeTool("read_file", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[read_tool],
+            llm_with_tools=agent_llm,
+            tool_metadata={"read_file": ToolMetadata(name="read_file", read_only=True)},
+        )
+        state = self._initial_state("продолжай")
+        state["messages"] = [
+            HumanMessage(content="прочитай README.md"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read_file", "args": {"path": "README.md"}, "id": "tc-history-1"}],
+            ),
+            AIMessage(content="Продолжаю без результата инструмента."),
+            HumanMessage(content="продолжай"),
+        ]
+
+        result = await nodes.agent_node(state)
+
+        self.assertEqual(result["turn_outcome"], "")
+        self.assertTrue(result["has_protocol_error"])
+        self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "history_tool_mismatch")
+        self.assertEqual(agent_llm.invocations, [])
 
     async def test_agent_node_drops_extra_request_user_input_calls_in_one_response(self):
         agent_llm = FakeLLM(
