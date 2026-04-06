@@ -1,11 +1,14 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from core.config import AgentConfig
 from core.context_builder import ContextBuilder
 from core.recovery_manager import RecoveryManager
+from core.runtime_prompt_policy import RuntimePromptPolicyBuilder
 from core.self_correction_engine import RepairPlan
 from core.tool_executor import ToolExecutor
 from core.tool_issues import build_tool_issue
@@ -48,10 +51,187 @@ class RefactorServicesTests(unittest.TestCase):
             recovery_state=None,
         )
 
-        self.assertIsInstance(context[0], SystemMessage)
-        system_text = str(context[0].content)
+        system_text = "\n".join(
+            str(message.content) for message in context if isinstance(message, SystemMessage)
+        )
         self.assertIn("use only tools bound in this request", system_text)
         self.assertNotIn("tool_0, tool_1", system_text)
+
+    def test_context_builder_injects_runtime_contract_from_code(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Проверь задачу",
+            tools_available=True,
+            active_tool_names=["read_file"],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
+        joined = "\n".join(system_texts)
+        self.assertIn("RUNTIME CONTRACT:", joined)
+        self.assertIn("Always respond in Russian.", joined)
+        self.assertIn("After any system change", joined)
+        self.assertIn("TOOL ACCESS FOR THIS REQUEST:", joined)
+        self.assertIn("Execution environment: os=windows;", joined)
+        self.assertIn("paths=windows.", joined)
+        self.assertIn("Workspace root:", joined)
+        self.assertIn("Current working directory:", joined)
+        self.assertIn("Local timezone:", joined)
+
+    def test_runtime_prompt_policy_maps_supported_operating_systems(self):
+        builder = RuntimePromptPolicyBuilder(config=self._make_config())
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Windows"),
+            mock.patch.dict(
+                "core.runtime_prompt_policy.os.environ",
+                {"PSModulePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(builder._detect_os_family(), "windows")
+            self.assertEqual(
+                builder._build_execution_environment_line(),
+                "Execution environment: os=windows; shell=powershell; paths=windows.",
+            )
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Linux"),
+            mock.patch.dict(
+                "core.runtime_prompt_policy.os.environ",
+                {"SHELL": "/bin/bash"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(builder._detect_os_family(), "linux")
+            self.assertEqual(
+                builder._build_execution_environment_line(),
+                "Execution environment: os=linux; shell=bash; paths=unix.",
+            )
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Darwin"),
+            mock.patch.dict(
+                "core.runtime_prompt_policy.os.environ",
+                {"SHELL": "/bin/zsh"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(builder._detect_os_family(), "mac")
+            self.assertEqual(
+                builder._build_execution_environment_line(),
+                "Execution environment: os=mac; shell=zsh; paths=unix.",
+            )
+
+    def test_runtime_prompt_policy_falls_back_to_reasonable_shell_defaults(self):
+        builder = RuntimePromptPolicyBuilder(config=self._make_config())
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Linux"),
+            mock.patch.dict("core.runtime_prompt_policy.os.environ", {}, clear=True),
+        ):
+            self.assertEqual(builder._detect_shell_family(os_family="linux"), "sh")
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Windows"),
+            mock.patch.dict("core.runtime_prompt_policy.os.environ", {}, clear=True),
+        ):
+            self.assertEqual(builder._detect_shell_family(os_family="windows"), "unknown")
+
+    def test_runtime_prompt_policy_detects_workspace_and_timezone_metadata(self):
+        builder = RuntimePromptPolicyBuilder(config=self._make_config())
+        fake_now = datetime(2026, 4, 6, 12, 0, tzinfo=timezone(timedelta(hours=3)))
+
+        with (
+            mock.patch("core.runtime_prompt_policy.platform.system", return_value="Linux"),
+            mock.patch.dict("core.runtime_prompt_policy.os.environ", {"SHELL": "/bin/bash"}, clear=True),
+            mock.patch("core.runtime_prompt_policy.Path.cwd", return_value=Path("/tmp/project")),
+            mock.patch("core.runtime_prompt_policy.datetime") as datetime_mock,
+        ):
+            datetime_mock.now.return_value = fake_now
+            environment = builder._detect_execution_environment()
+
+        self.assertEqual(environment.workspace_root, str(Path("/tmp/project").resolve()))
+        self.assertEqual(environment.current_working_directory, str(Path("/tmp/project").resolve()))
+        self.assertEqual(environment.timezone_name, "UTC+03:00")
+        self.assertEqual(environment.utc_offset, "UTC+03:00")
+
+    def test_context_builder_injects_request_user_input_policy_from_code(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Нужен выбор пользователя",
+            tools_available=True,
+            active_tool_names=["read_file", "request_user_input"],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
+        joined = "\n".join(system_texts)
+        self.assertIn("REQUEST_USER_INPUT POLICY:", joined)
+        self.assertIn("Never batch multiple request_user_input calls.", joined)
+
+    def test_context_builder_injects_request_user_input_demo_policy_only_for_demo_requests(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Сделай тест request_user_input для примера",
+            tools_available=True,
+            active_tool_names=["request_user_input"],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
+        joined = "\n".join(system_texts)
+        self.assertIn("REQUEST_USER_INPUT TEST POLICY:", joined)
+        self.assertIn("Do exactly one request_user_input call.", joined)
+
+        regular_context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Нужно спросить пользователя, в какую папку сохранить файл",
+            tools_available=True,
+            active_tool_names=["request_user_input"],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+        regular_texts = [str(message.content) for message in regular_context if isinstance(message, SystemMessage)]
+        self.assertFalse(any("REQUEST_USER_INPUT TEST POLICY:" in text for text in regular_texts))
 
     def test_context_builder_inserts_short_bridge_after_tool_before_user(self):
         builder = ContextBuilder(
@@ -97,6 +277,31 @@ class RefactorServicesTests(unittest.TestCase):
 
         self.assertIsInstance(context[-1], HumanMessage)
         self.assertIn("Проверь list_mistral_models.py", str(context[-1].content))
+
+    def test_context_builder_locks_user_choice_after_choice_was_collected(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [ToolMessage(content="Опция C", tool_call_id="tool-1", name="request_user_input")],
+            None,
+            summary="",
+            current_task="Покажи результат теста",
+            tools_available=True,
+            active_tool_names=["read_file"],
+            open_tool_issue=None,
+            recovery_state=None,
+            user_choice_locked=True,
+        )
+
+        system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
+        self.assertTrue(any("Do not call request_user_input again" in text for text in system_texts))
 
     def test_context_builder_stringifies_openai_assistant_content_lists(self):
         builder = ContextBuilder(

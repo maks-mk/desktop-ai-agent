@@ -19,6 +19,7 @@ from langchain_core.messages import (
 from core import constants
 from core.config import AgentConfig
 from core.message_utils import stringify_content
+from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
 from core.state import AgentState
 
 logger = logging.getLogger("agent")
@@ -46,6 +47,7 @@ class ContextBuilder:
         self._log_run_event = log_run_event
         self._recovery_message_builder = recovery_message_builder
         self._provider_safe_tool_call_id_re = provider_safe_tool_call_id_re
+        self._runtime_policy_builder = RuntimePromptPolicyBuilder(config=config)
 
     def build(
         self,
@@ -58,15 +60,24 @@ class ContextBuilder:
         active_tool_names: List[str],
         open_tool_issue: Dict[str, Any] | None,
         recovery_state: Dict[str, Any] | None,
+        user_choice_locked: bool = False,
     ) -> List[BaseMessage]:
         sanitized_messages = self.sanitize_messages(messages, state=state)
         full_context: List[BaseMessage] = [
             self._build_system_message(
                 summary,
-                tools_available=tools_available,
-                active_tool_names=active_tool_names,
             )
         ]
+        full_context.extend(
+            self._runtime_policy_builder.build_messages(
+                RuntimePromptContext(
+                    current_task=current_task,
+                    tools_available=tools_available,
+                    active_tool_names=tuple(active_tool_names),
+                    user_choice_locked=user_choice_locked,
+                )
+            )
+        )
         safety_overlay = self._build_safety_overlay(tools_available=tools_available)
         if safety_overlay:
             full_context.append(SystemMessage(content=safety_overlay))
@@ -315,34 +326,11 @@ class ContextBuilder:
     def _build_system_message(
         self,
         summary: str,
-        *,
-        tools_available: bool = True,
-        active_tool_names: Optional[List[str]] = None,
     ) -> SystemMessage:
         raw_prompt = self._prompt_loader()
 
         prompt = raw_prompt.replace("{{current_date}}", datetime.now().strftime("%Y-%m-%d"))
         prompt = prompt.replace("{{cwd}}", str(Path.cwd()))
-
-        if self.config.strict_mode:
-            prompt += "\nNOTE: STRICT MODE ENABLED. Be precise. No guessing."
-
-        if not tools_available:
-            prompt += "\nNOTE: You are in CHAT-ONLY mode. Tools are disabled for this request."
-            prompt += (
-                "\nACTIVE_TOOLS_FOR_THIS_REQUEST: none. "
-                "Do not claim any tool is available in this request."
-            )
-        else:
-            names = [str(name).strip() for name in (active_tool_names or []) if str(name).strip()]
-            if names and len(names) <= 4:
-                prompt += (
-                    "\nACTIVE_TOOLS_FOR_THIS_REQUEST: "
-                    + ", ".join(names)
-                    + ". Do not claim other tools are available."
-                )
-            else:
-                prompt += "\nACTIVE_TOOLS_FOR_THIS_REQUEST: use only tools bound in this request."
 
         if summary:
             prompt += f"\n\n<memory>\n{summary}\n</memory>"

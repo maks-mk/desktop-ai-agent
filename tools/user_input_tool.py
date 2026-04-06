@@ -18,6 +18,10 @@ def request_user_input(
     - External information is required and cannot be inferred from context.
 
     Do not use for uncertainty you can resolve with available tools.
+    Do not call more than once in the same assistant turn.
+    Do not batch multiple user-input requests.
+    Ask one concrete question, wait for resume, then continue with the answer.
+    For demo or test requests, do exactly one call and then finish with a brief confirmation.
     """
     result = interrupt(
         {

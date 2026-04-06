@@ -63,6 +63,16 @@ class OpenAIContentSafeFakeLLM(FakeLLM):
         return await super().ainvoke(context)
 
 
+class FakeBindableLLM(FakeLLM):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.bound_tool_name_batches = []
+
+    def bind_tools(self, tools):
+        self.bound_tool_name_batches.append([tool.name for tool in tools])
+        return self
+
+
 class FakeTool:
     def __init__(self, name, result):
         self.name = name
@@ -1310,6 +1320,133 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, HumanMessage)
         ]
         self.assertIn("проверь list_mistral_models.py", visible_humans)
+
+    async def test_agent_node_drops_extra_request_user_input_calls_in_one_response(self):
+        agent_llm = FakeLLM(
+            [
+                AIMessage(
+                    content="Запрашиваю выбор пользователя.",
+                    tool_calls=[
+                        {
+                            "name": "request_user_input",
+                            "args": {"question": "Первый выбор", "options": ["A", "B"]},
+                            "id": "tc-user-1",
+                        },
+                        {
+                            "name": "request_user_input",
+                            "args": {"question": "Второй выбор", "options": ["C", "D"]},
+                            "id": "tc-user-2",
+                        },
+                    ],
+                )
+            ]
+        )
+        user_input_tool = FakeTool("request_user_input", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[user_input_tool],
+            llm_with_tools=agent_llm,
+        )
+
+        result = await nodes.agent_node(self._initial_state("Проведи тест user input"))
+
+        self.assertEqual(result["turn_outcome"], "run_tools")
+        self.assertTrue(result["has_protocol_error"])
+        response = result["messages"][-1]
+        self.assertIsInstance(response, AIMessage)
+        self.assertEqual(len(response.tool_calls), 1)
+        self.assertEqual(response.tool_calls[0]["id"], "tc-user-1")
+        self.assertEqual(str(response.content), "Запрашиваю выбор пользователя.")
+
+    async def test_agent_node_blocks_second_request_user_input_in_same_turn(self):
+        agent_llm = FakeLLM(
+            [
+                AIMessage(
+                    content="Запрашиваю еще один выбор.",
+                    tool_calls=[
+                        {
+                            "name": "request_user_input",
+                            "args": {"question": "Еще вопрос", "options": ["Да", "Нет"]},
+                            "id": "tc-user-repeat",
+                        }
+                    ],
+                ),
+                AIMessage(content="Продолжаю работу с уже выбранным вариантом."),
+            ]
+        )
+        user_input_tool = FakeTool("request_user_input", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[user_input_tool],
+            llm_with_tools=agent_llm,
+        )
+        state = self._initial_state("Проведи тест user input")
+        state["messages"] = [
+            HumanMessage(content="Проведи тест user input"),
+            AIMessage(
+                content="Запрашиваю выбор.",
+                tool_calls=[
+                    {
+                        "name": "request_user_input",
+                        "args": {"question": "Первый вопрос", "options": ["A", "B"]},
+                        "id": "tc-user-initial",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="A",
+                tool_call_id="tc-user-initial",
+                name="request_user_input",
+            ),
+        ]
+
+        result = await nodes.agent_node(state)
+
+        self.assertEqual(result["turn_outcome"], "")
+        self.assertFalse(result["has_protocol_error"])
+        response = result["messages"][-1]
+        self.assertIsInstance(response, AIMessage)
+        self.assertFalse(response.tool_calls)
+        self.assertEqual(str(response.content), "Продолжаю работу с уже выбранным вариантом.")
+        self.assertEqual(len(agent_llm.invocations), 2)
+
+    async def test_agent_node_excludes_request_user_input_from_bound_tools_after_choice(self):
+        agent_llm = FakeBindableLLM([AIMessage(content="Продолжаю без нового вопроса.")])
+        user_input_tool = FakeTool("request_user_input", "ignored")
+        read_tool = FakeTool("read_file", "ok")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[user_input_tool, read_tool],
+            llm_with_tools=agent_llm,
+        )
+        state = self._initial_state("Проведи тест user input")
+        state["messages"] = [
+            HumanMessage(content="Проведи тест user input"),
+            AIMessage(
+                content="Запрашиваю выбор.",
+                tool_calls=[
+                    {
+                        "name": "request_user_input",
+                        "args": {"question": "Первый вопрос", "options": ["A", "B"]},
+                        "id": "tc-user-initial",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="A",
+                tool_call_id="tc-user-initial",
+                name="request_user_input",
+            ),
+        ]
+
+        await nodes.agent_node(state)
+
+        self.assertTrue(agent_llm.bound_tool_name_batches)
+        self.assertNotIn("request_user_input", agent_llm.bound_tool_name_batches[-1])
+        self.assertIn("read_file", agent_llm.bound_tool_name_batches[-1])
 
     async def test_worker_delete_active_session_switches_to_fallback_session(self):
         tmp = self._workspace_tempdir()

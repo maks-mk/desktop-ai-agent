@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 # Agent version (single source of truth)
-AGENT_VERSION = "v0.65.4b"
+AGENT_VERSION = "v0.65.5b"
 
 # Определение корневой директории проекта
 if getattr(sys, 'frozen', False):

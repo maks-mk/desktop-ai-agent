@@ -1,9 +1,27 @@
 # Autonomous AI Agent (GUI)
 
-Версия: `v0.65.4b`
+Версия: `v0.65.5b`
 
 Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PySide6`.
 Приложение ориентировано на повседневную разработку: работа с файлами проекта, запуск инструментов, безопасные approvals для рискованных действий, структурированный user-choice flow через `interrupt()` и удобная история чатов по проектам.
+
+## Структура проекта
+
+```text
+v0.62.3b_gui/
+├─ agent.py
+├─ main.py
+├─ prompt.txt
+├─ core/
+├─ tools/
+├─ ui/
+└─ tests/
+```
+
+- `core/` — граф, policy/recovery, контекст, состояние и persistence.
+- `tools/` — локальные и MCP инструменты, реестр и safety metadata.
+- `ui/` — окно, runtime-контроллер, stream-processing и виджеты.
+- `tests/` — unit/integration regression наборы.
 
 ## Ключевые возможности
 
@@ -51,6 +69,7 @@ Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PyS
 - [`ui/visibility.py`](ui/visibility.py): контракт внутренних assistant/recovery сообщений и политика их показа в UI.
 - [`core/nodes.py`](core/nodes.py): узлы графа, recovery-loop (`stability_guard` + `recovery`), structured repair strategies, loop-guards, tool-preflight и safety flow.
 - [`core/context_builder.py`](core/context_builder.py): сборка и нормализация LLM-контекста с provider-safe ordering.
+- [`core/runtime_prompt_policy.py`](core/runtime_prompt_policy.py): runtime policy overlays и динамические system-инструкции (OS/shell/path style, workspace/cwd, timezone, tool-access, `request_user_input` rules).
 - [`core/session_store.py`](core/session_store.py): хранение и индекс сессий.
 - [`core/config.py`](core/config.py): загрузка env-конфигурации.
 - [`tools/tool_registry.py`](tools/tool_registry.py): локальные и MCP инструменты, метаданные, политика безопасности.
@@ -70,6 +89,8 @@ Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PyS
 - [`core/model_profiles.py`](core/model_profiles.py): профили моделей и merge логика для GUI.
 - [`core/nodes.py`](core/nodes.py): узлы LangGraph, agent flow, tool execution и self-correction.
 - [`core/policy_engine.py`](core/policy_engine.py): turn policy и правила fallback/approval для tool calls.
+- [`core/recovery_manager.py`](core/recovery_manager.py): стратегии восстановления, handoff и UI-notices для recovery flow.
+- [`core/runtime_prompt_policy.py`](core/runtime_prompt_policy.py): единый builder runtime contract на основе фактического окружения.
 - [`core/run_logger.py`](core/run_logger.py): JSONL-логирование событий запуска.
 - [`core/safety_policy.py`](core/safety_policy.py): ограничения на инструменты, файлы и процессы.
 - [`core/self_correction_engine.py`](core/self_correction_engine.py): ремонт tool-call аргументов и repair plan.
@@ -105,11 +126,13 @@ Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PyS
 
 - [`tools/tool_registry.py`](tools/tool_registry.py): загрузка локальных и MCP инструментов.
 - [`tools/filesystem.py`](tools/filesystem.py): файловые инструменты верхнего уровня.
+- [`tools/filesystem_impl/`](tools/filesystem_impl): внутренняя реализация файлового слоя (`manager`, `pathing`, `editing`).
 - [`tools/delete_tools.py`](tools/delete_tools.py): удаление файлов и директорий.
 - [`tools/local_shell.py`](tools/local_shell.py): shell/terminal execution tools.
 - [`tools/process_tools.py`](tools/process_tools.py): управление процессами.
 - [`tools/search_tools.py`](tools/search_tools.py): web/search tools.
 - [`tools/system_tools.py`](tools/system_tools.py): системные и диагностические инструменты.
+- [`tools/user_input_tool.py`](tools/user_input_tool.py): HITL-инструмент выбора пользователя через `interrupt()/resume`.
 
 ## Tool Routing
 

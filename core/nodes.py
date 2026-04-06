@@ -7,8 +7,6 @@ import re
 import time
 from contextlib import nullcontext
 from copy import deepcopy
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import (
@@ -670,6 +668,7 @@ class AgentNodes:
         open_tool_issue: Dict[str, Any] | None,
         recovery_state: Dict[str, Any] | None = None,
         state: AgentState | None = None,
+        user_choice_locked: bool = False,
     ) -> List[BaseMessage]:
         return self.context_builder.build(
             messages,
@@ -680,6 +679,7 @@ class AgentNodes:
             active_tool_names=active_tool_names,
             open_tool_issue=open_tool_issue,
             recovery_state=recovery_state,
+            user_choice_locked=user_choice_locked,
         )
 
     def _normalize_system_prefix_for_provider(
@@ -707,31 +707,6 @@ class AgentNodes:
     ) -> List[BaseMessage]:
         return self.context_builder.sanitize_messages(messages, state=state)
 
-    def _build_safety_overlay(self, tools_available: bool) -> str:
-        if not tools_available:
-            return ""
-        overlay_lines: List[str] = []
-        
-        overlay_lines.append(
-        "MANDATORY: Before EVERY tool call, you MUST write 1-2 short sentences "
-        "in plain text describing what you are about to do. "
-        "A response that starts directly with a tool call (no text) is a protocol violation."
-        )
-
-        overlay_lines.append(
-            "SAFETY POLICY: Any write, delete, move, or process-launch working directory must stay inside the active workspace."
-        )
-
-        if self.config.enable_approvals:
-            overlay_lines.append(
-                "LEGACY POLICY: Some protected tools may still request explicit approval when approvals are enabled."
-            )
-        if self.config.enable_shell_tool:
-            overlay_lines.append(
-                "SAFETY POLICY: Shell execution is high risk. Prefer safer project-local tools whenever possible."
-            )
-        return "\n".join(overlay_lines).strip()
-
     def _build_agent_result(
         self,
         response: AIMessage,
@@ -741,6 +716,7 @@ class AgentNodes:
         messages: List[BaseMessage],
         open_tool_issue: Dict[str, Any] | None = None,
         recovery_state: Dict[str, Any] | None = None,
+        allowed_tool_names: List[str] | None = None,
     ) -> Dict[str, Any]:
         token_usage_update = {}
         if getattr(response, "usage_metadata", None):
@@ -753,6 +729,7 @@ class AgentNodes:
         if isinstance(response, AIMessage):
             t_calls = list(getattr(response, "tool_calls", []))
             invalid_calls = list(getattr(response, "invalid_tool_calls", []))
+            retry_user_input_turn = False
 
             missing_fields = [
                 tc for tc in t_calls
@@ -768,6 +745,25 @@ class AgentNodes:
                     id=response.id,
                 )
                 t_calls = []
+            else:
+                (
+                    t_calls,
+                    user_input_protocol_error,
+                    retry_user_input_turn,
+                ) = self._sanitize_user_input_tool_calls(
+                    t_calls,
+                    messages,
+                )
+                t_calls = self._filter_tool_calls_for_turn(
+                    t_calls,
+                    allowed_tool_names=allowed_tool_names,
+                )
+                if user_input_protocol_error:
+                    protocol_error = self._merge_protocol_error_text(
+                        protocol_error,
+                        user_input_protocol_error,
+                    )
+                    response = response.model_copy(update={"tool_calls": t_calls})
 
             has_tool_calls = bool(tools_available and t_calls)
             if has_tool_calls and open_tool_issue and open_tool_issue.get("kind") == "approval_denied":
@@ -793,8 +789,24 @@ class AgentNodes:
             "has_protocol_error": bool(protocol_error),
             "last_tool_error": "",
             "last_tool_result": "",
+            "_retry_user_input_turn": retry_user_input_turn,
             **token_usage_update,
         }
+
+    def _filter_tool_calls_for_turn(
+        self,
+        tool_calls: List[Dict[str, Any]],
+        *,
+        allowed_tool_names: List[str] | None,
+    ) -> List[Dict[str, Any]]:
+        if not tool_calls or allowed_tool_names is None:
+            return tool_calls
+        allowed = {self._normalize_tool_name(name) for name in allowed_tool_names}
+        return [
+            tool_call
+            for tool_call in tool_calls
+            if self._normalize_tool_name(tool_call.get("name") or "") in allowed
+        ]
 
     def _merge_protocol_error_into_content(self, content: Any, protocol_error: str) -> str:
         base_text = stringify_content(content).strip()
@@ -803,6 +815,15 @@ class AgentNodes:
         if not base_text:
             return protocol_error
         return f"{base_text}\n\n{protocol_error}"
+
+    def _merge_protocol_error_text(self, existing: str, addition: str) -> str:
+        left = str(existing or "").strip()
+        right = str(addition or "").strip()
+        if not left:
+            return right
+        if not right:
+            return left
+        return f"{left}\n{right}"
 
     def _build_tool_protocol_error(
         self,
@@ -824,6 +845,44 @@ class AgentNodes:
             f"{joined}. Do not invent tool names or IDs. "
             "If tools are still needed, issue a fresh valid tool call."
         )
+
+    def _sanitize_user_input_tool_calls(
+        self,
+        tool_calls: List[Dict[str, Any]],
+        messages: List[BaseMessage],
+    ) -> Tuple[List[Dict[str, Any]], str, bool]:
+        if not tool_calls:
+            return tool_calls, "", False
+
+        user_input_calls = [
+            tool_call
+            for tool_call in tool_calls
+            if self._normalize_tool_name(tool_call.get("name") or "") == "request_user_input"
+        ]
+        if not user_input_calls:
+            return tool_calls, "", False
+
+        if self._current_turn_has_user_input_request(messages):
+            return [], (
+                "INTERNAL TOOL PROTOCOL ERROR: request_user_input may be called at most once per user turn. "
+                "You already asked for user input in this turn. Use the answer you already received and continue "
+                "instead of asking another question."
+            ), True
+
+        if len(user_input_calls) == 1 and len(tool_calls) == 1:
+            return tool_calls, "", False
+
+        first_user_input_call = user_input_calls[0]
+        if len(user_input_calls) > 1:
+            return [first_user_input_call], (
+                "INTERNAL TOOL PROTOCOL ERROR: request_user_input may appear at most once in a single assistant "
+                "response. Extra user-input requests were dropped. Ask one question, wait for resume, then continue."
+            ), False
+
+        return [first_user_input_call], (
+            "INTERNAL TOOL PROTOCOL ERROR: request_user_input cannot be combined with other tool calls in the same "
+            "assistant response. Non-user-input tool calls were dropped. Ask one question, wait for resume, then continue."
+        ), False
     
     # --- NODE: AGENT ---
 
@@ -848,9 +907,15 @@ class AgentNodes:
             current_task=current_task,
         )
 
-        active_tool_names = list(self._all_tool_names) if self.config.model_supports_tools else []
-        llm_for_turn = self.llm_with_tools if active_tool_names else self.llm
+        active_tools, active_tool_names = self._active_tools_for_turn(messages)
+        if active_tool_names == list(self._all_tool_names):
+            llm_for_turn = self.llm_with_tools if active_tool_names else self.llm
+        elif active_tools:
+            llm_for_turn = self.llm.bind_tools(active_tools)
+        else:
+            llm_for_turn = self.llm
         tools_available = bool(active_tool_names)
+        user_choice_locked = self._current_turn_has_completed_user_choice(messages)
         turn_policy = self.policy_engine.evaluate_turn(
             task=current_task,
             messages=messages,
@@ -890,6 +955,7 @@ class AgentNodes:
                 open_tool_issue,
                 recovery_state,
                 state=state,
+                user_choice_locked=user_choice_locked,
             )
             self._assert_provider_safe_agent_context(full_context, state)
             response = await self._invoke_llm_with_retry(
@@ -906,7 +972,46 @@ class AgentNodes:
                 messages,
                 open_tool_issue=open_tool_issue,
                 recovery_state=recovery_state,
+                allowed_tool_names=active_tool_names,
             )
+            if result.pop("_retry_user_input_turn", False):
+                self._log_run_event(
+                    state,
+                    "user_input_reask_suppressed",
+                    run_id=state.get("run_id", ""),
+                    step=state.get("steps", 0),
+                    current_task=current_task,
+                )
+                retry_context = self._normalize_system_prefix_for_provider(
+                    [
+                        *full_context,
+                        SystemMessage(
+                            content=(
+                                "USER INPUT ALREADY PROVIDED IN THIS TURN. "
+                                "Do not call request_user_input again. "
+                                "Use the latest request_user_input ToolMessage as the user's final choice and continue."
+                            )
+                        ),
+                    ]
+                )
+                self._assert_provider_safe_agent_context(retry_context, state)
+                response = await self._invoke_llm_with_retry(
+                    llm_for_turn,
+                    retry_context,
+                    state=state,
+                    node_name="agent_retry_after_user_choice",
+                )
+                result = self._build_agent_result(
+                    response,
+                    current_task,
+                    tools_available,
+                    current_turn_id,
+                    messages,
+                    open_tool_issue=open_tool_issue,
+                    recovery_state=recovery_state,
+                    allowed_tool_names=active_tool_names,
+                )
+                result.pop("_retry_user_input_turn", None)
             tool_calls_count = len(getattr(response, "tool_calls", []) or [])
             self._log_run_event(
                 state,
@@ -1411,6 +1516,7 @@ class AgentNodes:
         last_result = ""
         tool_issues: List[Dict[str, Any]] = []
         approval_state = state.get("pending_approval") or {}
+        _, active_tool_names = self._active_tools_for_turn(messages)
 
         # Оптимизация: собираем историю вызовов один раз, а не для каждого инструмента.
         # ВАЖНО: исключаем последний AI message, чтобы текущий вызов не считался "повтором".
@@ -1436,7 +1542,14 @@ class AgentNodes:
             if parallel_mode:
                 processed = await asyncio.gather(
                     *(
-                        self._process_tool_call(tool_call, recent_calls, state, approval_state, current_turn_id)
+                        self._process_tool_call(
+                            tool_call,
+                            recent_calls,
+                            state,
+                            approval_state,
+                            current_turn_id,
+                            active_tool_names,
+                        )
                         for tool_call in tool_calls
                     )
                 )
@@ -1458,6 +1571,7 @@ class AgentNodes:
                         state,
                         approval_state,
                         current_turn_id,
+                        active_tool_names,
                     )
                     final_messages.append(tool_msg)
                     has_error = has_error or had_error
@@ -1525,7 +1639,12 @@ class AgentNodes:
     def _tool_is_allowed_for_turn(
         self,
         tool_name: str,
+        allowed_tool_names: List[str] | None = None,
     ) -> bool:
+        if allowed_tool_names is not None:
+            return self._normalize_tool_name(tool_name) in {
+                self._normalize_tool_name(name) for name in allowed_tool_names
+            }
         return (
             bool(self.config.model_supports_tools)
             and bool(self._all_tool_names)
@@ -1541,6 +1660,7 @@ class AgentNodes:
         state: AgentState,
         approval_state: Dict[str, Any],
         current_turn_id: int,
+        allowed_tool_names: List[str] | None = None,
     ) -> Tuple[ToolMessage, bool, Dict[str, Any] | None]:
         # Безопасное извлечение с фоллбеками
         t_name = tool_call.get("name") or "unknown_tool"
@@ -1570,9 +1690,13 @@ class AgentNodes:
         had_error = False
         tool_duration_seconds: float | None = None
         metadata = self._effective_tool_metadata(t_name, t_args)
-        active_tool_names = list(self._all_tool_names) if self.config.model_supports_tools else []
+        active_tool_names = (
+            list(allowed_tool_names)
+            if allowed_tool_names is not None
+            else (list(self._all_tool_names) if self.config.model_supports_tools else [])
+        )
 
-        if not self._tool_is_allowed_for_turn(t_name):
+        if not self._tool_is_allowed_for_turn(t_name, allowed_tool_names):
             outcome = self.tool_executor.build_not_allowed_result(
                 state=state,
                 current_turn_id=current_turn_id,
@@ -1854,6 +1978,54 @@ class AgentNodes:
             return derived_task
         return stored_task
 
+    def _active_tools_for_turn(self, messages: List[BaseMessage]) -> Tuple[List[BaseTool], List[str]]:
+        if not self.config.model_supports_tools:
+            return [], []
+
+        active_tools = list(self.tools)
+        if self._current_turn_has_completed_user_choice(messages):
+            active_tools = [
+                tool
+                for tool in active_tools
+                if self._normalize_tool_name(tool.name) != "request_user_input"
+            ]
+        return active_tools, [tool.name for tool in active_tools]
+
+    def _current_turn_has_completed_user_choice(self, messages: List[BaseMessage]) -> bool:
+        human_indexes = self.message_context.non_internal_human_indexes(
+            messages,
+            self._is_internal_retry_message,
+        )
+        if not human_indexes:
+            return False
+
+        start_idx = human_indexes[-1] + 1
+        for message in messages[start_idx:]:
+            if isinstance(message, ToolMessage):
+                if self._normalize_tool_name(message.name or "") == "request_user_input":
+                    return True
+        return False
+
+    def _current_turn_has_user_input_request(self, messages: List[BaseMessage]) -> bool:
+        human_indexes = self.message_context.non_internal_human_indexes(
+            messages,
+            self._is_internal_retry_message,
+        )
+        if not human_indexes:
+            return False
+
+        start_idx = human_indexes[-1] + 1
+        for message in messages[start_idx:]:
+            if isinstance(message, ToolMessage):
+                if self._normalize_tool_name(message.name or "") == "request_user_input":
+                    return True
+                continue
+            if isinstance(message, (AIMessage, AIMessageChunk)):
+                for tool_call in getattr(message, "tool_calls", []) or []:
+                    if self._normalize_tool_name(tool_call.get("name") or "") == "request_user_input":
+                        return True
+        return False
+
     def _build_tool_issue_handoff_text(
         self,
         open_tool_issue: Dict[str, Any] | None,
@@ -1931,40 +2103,6 @@ class AgentNodes:
                     "Date: {{current_date}}"
                 )
         return self._cached_base_prompt
-
-    def _build_system_message(
-        self,
-        summary: str,
-        tools_available: bool = True,
-        active_tool_names: Optional[List[str]] = None,
-    ) -> SystemMessage:
-        raw_prompt = self._get_base_prompt()
-
-        prompt = raw_prompt.replace("{{current_date}}", datetime.now().strftime("%Y-%m-%d"))
-        prompt = prompt.replace("{{cwd}}", str(Path.cwd()))
-
-        if self.config.strict_mode:
-            prompt += "\nNOTE: STRICT MODE ENABLED. Be precise. No guessing."
-
-        if not tools_available:
-            prompt += "\nNOTE: You are in CHAT-ONLY mode. Tools are disabled for this request."
-            prompt += (
-                "\nACTIVE_TOOLS_FOR_THIS_REQUEST: none. "
-                "Do not claim any tool is available in this request."
-            )
-        else:
-            names = [str(name).strip() for name in (active_tool_names or []) if str(name).strip()]
-            if names:
-                prompt += (
-                    "\nACTIVE_TOOLS_FOR_THIS_REQUEST: "
-                    + ", ".join(names)
-                    + ". Do not claim other tools are available."
-                )
-
-        if summary:
-            prompt += f"\n\n<memory>\n{summary}\n</memory>"
-
-        return SystemMessage(content=prompt)
 
     async def _invoke_llm_with_retry(
         self,
