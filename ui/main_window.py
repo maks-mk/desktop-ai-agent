@@ -23,6 +23,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.constants import AGENT_VERSION
+from core.multimodal import (
+    DEFAULT_MODEL_CAPABILITIES,
+    import_image_attachment_from_file,
+    import_image_attachment_from_qimage,
+    normalize_image_attachments,
+    resolve_model_capabilities,
+)
 from core.model_profiles import normalize_profiles_payload
 from ui.runtime import AgentRuntimeController
 from ui.theme import ACCENT_BLUE, ERROR_RED, SUCCESS_GREEN, TEXT_MUTED, build_stylesheet
@@ -30,6 +37,7 @@ from ui.widgets import (
     ApprovalDialog,
     ChatTranscriptWidget,
     ComposerTextEdit,
+    ImageAttachmentStripWidget,
     InfoPopupDialog,
     ModelSettingsDialog,
     SessionSidebarWidget,
@@ -63,6 +71,8 @@ class MainWindow(QMainWindow):
         self._tools_hash: int = 0  # cache: skip set_tools rebuild when tools haven’t changed
         self._summarize_in_progress = False
         self.model_profiles_payload: dict = {"active_profile": None, "profiles": []}
+        self.model_capabilities: dict = dict(DEFAULT_MODEL_CAPABILITIES)
+        self.draft_image_attachments: list[dict] = []
         self._has_active_model = False
         self._primary_status_label = "Initializing runtime…"
         self._status_message_ticket = 0
@@ -279,6 +289,15 @@ class MainWindow(QMainWindow):
         pill_layout.setContentsMargins(10, 8, 8, 8)
         pill_layout.setSpacing(6)
 
+        self.composer_attachments_strip = ImageAttachmentStripWidget(thumb_size=48, removable=True)
+        pill_layout.addWidget(self.composer_attachments_strip)
+
+        self.composer_notice_label = QLabel("")
+        self.composer_notice_label.setObjectName("ComposerNoticeLabel")
+        self.composer_notice_label.setWordWrap(True)
+        self.composer_notice_label.setVisible(False)
+        pill_layout.addWidget(self.composer_notice_label)
+
         self.composer = ComposerTextEdit()
         self.composer.setPlaceholderText("Ask the agent…")
         line_spacing = max(14, self.composer.fontMetrics().lineSpacing())
@@ -300,7 +319,12 @@ class MainWindow(QMainWindow):
         self.attach_button.setIconSize(QSize(12, 12))
         self.attach_button.setFixedSize(28, 28)
         self.attach_button.setObjectName("ComposerAttachButton")
-        self.attach_button.setToolTip("Attach file")
+        self.attach_button.setToolTip("Add image or Add files")
+        self.attach_menu = QMenu(self.attach_button)
+        self.add_image_action = self.attach_menu.addAction("Add image…")
+        self.insert_file_path_action = self.attach_menu.addAction("Add files…")
+        self.attach_button.setMenu(self.attach_menu)
+        self.attach_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         control_row.addWidget(self.attach_button, 0, Qt.AlignVCenter)
 
         self.model_chip = QToolButton()
@@ -315,6 +339,11 @@ class MainWindow(QMainWindow):
         self.model_chip_group = QActionGroup(self.model_chip_menu)
         self.model_chip_group.setExclusive(True)
         control_row.addWidget(self.model_chip, 0, Qt.AlignVCenter)
+
+        self.model_image_badge = QLabel("no img")
+        self.model_image_badge.setObjectName("ComposerCapabilityBadge")
+        self.model_image_badge.setVisible(False)
+        control_row.addWidget(self.model_image_badge, 0, Qt.AlignVCenter)
 
         self.no_models_label = QLabel("No models configured")
         self.no_models_label.setObjectName("ComposerNoModelText")
@@ -387,13 +416,18 @@ class MainWindow(QMainWindow):
         self.sidebar.session_delete_requested.connect(self._request_delete_session)
 
         self.send_button.clicked.connect(self._submit_request)
-        self.attach_button.clicked.connect(self._attach_file)
+        self.add_image_action.triggered.connect(self._attach_images)
+        self.insert_file_path_action.triggered.connect(self._insert_file_paths)
         self.model_chip_menu.triggered.connect(self._on_model_action_triggered)
         self.composer.submit_requested.connect(self._submit_request)
+        self.composer.image_pasted.connect(self._handle_pasted_image)
+        self.composer.image_files_pasted.connect(self._handle_pasted_image_files)
         self.composer.textChanged.connect(self._queue_composer_height_sync)
+        self.composer.textChanged.connect(self._refresh_submit_controls)
         self.composer.document().documentLayout().documentSizeChanged.connect(
             self._queue_composer_height_sync
         )
+        self.composer_attachments_strip.attachment_remove_requested.connect(self._remove_draft_attachment)
         self.user_choice_card.option_selected.connect(self._handle_user_choice_selected)
         self.user_choice_card.custom_option_requested.connect(self._handle_custom_choice_requested)
 
@@ -453,12 +487,111 @@ class MainWindow(QMainWindow):
         new_height = max(self._composer_min_height, min(doc_height, self._composer_max_height))
         if self.composer.height() != new_height:
             self.composer.setFixedHeight(new_height)
-            
+
+    def _active_model_supports_images(self) -> bool:
+        capabilities = resolve_model_capabilities(self._active_model_profile(), self.model_capabilities)
+        return bool(capabilities.get("image_input_supported"))
+
+    def _composer_has_request_content(self) -> bool:
+        return bool(self.composer.toPlainText().strip() or self.draft_image_attachments)
+
+    def _request_blocked_by_image_capability(self) -> bool:
+        return bool(self.draft_image_attachments) and not self._active_model_supports_images()
+
+    def _show_composer_notice(self, message: str, *, level: str = "warning") -> None:
+        self.composer_notice_label.setText(str(message or "").strip())
+        self.composer_notice_label.setProperty("severity", level)
+        self.composer_notice_label.style().unpolish(self.composer_notice_label)
+        self.composer_notice_label.style().polish(self.composer_notice_label)
+        self.composer_notice_label.setVisible(bool(message))
+
+    def _clear_composer_notice(self) -> None:
+        self.composer_notice_label.clear()
+        self.composer_notice_label.setProperty("severity", "")
+        self.composer_notice_label.style().unpolish(self.composer_notice_label)
+        self.composer_notice_label.style().polish(self.composer_notice_label)
+        self.composer_notice_label.setVisible(False)
+
+    def _refresh_draft_attachments(self) -> None:
+        self.composer_attachments_strip.set_attachments(self.draft_image_attachments)
+        self._refresh_submit_controls()
+
+    def _clear_draft_image_attachments(self) -> None:
+        self.draft_image_attachments = []
+        self._refresh_draft_attachments()
+
+    def _append_draft_image_attachments(self, attachments: list[dict] | None) -> None:
+        existing_paths = {str(item.get("path") or "").strip() for item in self.draft_image_attachments}
+        for attachment in normalize_image_attachments(attachments):
+            path = str(attachment.get("path") or "").strip()
+            if path and path not in existing_paths:
+                self.draft_image_attachments.append(attachment)
+                existing_paths.add(path)
+        self._refresh_draft_attachments()
+
+    def _remove_draft_attachment(self, attachment_id: str) -> None:
+        target_id = str(attachment_id or "").strip()
+        if not target_id:
+            return
+        self.draft_image_attachments = [
+            item for item in self.draft_image_attachments if str(item.get("id") or "").strip() != target_id
+        ]
+        if not self.draft_image_attachments:
+            self._clear_composer_notice()
+        self._refresh_draft_attachments()
+
+    def _import_image_files(self, file_paths: list[str]) -> None:
+        if not file_paths:
+            return
+        if not self._active_model_supports_images():
+            self._show_composer_notice(
+                "Current model does not support image input. Switch models or use Add files instead.",
+                level="warning",
+            )
+            return
+        imported: list[dict] = []
+        for path in file_paths:
+            try:
+                imported.append(import_image_attachment_from_file(path, session_id=self.active_session_id))
+            except ValueError as exc:
+                self._show_composer_notice(str(exc), level="warning")
+        if imported:
+            self._append_draft_image_attachments(imported)
+            self._clear_composer_notice()
+
+    def _handle_pasted_image(self, image: object) -> None:
+        if not self._active_model_supports_images():
+            self._show_composer_notice(
+                "Current model does not support image input. Switch models or remove the pasted image.",
+                level="warning",
+            )
+            return
+        try:
+            attachment = import_image_attachment_from_qimage(image, session_id=self.active_session_id)
+        except ValueError as exc:
+            self._show_composer_notice(str(exc), level="warning")
+            return
+        self._append_draft_image_attachments([attachment])
+        self._clear_composer_notice()
+
+    def _handle_pasted_image_files(self, file_paths: object) -> None:
+        self._import_image_files([str(path) for path in list(file_paths or []) if str(path or "").strip()])
+
+    def _refresh_submit_controls(self, *_args) -> None:
+        self._set_input_enabled(True)
+
+    def _update_send_button_visual(self, can_send: bool) -> None:
+        icon_color = "#08090B" if can_send else "#8A857E"
+        self.send_button.setIcon(_fa_icon("fa5s.arrow-up", color=icon_color, size=14))
+
     # --- Individual event handlers (called from dispatch table) ---
 
     def _on_run_started(self, payload: dict) -> None:
         self._clear_user_choice_request()
-        self.current_turn = self.transcript.start_turn(payload.get("text", ""))
+        self.current_turn = self.transcript.start_turn(
+            payload.get("text", ""),
+            attachments=list(payload.get("attachments", []) or []),
+        )
         self._summarize_in_progress = False
         if self.current_turn is not None:
             self.current_turn.set_status("Thinking")
@@ -576,6 +709,8 @@ class MainWindow(QMainWindow):
         self.composer.reset_history_navigation()
         self.current_turn = None
         self.transcript.clear_transcript()
+        self._clear_draft_image_attachments()
+        self._clear_composer_notice()
         self._clear_user_choice_request()
         self._show_transient_status_message("Started a new session")
 
@@ -635,10 +770,19 @@ class MainWindow(QMainWindow):
             and not self.is_busy
             and (not self.awaiting_user_choice or self._custom_choice_armed)
         )
-        can_send = can_edit and self._has_active_model
+        can_send = (
+            can_edit
+            and self._has_active_model
+            and self._composer_has_request_content()
+            and not self._request_blocked_by_image_capability()
+        )
+        attach_enabled = enabled and not has_pending_interrupt and not self.is_busy
         self.composer.setEnabled(can_edit)
         self.send_button.setEnabled(can_send)
-        self.attach_button.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
+        self._update_send_button_visual(can_send)
+        self.attach_button.setEnabled(attach_enabled)
+        self.add_image_action.setEnabled(attach_enabled and self._has_active_model and self._active_model_supports_images())
+        self.insert_file_path_action.setEnabled(attach_enabled)
         self.model_chip.setEnabled(can_edit and self._has_active_model)
         self.open_settings_inline_button.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
         self.settings_button.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
@@ -667,7 +811,8 @@ class MainWindow(QMainWindow):
             model_id = str(active_profile.get("id") or model).strip() or "Model"
             provider = str(active_profile.get("provider") or "").strip() or snapshot.get("provider", "")
             self.model_chip.setText(model_id)
-            self.model_chip.setToolTip(f"Provider: {provider}\nModel: {model}")
+            capability_text = "yes" if self._active_model_supports_images() else "no"
+            self.model_chip.setToolTip(f"Provider: {provider}\nModel: {model}\nImage input: {capability_text}")
         else:
             model = snapshot.get("model", "unknown")
             self.model_chip.setText("No models")
@@ -692,6 +837,7 @@ class MainWindow(QMainWindow):
     def _refresh_model_selector(self) -> None:
         payload = self.model_profiles_payload if isinstance(self.model_profiles_payload, dict) else {}
         profiles = [item for item in payload.get("profiles", []) or [] if isinstance(item, dict)]
+        enabled_profiles = [item for item in profiles if bool(item.get("enabled", True))]
         active_id = str(payload.get("active_profile") or "").strip()
 
         self.model_chip_menu.clear()
@@ -700,16 +846,27 @@ class MainWindow(QMainWindow):
 
         if not profiles:
             self.model_chip.setVisible(False)
+            self.no_models_label.setText("No models configured")
             self.no_models_label.setVisible(True)
             self.open_settings_inline_button.setVisible(True)
             self._has_active_model = False
+            return
+
+        if not enabled_profiles:
+            self.model_chip.setVisible(False)
+            self.no_models_label.setText("All models disabled")
+            self.no_models_label.setVisible(True)
+            self.open_settings_inline_button.setVisible(True)
+            self._has_active_model = False
+            self.model_image_badge.setVisible(False)
+            self._refresh_submit_controls()
             return
 
         self.model_chip.setVisible(True)
         self.no_models_label.setVisible(False)
         self.open_settings_inline_button.setVisible(False)
 
-        for profile in profiles:
+        for profile in enabled_profiles:
             profile_id = str(profile.get("id") or "").strip()
             if not profile_id:
                 continue
@@ -725,15 +882,38 @@ class MainWindow(QMainWindow):
                 self.model_chip.setToolTip(f"Provider: {provider}\nModel: {model}")
             self.model_chip_group.addAction(action)
 
-        self._has_active_model = any(str(item.get("id") or "").strip() == active_id for item in profiles)
+        self._has_active_model = any(str(item.get("id") or "").strip() == active_id for item in enabled_profiles)
         if not self._has_active_model:
             self.model_chip.setText("No models")
-            self.model_chip.setToolTip("No active model selected")
+            self.model_chip.setToolTip("No enabled active model selected")
+        self.model_image_badge.setVisible(self._has_active_model and not self._active_model_supports_images())
+        self._refresh_submit_controls()
 
     def _apply_model_profiles_payload(self, payload: dict | None) -> None:
         self.model_profiles_payload = payload if isinstance(payload, dict) else {"active_profile": None, "profiles": []}
         self._refresh_model_selector()
+        if self._request_blocked_by_image_capability():
+            self._show_composer_notice(
+                "Current model does not support image input. Remove the images or switch to an image-capable model.",
+                level="warning",
+            )
+        else:
+            self._clear_composer_notice()
         self._set_input_enabled(True)
+
+    def _apply_model_capabilities_payload(self, payload: dict | None) -> None:
+        capabilities = payload if isinstance(payload, dict) else {}
+        self.model_capabilities = dict(DEFAULT_MODEL_CAPABILITIES)
+        self.model_capabilities.update({"image_input_supported": bool(capabilities.get("image_input_supported"))})
+        self.model_image_badge.setVisible(self._has_active_model and not self._active_model_supports_images())
+        if self._request_blocked_by_image_capability():
+            self._show_composer_notice(
+                "Current model does not support image input. Remove the images or switch to an image-capable model.",
+                level="warning",
+            )
+        else:
+            self._clear_composer_notice()
+        self._refresh_submit_controls()
 
     def _on_model_action_triggered(self, action: QAction) -> None:
         profile_id = str(action.data() or "").strip()
@@ -763,6 +943,7 @@ class MainWindow(QMainWindow):
         self.current_snapshot = payload.get("snapshot", {})
         self.active_session_id = payload.get("active_session_id", "")
         self._apply_model_profiles_payload(payload.get("model_profiles"))
+        self._apply_model_capabilities_payload(payload.get("model_capabilities"))
         if restore_transcript:
             self.composer.sync_session_history_from_transcript(
                 self.active_session_id,
@@ -783,6 +964,8 @@ class MainWindow(QMainWindow):
         if restore_transcript:
             self.current_turn = None
             self.transcript.load_transcript(payload.get("transcript"))
+            self._clear_draft_image_attachments()
+            self._clear_composer_notice()
             self._clear_user_choice_request()
 
     def _handle_busy_changed(self, busy: bool) -> None:
@@ -828,20 +1011,32 @@ class MainWindow(QMainWindow):
 
     def _submit_request(self) -> None:
         text = self.composer.toPlainText().strip()
-        if not text:
+        attachments = list(self.draft_image_attachments)
+        if not text and not attachments:
             return
         if self.awaiting_user_choice:
             if self.is_busy or self.awaiting_approval or not self._custom_choice_armed:
                 return
             self._clear_user_choice_request()
             self.composer.clear()
+            self._clear_draft_image_attachments()
             self.controller.resume_user_choice(text)
             self._set_input_enabled(False)
             return
+        if attachments and not self._active_model_supports_images():
+            self._show_composer_notice(
+                "Current model does not support image input. Switch models or remove the images.",
+                level="warning",
+            )
+            return
         self._clear_user_choice_request()
-        self.composer.append_submitted_message(text)
+        if text:
+            self.composer.append_submitted_message(text)
         self.composer.clear()
-        self.controller.start_run(text)
+        self._clear_composer_notice()
+        request_payload = {"text": text, "attachments": attachments}
+        self._clear_draft_image_attachments()
+        self.controller.start_run(request_payload)
         self._set_input_enabled(False)
 
     def _set_user_choice_request(self, payload: dict | None) -> None:
@@ -874,14 +1069,26 @@ class MainWindow(QMainWindow):
         self.composer.setFocus()
         self.composer.selectAll()
 
-    def _attach_file(self) -> None:
+    def _attach_images(self) -> None:
         if self.is_busy:
             return
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Files to Attach")
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Images to Attach",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)",
+        )
         if not file_paths:
             return
-        
-        # Append selected file paths to composer
+        self._import_image_files([str(path) for path in file_paths])
+
+    def _insert_file_paths(self) -> None:
+        if self.is_busy:
+            return
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Files to Insert")
+        if not file_paths:
+            return
+
         current_text = self.composer.toPlainText()
         if current_text and not current_text.endswith(" "):
             current_text += " "
@@ -928,6 +1135,8 @@ class MainWindow(QMainWindow):
         self.composer.set_history_session(session_id)
         self.current_turn = None
         self.transcript.clear_transcript()
+        self._clear_draft_image_attachments()
+        self._clear_composer_notice()
         self._clear_user_choice_request()
         self._show_transient_status_message("Switching chat…")
         self.controller.switch_session(session_id)
@@ -959,6 +1168,8 @@ class MainWindow(QMainWindow):
         self.composer.reset_history_navigation()
         self.current_turn = None
         self.transcript.clear_transcript()
+        self._clear_draft_image_attachments()
+        self._clear_composer_notice()
         self._clear_user_choice_request()
         self.controller.new_session()
         self._show_transient_status_message("Created a new session")

@@ -199,6 +199,33 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("↓ 321", stats)
         self.assertIn("↑ 8", stats)
 
+    def test_stream_processor_accumulates_total_elapsed_from_previous_segments(self):
+        events = []
+        perf_values = iter([100.0, 100.0])
+
+        def _fake_perf_counter():
+            try:
+                return next(perf_values)
+            except StopIteration:
+                return 102.7
+
+        processor = None
+        with mock.patch("ui.streaming.time.perf_counter", side_effect=_fake_perf_counter):
+            processor = StreamProcessor(events.append, base_elapsed_seconds=87.0)
+
+            async def _stream():
+                yield {
+                    "type": "messages",
+                    "data": (AIMessage(content="Готово"), {"langgraph_node": "agent"}),
+                }
+
+            result = asyncio.run(processor.process_stream(_stream()))
+
+        self.assertIsNotNone(result.stats)
+        self.assertAlmostEqual(result.elapsed_seconds, 89.7, places=1)
+        assert result.stats is not None
+        self.assertIn("89.7s", result.stats)
+
     def test_stream_processor_renders_stability_guard_handoff_messages(self):
         events = []
         processor = StreamProcessor(events.append)

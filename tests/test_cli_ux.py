@@ -1,17 +1,20 @@
 import os
+import shutil
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, Signal
-from PySide6.QtGui import QKeyEvent, QTextCursor, QTextFormat
+from PySide6.QtGui import QImage, QKeyEvent, QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar
 
 import main as agent_cli
 from core.gui_runtime import build_runtime_snapshot, summarize_approval_request
+from core.model_profiles import normalize_profiles_payload
 from core.stream_processor import StreamEvent
 from core.tool_policy import ToolMetadata
 from core.ui_theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
@@ -70,7 +73,7 @@ class FakeController(QObject):
 
     def __init__(self):
         super().__init__()
-        self.start_calls: list[str] = []
+        self.start_calls: list[object] = []
         self.resume_calls: list[tuple[bool, bool]] = []
         self.resume_choice_calls: list[str] = []
         self.new_session_calls = 0
@@ -85,7 +88,7 @@ class FakeController(QObject):
     def initialize(self):
         self.initialize_calls += 1
 
-    def start_run(self, text: str):
+    def start_run(self, text: object):
         self.start_calls.append(text)
 
     def resume_approval(self, approved: bool, always: bool = False):
@@ -146,6 +149,24 @@ class GuiUxTests(unittest.TestCase):
         self.window.composer.setPlainText(text)
         self.window._submit_request()
 
+    def _make_test_image_file(self, name: str = "sample.png") -> str:
+        temp_root = Path.cwd() / ".tmp_tests" / f"cli-ux-{time.time_ns()}"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: temp_root.exists() and shutil.rmtree(temp_root, ignore_errors=True))
+        image_path = temp_root / name
+        image = QImage(18, 12, QImage.Format_ARGB32)
+        image.fill(0xFF3A7AFE)
+        self.assertTrue(image.save(str(image_path), "PNG"))
+        return str(image_path)
+
+    def _make_test_file(self, name: str = "notes.txt", content: str = "demo") -> str:
+        temp_root = Path.cwd() / ".tmp_tests" / f"cli-ux-file-{time.time_ns()}"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: temp_root.exists() and shutil.rmtree(temp_root, ignore_errors=True))
+        file_path = temp_root / name
+        file_path.write_text(content, encoding="utf-8")
+        return str(file_path)
+
     def _snapshot_payload(self):
         config = type(
             "Config",
@@ -175,6 +196,7 @@ class GuiUxTests(unittest.TestCase):
             "snapshot": snapshot,
             "tools": snapshot["tools"],
             "help_markdown": "## Help\n- test",
+            "model_capabilities": {"image_input_supported": True},
             "sessions": [
                 {
                     "session_id": "session-1234567890abcdef",
@@ -203,6 +225,8 @@ class GuiUxTests(unittest.TestCase):
                         "model": "gpt-4o",
                         "api_key": "sk-demo",
                         "base_url": "",
+                        "supports_image_input": True,
+                        "enabled": True,
                     },
                     {
                         "id": "gemini-1-5-flash",
@@ -210,6 +234,8 @@ class GuiUxTests(unittest.TestCase):
                         "model": "gemini-1.5-flash",
                         "api_key": "gm-demo",
                         "base_url": "",
+                        "supports_image_input": False,
+                        "enabled": True,
                     },
                 ],
             },
@@ -258,8 +284,23 @@ class GuiUxTests(unittest.TestCase):
 
         self.window._submit_request()
 
-        self.assertEqual(self.controller.start_calls, ["Собери summary"])
+        self.assertEqual(self.controller.start_calls, [{"text": "Собери summary", "attachments": []}])
         self.assertEqual(self.window.composer.toPlainText(), "")
+
+    def test_send_button_keeps_visible_disabled_icon_until_input_exists(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._set_input_enabled(True)
+
+        disabled_icon_key = self.window.send_button.icon().cacheKey()
+        self.assertFalse(self.window.send_button.isEnabled())
+
+        self.window.composer.setPlainText("go")
+        self.window._refresh_submit_controls()
+        self._process_events()
+
+        enabled_icon_key = self.window.send_button.icon().cacheKey()
+        self.assertTrue(self.window.send_button.isEnabled())
+        self.assertNotEqual(disabled_icon_key, enabled_icon_key)
 
     def test_user_choice_card_renders_above_composer_and_resumes_selected_option(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -345,8 +386,86 @@ class GuiUxTests(unittest.TestCase):
         self.window.composer.moveCursor(QTextCursor.MoveOperation.End)
         self._press_composer_key(Qt.Key_Return, "\r")
 
-        self.assertEqual(self.controller.start_calls, ["Сделай задачу"])
+        self.assertEqual(self.controller.start_calls, [{"text": "Сделай задачу", "attachments": []}])
         self.assertEqual(self.window.composer.toPlainText(), "")
+
+    def test_paste_image_creates_draft_attachment_chip(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        mime = QMimeData()
+        image = QImage(14, 10, QImage.Format_ARGB32)
+        image.fill(0xFF44AA66)
+        mime.setImageData(image)
+
+        self.window.composer.insertFromMimeData(mime)
+        self._process_events()
+
+        self.assertEqual(len(self.window.draft_image_attachments), 1)
+        self.assertFalse(self.window.composer_attachments_strip.isHidden())
+        self.assertEqual(len(self.window.composer_attachments_strip._chips), 1)
+        self.assertTrue(self.window.send_button.isEnabled())
+        self.assertFalse(self.window.composer_notice_label.isVisible())
+
+    def test_run_started_with_attachments_renders_user_preview_row(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        attachment = {
+            "id": "img-1",
+            "path": self._make_test_image_file(),
+            "mime_type": "image/png",
+            "file_name": "sample.png",
+            "width": 18,
+            "height": 12,
+            "size_bytes": 128,
+        }
+
+        self.window._handle_event(
+            StreamEvent("run_started", {"text": "Опиши изображение", "attachments": [attachment]})
+        )
+        self._process_events()
+
+        self.assertIsNotNone(self.window.current_turn)
+        user_widget = self.window.current_turn._timeline[0][1]
+        self.assertFalse(user_widget.attachments_strip.isHidden())
+        self.assertEqual(len(user_widget.attachments_strip._chips), 1)
+
+    def test_no_img_badge_is_visible_and_image_paste_shows_notice(self):
+        payload = self._snapshot_payload()
+        payload["model_capabilities"] = {"image_input_supported": False}
+        payload["model_profiles"]["profiles"][0]["supports_image_input"] = False
+        self.window._handle_initialized(payload)
+        mime = QMimeData()
+        image = QImage(14, 10, QImage.Format_ARGB32)
+        image.fill(0xFFAA6644)
+        mime.setImageData(image)
+
+        self.window.composer.insertFromMimeData(mime)
+        self._process_events()
+
+        self.assertFalse(self.window.model_image_badge.isHidden())
+        self.assertEqual(self.window.model_image_badge.text(), "no img")
+        self.assertEqual(self.window.draft_image_attachments, [])
+        self.assertFalse(self.window.composer_notice_label.isHidden())
+        self.assertIn("does not support image input", self.window.composer_notice_label.text())
+
+    def test_profile_checkbox_can_override_runtime_no_img_badge(self):
+        payload = self._snapshot_payload()
+        payload["model_capabilities"] = {"image_input_supported": False}
+        payload["model_profiles"]["profiles"][0]["supports_image_input"] = True
+
+        self.window._handle_initialized(payload)
+        self.window._set_input_enabled(True)
+
+        self.assertTrue(self.window.model_image_badge.isHidden())
+        self.assertTrue(self.window.add_image_action.isEnabled())
+
+    def test_insert_file_paths_keeps_existing_text_reference_flow(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        file_path = self._make_test_file()
+
+        with mock.patch.object(agent_cli.QFileDialog, "getOpenFileNames", return_value=([file_path], "")):
+            self.window._insert_file_paths()
+
+        self.assertIn(self.window.composer.format_file_reference(file_path), self.window.composer.toPlainText())
+        self.assertEqual(self.window.draft_image_attachments, [])
 
     def test_composer_paste_single_line_text_drops_trailing_newline(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1387,7 +1506,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertGreaterEqual(self.window.composer_shell.contentsMargins().top(), 16)
 
     def test_composer_buttons_have_correct_tooltips(self):
-        self.assertEqual(self.window.attach_button.toolTip(), "Attach file")
+        self.assertEqual(self.window.attach_button.toolTip(), "Add image or insert file path")
         self.assertEqual(self.window.send_button.toolTip(), "Send (Enter)")
 
     def test_model_selector_renders_active_profile_and_tooltip(self):
@@ -1439,7 +1558,10 @@ class GuiUxTests(unittest.TestCase):
         with mock.patch.object(agent_cli, "ModelSettingsDialog", return_value=dialog_instance):
             self.window._open_settings_dialog()
 
-        self.assertEqual(self.controller.save_profiles_calls, [dialog_instance.result_payload.return_value])
+        self.assertEqual(
+            self.controller.save_profiles_calls,
+            [normalize_profiles_payload(dialog_instance.result_payload.return_value)],
+        )
         self.assertEqual(self.window.model_profiles_payload["active_profile"], "gemini-1-5-flash")
 
     def test_model_settings_dialog_does_not_wipe_profile_on_initial_selection(self):
@@ -1452,6 +1574,8 @@ class GuiUxTests(unittest.TestCase):
                     "model": "openai/gpt-4o",
                     "api_key": "sk-demo",
                     "base_url": "https://api.openai.com/v1",
+                    "supports_image_input": True,
+                    "enabled": True,
                 }
             ],
         }
@@ -1462,6 +1586,36 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(dialog._profiles[0]["model"], "openai/gpt-4o")
         self.assertEqual(dialog._profiles[0]["id"], "gpt-4o")
         self.assertEqual(dialog.model_edit.text(), "openai/gpt-4o")
+        self.assertTrue(dialog.supports_images_checkbox.isChecked())
+
+    def test_model_settings_dialog_opens_with_active_profile_selected(self):
+        payload = {
+            "active_profile": "gemini-1-5-flash",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+                {
+                    "id": "gemini-1-5-flash",
+                    "provider": "gemini",
+                    "model": "gemini-1.5-flash",
+                    "api_key": "gm-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+            ],
+        }
+        dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        self._process_events()
+
+        self.assertEqual(dialog._current_row(), 1)
+        self.assertIn("gemini-1-5-flash", dialog.form_hint.text())
 
     def test_model_settings_dialog_autofills_name_from_model_suffix(self):
         dialog = agent_cli.ModelSettingsDialog({"active_profile": None, "profiles": []}, self.window)
@@ -1486,6 +1640,8 @@ class GuiUxTests(unittest.TestCase):
                     "model": "openai/gpt-4o",
                     "api_key": "sk-demo",
                     "base_url": "https://api.openai.com/v1",
+                    "supports_image_input": False,
+                    "enabled": True,
                 }
             ],
         }
@@ -1497,6 +1653,127 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         self.assertEqual(dialog.name_edit.text(), "gpt-oss-120b")
+
+    def test_model_settings_dialog_saves_manual_image_support_checkbox(self):
+        dialog = agent_cli.ModelSettingsDialog({"active_profile": None, "profiles": []}, self.window)
+        self.addCleanup(dialog.close)
+        dialog._add_profile()
+        self._process_events()
+
+        dialog.provider_combo.setCurrentText("gemini")
+        dialog.model_edit.setText("gemini-2.5-pro")
+        dialog.api_key_edit.setText("gm-demo")
+        dialog.supports_images_checkbox.setChecked(True)
+        self._process_events()
+
+        dialog._save_and_accept()
+        result = dialog.result_payload()
+
+        self.assertTrue(result["profiles"][0]["supports_image_input"])
+
+    def test_model_settings_dialog_toggle_disables_profile_without_deleting_it(self):
+        payload = {
+            "active_profile": "gpt-4o",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+                {
+                    "id": "gemini-1-5-flash",
+                    "provider": "gemini",
+                    "model": "gemini-1.5-flash",
+                    "api_key": "gm-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+            ],
+        }
+        dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        self._process_events()
+
+        dialog._toggle_profile_enabled(0, False)
+        dialog._save_and_accept()
+        result = dialog.result_payload()
+
+        self.assertFalse(result["profiles"][0]["enabled"])
+        self.assertEqual(result["active_profile"], "gemini-1-5-flash")
+
+    def test_model_settings_dialog_switch_can_disable_and_reenable_profile(self):
+        payload = {
+            "active_profile": "mistral-medium-latest",
+            "profiles": [
+                {
+                    "id": "gemini-3-1-flash-lite-preview",
+                    "provider": "gemini",
+                    "model": "gemini-3.1-flash-lite-preview",
+                    "api_key": "gm-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+                {
+                    "id": "mistral-medium-latest",
+                    "provider": "openai",
+                    "model": "mistral-medium-latest",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+            ],
+        }
+        dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        self._process_events()
+
+        self.assertGreaterEqual(dialog.profile_list.minimumWidth(), 280)
+
+        first_item_widget = dialog.profile_list.itemWidget(dialog.profile_list.item(0))
+        self.assertIsNotNone(first_item_widget)
+        switch = first_item_widget.findChild(QCheckBox, "ModelProfileEnabledSwitch")
+        self.assertIsNotNone(switch)
+        self.assertEqual(switch.size().width(), 30)
+        self.assertTrue(switch.isChecked())
+
+        QTest.mouseClick(switch, Qt.LeftButton)
+        self._process_events()
+
+        updated_item_widget = dialog.profile_list.itemWidget(dialog.profile_list.item(0))
+        self.assertIsNotNone(updated_item_widget)
+        updated_switch = updated_item_widget.findChild(QCheckBox, "ModelProfileEnabledSwitch")
+        self.assertIsNotNone(updated_switch)
+        self.assertFalse(updated_switch.isChecked())
+
+        QTest.mouseClick(updated_switch, Qt.LeftButton)
+        self._process_events()
+
+        reenabled_item_widget = dialog.profile_list.itemWidget(dialog.profile_list.item(0))
+        self.assertIsNotNone(reenabled_item_widget)
+        reenabled_switch = reenabled_item_widget.findChild(QCheckBox, "ModelProfileEnabledSwitch")
+        self.assertIsNotNone(reenabled_switch)
+        self.assertTrue(reenabled_switch.isChecked())
+
+        dialog._save_and_accept()
+        result = dialog.result_payload()
+        self.assertTrue(result["profiles"][0]["enabled"])
+
+    def test_all_disabled_profiles_hide_model_picker_and_show_state(self):
+        payload = self._snapshot_payload()
+        for profile in payload["model_profiles"]["profiles"]:
+            profile["enabled"] = False
+        payload["model_profiles"]["active_profile"] = None
+
+        self.window._handle_initialized(payload)
+        self.window._set_input_enabled(True)
+
+        self.assertTrue(self.window.model_chip.isHidden())
+        self.assertFalse(self.window.no_models_label.isHidden())
+        self.assertEqual(self.window.no_models_label.text(), "All models disabled")
+        self.assertFalse(self.window.send_button.isEnabled())
 
     def test_model_settings_dialog_disables_base_url_for_gemini(self):
         payload = {

@@ -5,6 +5,7 @@ from typing import Any
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -34,11 +36,11 @@ class ModelSettingsDialog(QDialog):
         self.setObjectName("ModelSettingsDialog")
         self.setWindowTitle("Model Settings")
         self.setModal(True)
-        self.resize(820, 500)
-        self.setMinimumSize(760, 430)
+        self.resize(900, 520)
+        self.setMinimumSize(820, 450)
 
         normalized = normalize_profiles_payload(payload or {})
-        self._profiles: list[dict[str, str]] = [dict(item) for item in normalized.get("profiles", [])]
+        self._profiles: list[dict[str, Any]] = [dict(item) for item in normalized.get("profiles", [])]
         self._active_profile = str(normalized.get("active_profile") or "").strip()
         self._name_manual_flags: list[bool] = []
         self._selected_row = -1
@@ -59,6 +61,12 @@ class ModelSettingsDialog(QDialog):
         header_hint.setWordWrap(True)
         root.addWidget(header_hint)
 
+        active_name = str(self._active_profile or "").strip() or "none"
+        self.active_profile_label = QLabel(f"Active now: {active_name}")
+        self.active_profile_label.setObjectName("ModelSettingsMeta")
+        self.active_profile_label.setWordWrap(True)
+        root.addWidget(self.active_profile_label)
+
         body = QHBoxLayout()
         body.setSpacing(12)
 
@@ -73,7 +81,7 @@ class ModelSettingsDialog(QDialog):
 
         self.profile_list = QListWidget()
         self.profile_list.setObjectName("ModelProfileList")
-        self.profile_list.setMinimumWidth(220)
+        self.profile_list.setMinimumWidth(280)
         self.profile_list.currentRowChanged.connect(self._on_selection_changed)
         left.addWidget(self.profile_list, 1)
 
@@ -128,6 +136,9 @@ class ModelSettingsDialog(QDialog):
         self.api_key_edit.setPlaceholderText("API key")
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setPlaceholderText("https://api.openai.com/v1")
+        self.supports_images_checkbox = QCheckBox("Поддержка изображений")
+        self.supports_images_checkbox.setObjectName("ModelSupportsImagesCheckbox")
+        self.supports_images_checkbox.setToolTip("Разрешает прикреплять изображения для этого профиля.")
 
         label_width = 76
         name_label = QLabel("Name")
@@ -135,7 +146,8 @@ class ModelSettingsDialog(QDialog):
         model_label = QLabel("Model")
         api_key_label = QLabel("API Key")
         base_url_label = QLabel("Base URL")
-        for label in (name_label, provider_label, model_label, api_key_label, base_url_label):
+        images_label = QLabel("Images")
+        for label in (name_label, provider_label, model_label, api_key_label, base_url_label, images_label):
             label.setObjectName("ModelSettingsFieldLabel")
             label.setFixedWidth(label_width)
 
@@ -144,10 +156,12 @@ class ModelSettingsDialog(QDialog):
         form_layout.addRow(model_label, self.model_edit)
         form_layout.addRow(api_key_label, self.api_key_edit)
         form_layout.addRow(base_url_label, self.base_url_edit)
+        form_layout.addRow(images_label, self.supports_images_checkbox)
         right.addWidget(form_frame, 1)
 
-        body.addWidget(left_container, 0)
-        body.addWidget(right_container, 1)
+        left_container.setMinimumWidth(320)
+        body.addWidget(left_container, 5)
+        body.addWidget(right_container, 9)
         root.addLayout(body, 1)
 
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -172,10 +186,11 @@ class ModelSettingsDialog(QDialog):
         self.model_edit.textChanged.connect(self._on_model_changed)
         self.api_key_edit.textChanged.connect(self._on_form_changed)
         self.base_url_edit.textChanged.connect(self._on_form_changed)
+        self.supports_images_checkbox.checkStateChanged.connect(self._on_form_changed)
 
         self._refresh_profile_list()
         if self.profile_list.count() > 0:
-            self.profile_list.setCurrentRow(0)
+            self.profile_list.setCurrentRow(self._preferred_row_for_open())
         else:
             self._set_form_enabled(False)
 
@@ -192,6 +207,7 @@ class ModelSettingsDialog(QDialog):
             self.model_edit,
             self.api_key_edit,
             self.base_url_edit,
+            self.supports_images_checkbox,
         ):
             widget.setEnabled(enabled)
         self.delete_button.setEnabled(enabled)
@@ -213,19 +229,29 @@ class ModelSettingsDialog(QDialog):
         profile_id = str(profile.get("id") or "").strip()
         provider = str(profile.get("provider") or "").strip()
         model_name = str(profile.get("model") or "").strip()
-        marker = " • active" if profile_id and profile_id == self._active_profile else ""
+        marker = ""
+        if profile_id and profile_id == self._active_profile:
+            marker = " • active"
+        elif not bool(profile.get("enabled", True)):
+            marker = " • disabled"
         title = profile_id if profile_id else "(unnamed)"
         if marker:
             title = f"{title}{marker}"
         details = " · ".join(part for part in (provider, model_name) if part)
         return f"{title}\n{details}" if details else title
 
-    def _build_profile_item_widget(self, profile: dict[str, str]) -> QWidget:
+    def _build_profile_item_widget(self, profile: dict[str, Any], row: int) -> QWidget:
         container = QWidget()
         container.setObjectName("ModelProfileItemWidget")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(2)
+        is_enabled = bool(profile.get("enabled", True))
+        container.setProperty("disabledProfile", not is_enabled)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(4, 3, 2, 3)
+        layout.setSpacing(10)
+
+        text_column = QVBoxLayout()
+        text_column.setContentsMargins(0, 0, 0, 0)
+        text_column.setSpacing(2)
 
         first_row = QHBoxLayout()
         first_row.setContentsMargins(0, 0, 0, 0)
@@ -235,31 +261,54 @@ class ModelSettingsDialog(QDialog):
         is_active = bool(profile_id and profile_id != "(unnamed)" and profile_id == self._active_profile)
         title_label = QLabel(profile_id)
         title_label.setObjectName("ModelProfileItemTitle")
+        title_label.setEnabled(is_enabled)
+        title_label.setMinimumWidth(0)
+        title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         first_row.addWidget(title_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
         if is_active:
             active_label = QLabel("• active")
             active_label.setObjectName("ModelProfileItemActive")
             first_row.addWidget(active_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        elif not is_enabled:
+            disabled_label = QLabel("• disabled")
+            disabled_label.setObjectName("ModelProfileItemMeta")
+            first_row.addWidget(disabled_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
         first_row.addStretch(1)
-        layout.addLayout(first_row)
+        text_column.addLayout(first_row)
 
         provider = str(profile.get("provider") or "").strip()
         model_name = str(profile.get("model") or "").strip()
         details = " · ".join(part for part in (provider, model_name) if part)
         details_label = QLabel(details)
         details_label.setObjectName("ModelProfileItemMeta")
+        details_label.setEnabled(is_enabled)
         details_label.setWordWrap(False)
-        layout.addWidget(details_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        details_label.setMinimumWidth(0)
+        details_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        text_column.addWidget(details_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+
+        layout.addLayout(text_column, 1)
+
+        enabled_switch = QCheckBox()
+        enabled_switch.setObjectName("ModelProfileEnabledSwitch")
+        enabled_switch.setChecked(is_enabled)
+        enabled_switch.setCursor(Qt.PointingHandCursor)
+        enabled_switch.setToolTip("Temporarily enable or disable this model")
+        enabled_switch.setFocusPolicy(Qt.NoFocus)
+        enabled_switch.setFixedSize(QSize(30, 18))
+        enabled_switch.pressed.connect(lambda target_row=row: self.profile_list.setCurrentRow(target_row))
+        enabled_switch.toggled.connect(lambda checked, target_row=row: self._toggle_profile_enabled(target_row, checked))
+        layout.addWidget(enabled_switch, 0, Qt.AlignRight | Qt.AlignVCenter)
         container.adjustSize()
         return container
 
     def _refresh_profile_list(self, preferred_row: int | None = None) -> None:
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
-        for profile in self._profiles:
-            item_widget = self._build_profile_item_widget(profile)
+        for row, profile in enumerate(self._profiles):
+            item_widget = self._build_profile_item_widget(profile, row)
             item = QListWidgetItem("")
             item.setData(Qt.UserRole, self._display_name(profile))
             widget_hint = item_widget.sizeHint()
@@ -267,7 +316,8 @@ class ModelSettingsDialog(QDialog):
             item.setSizeHint(QSize(widget_hint.width(), item_height))
             provider = str(profile.get("provider") or "").strip()
             model_name = str(profile.get("model") or "").strip()
-            item.setToolTip(f"Provider: {provider}\nModel: {model_name}".strip())
+            enabled = "yes" if bool(profile.get("enabled", True)) else "no"
+            item.setToolTip(f"Provider: {provider}\nModel: {model_name}\nEnabled: {enabled}".strip())
             self.profile_list.addItem(item)
             self.profile_list.setItemWidget(item, item_widget)
         self.profile_list.blockSignals(False)
@@ -280,9 +330,17 @@ class ModelSettingsDialog(QDialog):
             self.form_hint.setText("Add a profile to start configuring models.")
             return
 
-        row = preferred_row if preferred_row is not None else self._current_row()
+        row = preferred_row if preferred_row is not None else self._preferred_row_for_open()
         row = max(0, min(row, len(self._profiles) - 1))
         self.profile_list.setCurrentRow(row)
+
+    def _preferred_row_for_open(self) -> int:
+        active_id = str(self._active_profile or "").strip()
+        if active_id:
+            for index, profile in enumerate(self._profiles):
+                if str(profile.get("id") or "").strip() == active_id:
+                    return index
+        return self._current_row() if self._current_row() >= 0 else 0
 
     def _sync_form_to_profile(self, row: int) -> None:
         if row < 0 or row >= len(self._profiles):
@@ -301,11 +359,15 @@ class ModelSettingsDialog(QDialog):
         self.model_edit.setText(str(profile.get("model", "")))
         self.api_key_edit.setText(str(profile.get("api_key", "")))
         self.base_url_edit.setText(str(profile.get("base_url", "")))
+        self.supports_images_checkbox.setChecked(bool(profile.get("supports_image_input")))
         self._update_base_url_field_state(provider)
         self._loading_form = False
         self._selected_row = row
         profile_id = str(profile.get("id") or "").strip() or "(unnamed)"
-        self.form_hint.setText(f"Editing profile: {profile_id}")
+        status = "enabled" if bool(profile.get("enabled", True)) else "disabled"
+        self.form_hint.setText(f"Editing profile: {profile_id} ({status})")
+        active_name = str(self._active_profile or "").strip() or "none"
+        self.active_profile_label.setText(f"Active now: {active_name}")
 
     def _sync_current_profile_from_form(self, row: int | None = None) -> None:
         if self._loading_form:
@@ -323,10 +385,37 @@ class ModelSettingsDialog(QDialog):
             "model": str(self.model_edit.text() or "").strip(),
             "api_key": str(self.api_key_edit.text() or "").strip(),
             "base_url": base_url,
+            "supports_image_input": self.supports_images_checkbox.isChecked(),
+            "enabled": bool(self._profiles[target_row].get("enabled", True)),
         }
         item = self.profile_list.item(target_row)
         if item is not None:
             item.setText(self._display_name(self._profiles[target_row]))
+
+    def _reconcile_active_profile(self) -> None:
+        enabled_ids = [
+            str(profile.get("id") or "").strip()
+            for profile in self._profiles
+            if bool(profile.get("enabled", True)) and str(profile.get("id") or "").strip()
+        ]
+        active_id = str(self._active_profile or "").strip()
+        if active_id in enabled_ids:
+            return
+        self._active_profile = enabled_ids[0] if enabled_ids else ""
+
+    def _toggle_profile_enabled(self, row: int, state: bool | int) -> None:
+        if row < 0 or row >= len(self._profiles):
+            return
+        self._sync_current_profile_from_form(self._selected_row)
+        if isinstance(state, bool):
+            is_enabled = bool(state)
+        elif isinstance(state, int):
+            is_enabled = state == Qt.Checked
+        else:
+            is_enabled = bool(state)
+        self._profiles[row]["enabled"] = is_enabled
+        self._reconcile_active_profile()
+        self._refresh_profile_list(preferred_row=row)
 
     def _suggest_unique_id(self, model_text: str, *, row: int) -> str:
         used = {
@@ -394,6 +483,8 @@ class ModelSettingsDialog(QDialog):
                 "model": "",
                 "api_key": "",
                 "base_url": "",
+                "supports_image_input": False,
+                "enabled": True,
             }
         )
         self._name_manual_flags.append(False)
@@ -409,7 +500,8 @@ class ModelSettingsDialog(QDialog):
         self._name_manual_flags.pop(row)
 
         if removed_id and removed_id == self._active_profile:
-            self._active_profile = str(self._profiles[0].get("id") or "").strip() if self._profiles else ""
+            self._active_profile = ""
+        self._reconcile_active_profile()
 
         self._refresh_profile_list(preferred_row=row)
 
@@ -441,13 +533,15 @@ class ModelSettingsDialog(QDialog):
                     "model": model_name,
                     "api_key": str(profile.get("api_key") or "").strip(),
                     "base_url": str(profile.get("base_url") or "").strip(),
+                    "supports_image_input": bool(profile.get("supports_image_input")),
+                    "enabled": bool(profile.get("enabled", True)),
                 }
             )
 
         active = str(self._active_profile or "").strip()
-        known_ids = {item["id"] for item in profiles}
-        if active not in known_ids:
-            active = profiles[0]["id"] if profiles else ""
+        enabled_ids = [item["id"] for item in profiles if bool(item.get("enabled", True))]
+        if active not in enabled_ids:
+            active = enabled_ids[0] if enabled_ids else ""
         return {"active_profile": active or None, "profiles": profiles}
 
     def _save_and_accept(self) -> None:

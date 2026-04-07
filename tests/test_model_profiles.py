@@ -92,6 +92,102 @@ class ModelProfilesTests(unittest.TestCase):
         self.assertEqual(len(payload["profiles"]), 1)
         self.assertEqual(payload["profiles"][0]["id"], "gpt-4o")
 
+    def test_normalization_preserves_manual_image_support_flag(self):
+        payload = normalize_profiles_payload(
+            {
+                "active_profile": "gemini-1-5-flash",
+                "profiles": [
+                    {
+                        "id": "gemini-1-5-flash",
+                        "provider": "gemini",
+                        "model": "gemini-1.5-flash",
+                        "api_key": "gm-demo",
+                        "base_url": "",
+                        "supports_image_input": True,
+                    }
+                ],
+            }
+        )
+
+        self.assertTrue(payload["profiles"][0]["supports_image_input"])
+        active = find_active_profile(payload)
+        self.assertIsNotNone(active)
+        self.assertTrue(active["supports_image_input"])
+        self.assertTrue(active["enabled"])
+
+    def test_normalization_keeps_profiles_with_different_image_support_flags(self):
+        payload = normalize_profiles_payload(
+            {
+                "active_profile": "gpt-4o",
+                "profiles": [
+                    {
+                        "id": "gpt-4o",
+                        "provider": "openai",
+                        "model": "gpt-4o",
+                        "api_key": "sk-demo",
+                        "base_url": "",
+                        "supports_image_input": False,
+                    },
+                    {
+                        "id": "gpt-4o-img",
+                        "provider": "openai",
+                        "model": "gpt-4o",
+                        "api_key": "sk-demo",
+                        "base_url": "",
+                        "supports_image_input": True,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(len(payload["profiles"]), 2)
+
+    def test_normalization_drops_disabled_profile_from_active_selection(self):
+        payload = normalize_profiles_payload(
+            {
+                "active_profile": "gpt-4o",
+                "profiles": [
+                    {
+                        "id": "gpt-4o",
+                        "provider": "openai",
+                        "model": "gpt-4o",
+                        "api_key": "sk-demo",
+                        "base_url": "",
+                        "enabled": False,
+                    },
+                    {
+                        "id": "gemini-2-5-pro",
+                        "provider": "gemini",
+                        "model": "gemini-2.5-pro",
+                        "api_key": "gm-demo",
+                        "base_url": "",
+                        "enabled": True,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(payload["active_profile"], "gemini-2-5-pro")
+
+    def test_normalization_allows_all_profiles_to_be_temporarily_disabled(self):
+        payload = normalize_profiles_payload(
+            {
+                "active_profile": "gpt-4o",
+                "profiles": [
+                    {
+                        "id": "gpt-4o",
+                        "provider": "openai",
+                        "model": "gpt-4o",
+                        "api_key": "sk-demo",
+                        "base_url": "",
+                        "enabled": False,
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNone(payload["active_profile"])
+
     def test_store_load_existing_merges_new_env_model(self):
         store = ModelProfileStore(self._tmpdir / "config.json")
         first = store.load_or_initialize(

@@ -3,11 +3,12 @@ import os
 import shutil
 import sqlite3
 import unittest
+import base64
 from unittest import mock
 from pathlib import Path
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -17,10 +18,17 @@ from core.config import AgentConfig
 from core import gui_runtime
 from core.gui_runtime import (
     append_project_label,
+    build_initial_state,
     build_transcript_payload,
     build_user_choice_payload,
     generate_chat_title,
     short_project_label,
+)
+from core.multimodal import (
+    extract_model_capabilities,
+    materialize_user_message_content_for_model,
+    normalize_model_capabilities,
+    resolve_model_capabilities,
 )
 from core.model_profiles import ModelProfileStore
 from core.nodes import AgentNodes
@@ -87,6 +95,11 @@ class FakeTool:
         return self.result
 
 
+class FakeProfileLLM:
+    def __init__(self, profile):
+        self.profile = profile
+
+
 class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
     def _workspace_tempdir(self) -> Path:
         path = Path.cwd() / ".tmp_tests" / uuid4().hex
@@ -148,6 +161,198 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             "last_tool_result": "",
             "safety_mode": "default",
         }
+
+    def test_model_capabilities_normalize_profile_variants(self):
+        self.assertEqual(normalize_model_capabilities(None), {"image_input_supported": False})
+        self.assertEqual(normalize_model_capabilities({"image_input": True}), {"image_input_supported": True})
+        self.assertEqual(normalize_model_capabilities({"imageInputs": True}), {"image_input_supported": True})
+        self.assertEqual(normalize_model_capabilities({"image_inputs": True}), {"image_input_supported": True})
+        self.assertEqual(
+            normalize_model_capabilities({"image_input_supported": True}),
+            {"image_input_supported": True},
+        )
+        self.assertEqual(
+            extract_model_capabilities(FakeProfileLLM({"imageInputs": True})),
+            {"image_input_supported": True},
+        )
+
+    def test_resolve_model_capabilities_prefers_profile_override(self):
+        self.assertEqual(
+            resolve_model_capabilities(
+                {"supports_image_input": True},
+                {"image_input_supported": False},
+            ),
+            {"image_input_supported": True},
+        )
+
+    def test_build_initial_state_supports_text_and_image_attachments(self):
+        state = build_initial_state(
+            {
+                "text": "Что на изображении?",
+                "attachments": [
+                    {
+                        "id": "img-1",
+                        "path": "D:/demo/sample.png",
+                        "mime_type": "image/png",
+                        "file_name": "sample.png",
+                        "width": 32,
+                        "height": 24,
+                        "size_bytes": 2048,
+                    }
+                ],
+            },
+            session_id="session-1",
+        )
+
+        self.assertEqual(state["current_task"], "Что на изображении?")
+        message = state["messages"][0]
+        self.assertIsInstance(message, HumanMessage)
+        self.assertIsInstance(message.content, list)
+        self.assertEqual(message.content[0]["type"], "text")
+        self.assertEqual(message.content[1]["type"], "image")
+        self.assertEqual(message.content[1]["path"], "D:/demo/sample.png")
+
+    def test_build_initial_state_accepts_image_only_request(self):
+        state = build_initial_state(
+            {
+                "text": "",
+                "attachments": [
+                    {
+                        "id": "img-1",
+                        "path": "D:/demo/sample.png",
+                        "mime_type": "image/png",
+                    }
+                ],
+            },
+            session_id="session-1",
+        )
+
+        self.assertEqual(state["current_task"], "Analyze the attached images.")
+        message = state["messages"][0]
+        self.assertIsInstance(message.content, list)
+        self.assertEqual(len(message.content), 1)
+        self.assertEqual(message.content[0]["type"], "image")
+
+    def test_build_transcript_payload_restores_user_image_attachments(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=[
+                            {"type": "text", "text": "Посмотри на картинку"},
+                            {
+                                "type": "image",
+                                "path": "D:/demo/sample.png",
+                                "mime_type": "image/png",
+                                "file_name": "sample.png",
+                                "attachment_id": "img-1",
+                                "width": 64,
+                                "height": 48,
+                                "size_bytes": 4096,
+                            },
+                        ]
+                    ),
+                    AIMessage(content="Готово"),
+                ]
+            }
+        )
+
+        self.assertEqual(len(payload["turns"]), 1)
+        turn = payload["turns"][0]
+        self.assertEqual(turn["user_text"], "Посмотри на картинку")
+        self.assertEqual(len(turn["attachments"]), 1)
+        self.assertEqual(turn["attachments"][0]["id"], "img-1")
+        self.assertEqual(turn["attachments"][0]["path"], "D:/demo/sample.png")
+
+    def test_materialize_user_message_content_for_openai_uses_image_url_data_uri(self):
+        temp_dir = self._workspace_tempdir()
+        image_path = temp_dir / "sample.png"
+        image_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnSUs8AAAAASUVORK5CYII="
+            )
+        )
+
+        content = [
+            {"type": "text", "text": "Опиши изображение"},
+            {"type": "image", "path": str(image_path), "mime_type": "image/png"},
+        ]
+
+        materialized = materialize_user_message_content_for_model(content, provider="openai")
+
+        self.assertEqual(materialized[0], {"type": "text", "text": "Опиши изображение"})
+        self.assertEqual(materialized[1]["type"], "image_url")
+        self.assertTrue(materialized[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    async def test_openai_context_materializes_human_image_content_as_image_url_blocks(self):
+        temp_dir = self._workspace_tempdir()
+        image_path = temp_dir / "sample.png"
+        image_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnSUs8AAAAASUVORK5CYII="
+            )
+        )
+
+        config = self._make_config()
+        llm = OpenAIContentSafeFakeLLM([AIMessage(content="ok")])
+        nodes = AgentNodes(
+            config=config,
+            llm=llm,
+            tools=[],
+            llm_with_tools=llm,
+        )
+        state = self._initial_state("Опиши изображение")
+        context = nodes.context_builder.build(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "Опиши изображение"},
+                        {"type": "image", "path": str(image_path), "mime_type": "image/png"},
+                    ]
+                ),
+            ],
+            state,
+            summary="",
+            current_task="Опиши изображение",
+            tools_available=False,
+            active_tool_names=[],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        response = await nodes._invoke_llm_with_retry(llm, context, state=state, node_name="agent")
+
+        self.assertEqual(str(response.content), "ok")
+        human_messages = [message for message in llm.invocations[0] if isinstance(message, HumanMessage)]
+        self.assertTrue(human_messages)
+        image_blocks = [block for block in human_messages[-1].content if isinstance(block, dict) and block.get("type") == "image_url"]
+        self.assertEqual(len(image_blocks), 1)
+        self.assertTrue(image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_openai_normalize_system_prefix_merges_multiple_system_messages(self):
+        config = self._make_config()
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[],
+            llm_with_tools=FakeLLM([]),
+        )
+
+        normalized = nodes.context_builder.normalize_system_prefix(
+            [
+                HumanMessage(content="user-first"),
+                SystemMessage(content="system-one"),
+                HumanMessage(content="user-second"),
+                SystemMessage(content="system-two"),
+            ]
+        )
+
+        self.assertEqual(len([message for message in normalized if isinstance(message, SystemMessage)]), 1)
+        self.assertIsInstance(normalized[0], SystemMessage)
+        self.assertIn("system-one", normalized[0].content)
+        self.assertIn("system-two", normalized[0].content)
+        self.assertIsInstance(normalized[1], HumanMessage)
+        self.assertEqual(normalized[1].content, "user-first")
 
     async def test_create_checkpoint_runtime_uses_sqlite_backend_when_available(self):
         self._require_sqlite_filesystem()
@@ -1665,7 +1870,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             any(call.kwargs.get("reason") == "chdir_failed" and "OSError" in call.kwargs.get("error", "") for call in log_mock.call_args_list)
         )
 
-    async def test_model_profiles_apply_persists_without_runtime_reload(self):
+    async def test_model_profiles_apply_can_skip_runtime_reload_by_default(self):
         tmp = self._workspace_tempdir()
         profile_path = tmp / "config.json"
         worker = gui_runtime.AgentRunWorker()
@@ -1712,6 +1917,61 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         rebuild_mock.assert_not_called()
         restored = worker.profile_store.load_or_initialize()
         self.assertEqual(restored["active_profile"], "gemini-1-5-flash")
+
+    async def test_model_profiles_apply_rebuilds_runtime_when_requested(self):
+        tmp = self._workspace_tempdir()
+        profile_path = tmp / "config.json"
+        worker = gui_runtime.AgentRunWorker()
+        worker.profile_store = ModelProfileStore(profile_path)
+        worker.model_profiles = worker.profile_store.save(
+            {
+                "active_profile": "gpt-4o",
+                "profiles": [
+                    {
+                        "id": "gpt-4o",
+                        "provider": "openai",
+                        "model": "gpt-4o",
+                        "api_key": "sk-old",
+                        "base_url": "",
+                    },
+                    {
+                        "id": "gemini-1-5-flash",
+                        "provider": "gemini",
+                        "model": "gemini-1.5-flash",
+                        "api_key": "gm-new",
+                        "base_url": "",
+                    },
+                ],
+            }
+        )
+        worker._emit_session_payload = mock.AsyncMock(return_value={})
+
+        with mock.patch.object(
+            worker,
+            "_rebuild_runtime_for_active_profile",
+            new=mock.AsyncMock(return_value=None),
+        ) as rebuild_mock:
+            result = await worker._apply_model_profiles(
+                {
+                    "active_profile": "gemini-1-5-flash",
+                    "profiles": [
+                        {
+                            "id": "gemini-1-5-flash",
+                            "provider": "gemini",
+                            "model": "gemini-1.5-flash",
+                            "api_key": "gm-new",
+                            "base_url": "",
+                        }
+                    ],
+                },
+                success_notice_kind="model_switched",
+                success_notice_message="ok",
+                sync_runtime=True,
+            )
+
+        self.assertTrue(result)
+        rebuild_mock.assert_awaited_once()
+        self.assertEqual(worker._runtime_profile_id, "gemini-1-5-flash")
 
     async def test_model_profiles_apply_success_updates_state(self):
         tmp = self._workspace_tempdir()
@@ -1772,7 +2032,12 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         worker.event_emitted.connect(emitted_events.append)
         worker._emit_session_payload = mock.AsyncMock(return_value={})
 
-        await worker._set_active_profile_async("gemini-1-5-flash")
+        with mock.patch.object(
+            worker,
+            "_rebuild_runtime_for_active_profile",
+            new=mock.AsyncMock(return_value=None),
+        ) as rebuild_mock:
+            await worker._set_active_profile_async("gemini-1-5-flash")
 
         notice_events = [
             event for event in emitted_events
@@ -1781,8 +2046,10 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notice_events), 1)
         self.assertEqual(
             notice_events[0].payload.get("message"),
-            "Модель переключена на gemini-1.5-flash. Новый выбор будет использован в следующем запросе.",
+            "Модель переключена на gemini-1.5-flash.",
         )
+        rebuild_mock.assert_awaited_once()
+        self.assertEqual(worker._runtime_profile_id, "gemini-1-5-flash")
 
     async def test_runtime_switch_happens_lazy_on_next_request_path(self):
         worker = gui_runtime.AgentRunWorker()
@@ -1845,6 +2112,159 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         worker.start_run("hello")
 
         self.assertTrue(any(event.type == "summary_notice" and event.payload.get("kind") == "model_missing" for event in events))
+
+    def test_worker_start_run_with_all_profiles_disabled_emits_enable_notice(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.model_profiles = {
+            "active_profile": None,
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "enabled": False,
+                }
+            ],
+        }
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        worker.start_run("hello")
+
+        matching = [
+            event for event in events
+            if event.type == "summary_notice" and event.payload.get("kind") == "model_missing"
+        ]
+        self.assertTrue(matching)
+        self.assertIn("No enabled models available", matching[0].payload.get("message", ""))
+
+    def test_worker_start_run_with_unsupported_image_input_emits_notice(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.model_profiles = {
+            "active_profile": "gpt-4o",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                }
+            ],
+        }
+        worker.model_capabilities = {"image_input_supported": False}
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        worker.start_run(
+            {
+                "text": "Посмотри на изображение",
+                "attachments": [{"id": "img-1", "path": "D:/demo/sample.png", "mime_type": "image/png"}],
+            }
+        )
+
+        self.assertTrue(
+            any(event.type == "summary_notice" and event.payload.get("kind") == "image_input_unsupported" for event in events)
+        )
+
+    def test_worker_start_run_uses_manual_profile_image_support_override(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.model_profiles = {
+            "active_profile": "gpt-4o",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "supports_image_input": True,
+                }
+            ],
+        }
+        worker.runtime_model_capabilities = {"image_input_supported": False}
+        worker.model_capabilities = {"image_input_supported": True}
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        with (
+            mock.patch.object(worker, "_ensure_runtime_matches_selected_profile", return_value=True),
+            mock.patch.object(worker, "_maybe_set_session_title", return_value=False),
+            mock.patch.object(worker, "_run", side_effect=lambda coro: coro.close()) as run_mock,
+        ):
+            worker.start_run(
+                {
+                    "text": "Посмотри на изображение",
+                    "attachments": [{"id": "img-1", "path": "D:/demo/sample.png", "mime_type": "image/png"}],
+                }
+            )
+
+        self.assertFalse(
+            any(event.type == "summary_notice" and event.payload.get("kind") == "image_input_unsupported" for event in events)
+        )
+        run_mock.assert_called()
+
+    async def test_run_graph_payload_with_image_failure_emits_friendly_notice(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.agent_app = type(
+            "FailingApp",
+            (),
+            {
+                "astream": lambda self, *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("image input not supported"))
+            },
+        )()
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config()
+        worker._active_request_has_images = True
+        worker._set_busy(True)
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        await worker._run_graph_payload({"messages": []})
+
+        self.assertTrue(
+            any(event.type == "summary_notice" and event.payload.get("kind") == "image_input_failed" for event in events)
+        )
+        self.assertTrue(any(event.type == "run_failed" for event in events))
+        self.assertFalse(worker._active_request_has_images)
 
     def test_stop_background_process_denies_external_pid_by_default(self):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})

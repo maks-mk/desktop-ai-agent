@@ -35,6 +35,7 @@ class StreamProcessResult:
     cancelled: bool = False
     cancelled_tools: list[Dict[str, Any]] = field(default_factory=list)
     events: list[StreamEvent] = field(default_factory=list)
+    elapsed_seconds: float = 0.0
 
 
 class StreamProcessor:
@@ -56,6 +57,7 @@ class StreamProcessor:
         "_events_max",
         "_tool_buffer_max",
         "_completed_tool_ids",
+        "_base_elapsed_seconds",
     )
 
     def __init__(
@@ -65,6 +67,7 @@ class StreamProcessor:
         text_max_chars: int = 120000,
         events_max: int = 400,
         tool_buffer_max: int = 128,
+        base_elapsed_seconds: float = 0.0,
     ):
         self.emit_event = emit_event
         self.tracker = TokenTracker()
@@ -74,7 +77,7 @@ class StreamProcessor:
         self.printed_tool_ids: Set[str] = set()
         self.tool_buffer: Dict[str, Dict[str, Any]] = {}
         self.tool_start_times: Dict[str, float] = {}
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
         self.pending_interrupt: Optional[Dict[str, Any]] = None
         self.active_node = "agent"
         self.events: list[StreamEvent] = []
@@ -83,6 +86,10 @@ class StreamProcessor:
         self._events_max = max(1, int(events_max))
         self._tool_buffer_max = max(1, int(tool_buffer_max))
         self._completed_tool_ids: dict[str, None] = {}
+        self._base_elapsed_seconds = max(0.0, float(base_elapsed_seconds or 0.0))
+
+    def _elapsed_seconds(self) -> float:
+        return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
 
     async def process_stream(self, stream) -> StreamProcessResult:
         self._emit_status(force=True)
@@ -102,21 +109,35 @@ class StreamProcessor:
                 cancelled=True,
                 cancelled_tools=cancelled_tools,
                 events=list(self.events),
+                elapsed_seconds=self._elapsed_seconds(),
             )
         except Exception as exc:
             logger.debug("Stream processing failed: %s", exc)
             self._emit("run_failed", {"message": str(exc)})
-            return StreamProcessResult(stats=None, events=list(self.events))
+            return StreamProcessResult(
+                stats=None,
+                events=list(self.events),
+                elapsed_seconds=self._elapsed_seconds(),
+            )
 
         if self.pending_interrupt is not None:
             interrupt_payload = self.pending_interrupt
             self.pending_interrupt = None
-            return StreamProcessResult(stats=None, interrupt=interrupt_payload, events=list(self.events))
+            return StreamProcessResult(
+                stats=None,
+                interrupt=interrupt_payload,
+                events=list(self.events),
+                elapsed_seconds=self._elapsed_seconds(),
+            )
 
-        duration = time.time() - self.start_time
+        duration = self._elapsed_seconds()
         stats = self.tracker.render(duration)
         self._emit("run_finished", {"stats": stats, "duration": duration})
-        return StreamProcessResult(stats=stats, events=list(self.events))
+        return StreamProcessResult(
+            stats=stats,
+            events=list(self.events),
+            elapsed_seconds=duration,
+        )
 
     def _emit(self, event_type: str, payload: Dict[str, Any] | None = None) -> None:
         event = StreamEvent(event_type, payload or {})
@@ -512,7 +533,7 @@ class StreamProcessor:
             {
                 "node": self.active_node,
                 "label": label,
-                "elapsed": time.time() - self.start_time,
+                "elapsed": self._elapsed_seconds(),
                 "has_thought": self.has_thought,
             },
         )

@@ -19,6 +19,19 @@ def _normalize_provider(value: Any) -> str:
     return normalized if normalized in ALLOWED_PROVIDERS else ""
 
 
+def _normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = _clean_text(value).lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(value)
+
+
 def sanitize_profile_id(value: Any) -> str:
     raw = _clean_text(value)
     if "/" in raw:
@@ -52,8 +65,8 @@ def normalize_profiles_payload(payload: Any) -> dict[str, Any]:
         raw_profiles = []
 
     used_ids: set[str] = set()
-    seen_profiles: set[tuple[str, str, str, str]] = set()
-    profiles: list[dict[str, str]] = []
+    seen_profiles: set[tuple[str, str, str, str, bool, bool]] = set()
+    profiles: list[dict[str, Any]] = []
     for raw in raw_profiles:
         if not isinstance(raw, dict):
             continue
@@ -63,9 +76,11 @@ def normalize_profiles_payload(payload: Any) -> dict[str, Any]:
             continue
         api_key = _clean_text(raw.get("api_key"))
         base_url = _clean_text(raw.get("base_url")) if provider == "openai" else ""
+        supports_image_input = _normalize_bool(raw.get("supports_image_input"))
+        enabled = _normalize_bool(raw.get("enabled")) if "enabled" in raw else True
 
         # Deduplicate exact same profile payloads to keep env bootstrap/import idempotent.
-        profile_fingerprint = (provider, model_name, api_key, base_url)
+        profile_fingerprint = (provider, model_name, api_key, base_url, supports_image_input, enabled)
         if profile_fingerprint in seen_profiles:
             continue
         seen_profiles.add(profile_fingerprint)
@@ -79,14 +94,16 @@ def normalize_profiles_payload(payload: Any) -> dict[str, Any]:
                 "model": model_name,
                 "api_key": api_key,
                 "base_url": base_url,
+                "supports_image_input": supports_image_input,
+                "enabled": enabled,
             }
         )
 
     active_raw = raw_payload.get("active_profile")
     active_profile = _clean_text(active_raw) if active_raw is not None else ""
-    known_ids = {item["id"] for item in profiles}
-    if active_profile not in known_ids:
-        active_profile = profiles[0]["id"] if profiles else ""
+    enabled_ids = [item["id"] for item in profiles if bool(item.get("enabled", True))]
+    if active_profile not in enabled_ids:
+        active_profile = enabled_ids[0] if enabled_ids else ""
 
     return {
         "active_profile": active_profile or None,
@@ -160,7 +177,7 @@ def bootstrap_profiles_from_env(env: Mapping[str, str] | None = None) -> dict[st
     return {"active_profile": None, "profiles": []}
 
 
-def find_active_profile(payload: dict[str, Any]) -> dict[str, str] | None:
+def find_active_profile(payload: dict[str, Any]) -> dict[str, Any] | None:
     active_id = _clean_text((payload or {}).get("active_profile"))
     for profile in (payload or {}).get("profiles", []) or []:
         if isinstance(profile, dict) and _clean_text(profile.get("id")) == active_id:
@@ -170,6 +187,8 @@ def find_active_profile(payload: dict[str, Any]) -> dict[str, str] | None:
                 "model": _clean_text(profile.get("model")),
                 "api_key": _clean_text(profile.get("api_key")),
                 "base_url": _clean_text(profile.get("base_url")),
+                "supports_image_input": _normalize_bool(profile.get("supports_image_input")),
+                "enabled": _normalize_bool(profile.get("enabled")) if "enabled" in profile else True,
             }
     return None
 

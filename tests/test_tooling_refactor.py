@@ -9,6 +9,7 @@ from uuid import uuid4
 from types import SimpleNamespace
 
 from core.config import AgentConfig
+from core.multimodal import DEFAULT_MODEL_CAPABILITIES
 from core.validation import validate_tool_result
 from tools import process_tools
 from tools.tool_registry import ToolRegistry
@@ -52,6 +53,10 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
         await registry.load_all()
         names = [tool.name for tool in registry.tools]
         self.assertEqual(names, ["safe_delete_file", "safe_delete_directory", "request_user_input"])
+
+    def test_tool_registry_initializes_model_capabilities_slot(self):
+        registry = ToolRegistry(self._make_config())
+        self.assertEqual(registry.model_capabilities, DEFAULT_MODEL_CAPABILITIES)
 
     def test_mcp_metadata_keeps_safe_tools_read_only(self):
         metadata = ToolRegistry._infer_mcp_metadata("context7:resolve-library-id")

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Sequence, Union
 from langchain_core.tools import BaseTool
 
 from core.config import AgentConfig
+from core.multimodal import DEFAULT_MODEL_CAPABILITIES
 from core.tool_policy import ToolMetadata, default_tool_metadata
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class ToolRegistry:
         "config",
         "tools",
         "tool_metadata",
+        "model_capabilities",
         "mcp_clients",
         "loader_status",
         "mcp_server_status",
@@ -93,6 +95,7 @@ class ToolRegistry:
         self.config = config
         self.tools: List[BaseTool] = []
         self.tool_metadata: Dict[str, ToolMetadata] = {}
+        self.model_capabilities: Dict[str, Any] = dict(DEFAULT_MODEL_CAPABILITIES)
         self.mcp_clients = []
         self.loader_status: List[Dict[str, Any]] = []
         self.mcp_server_status: List[Dict[str, Any]] = []

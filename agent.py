@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from core.checkpointing import create_checkpoint_runtime
 from core.config import AgentConfig
 from core.logging_config import setup_logging
+from core.multimodal import extract_model_capabilities
 from core.nodes import AgentNodes
 from core.run_logger import JsonlRunLogger
 from core.state import AgentState
@@ -148,6 +149,7 @@ async def build_agent_app(config: Optional[AgentConfig] = None) -> Tuple[Any, To
     # 1. Initialize Resources
     llm = create_llm(config)
     tool_registry = ToolRegistry(config)
+    tool_registry.model_capabilities = extract_model_capabilities(llm)
     await tool_registry.load_all()
     checkpoint_runtime = await create_checkpoint_runtime(config)
     run_logger = JsonlRunLogger(config.run_log_dir)

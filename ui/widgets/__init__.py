@@ -1,3 +1,4 @@
+from .attachments import ImageAttachmentChipWidget, ImageAttachmentStripWidget
 from .composer import ComposerTextEdit
 from .dialogs import ApprovalDialog, ModelSettingsDialog
 from .foundation import TRANSCRIPT_MAX_WIDTH, _fa_icon
@@ -21,6 +22,8 @@ __all__ = [
     "CliExecWidget",
     "ComposerTextEdit",
     "ConversationTurnWidget",
+    "ImageAttachmentChipWidget",
+    "ImageAttachmentStripWidget",
     "InfoPopupDialog",
     "ModelSettingsDialog",
     "NoticeWidget",

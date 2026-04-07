@@ -101,6 +101,29 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD}px;
     }}
 
+    QFrame#ImageAttachmentCard {{
+        background: {blend_hex(SURFACE_CARD, "#FFFFFF", 0.05)};
+        border: none;
+        border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+    QLabel#ImageAttachmentThumb {{
+        background: {blend_hex(SURFACE_CARD, "#FFFFFF", 0.03)};
+        border: none;
+        border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+    QToolButton#ImageAttachmentRemoveButton {{
+        background: {blend_hex(SURFACE_BG, "#FFFFFF", 0.08)};
+        border: none;
+        border-radius: {SOFT_RADIUS_XS + 6}px;
+        padding: 2px;
+    }}
+
+    QToolButton#ImageAttachmentRemoveButton:hover {{
+        background: {blend_hex(SURFACE_BG, "#FFFFFF", 0.16)};
+    }}
+
     QDialog#InfoPopup {{
         background: {SURFACE_CARD};
         border: none;
@@ -187,6 +210,33 @@ def build_stylesheet() -> str:
         color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
         font-size: 8.8pt;
         background: transparent;
+    }}
+
+    QCheckBox#ModelProfileEnabledSwitch {{
+        background: transparent;
+        spacing: 0px;
+        padding: 0px;
+    }}
+
+    QCheckBox#ModelProfileEnabledSwitch::indicator {{
+        width: 26px;
+        height: 14px;
+        border-radius: 7px;
+        background: {blend_hex(SURFACE_ALT, "#000000", 0.08)};
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.08)};
+    }}
+
+    QCheckBox#ModelProfileEnabledSwitch::indicator:hover {{
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.04)};
+    }}
+
+    QCheckBox#ModelProfileEnabledSwitch::indicator:checked {{
+        background: {blend_hex(SUCCESS_GREEN, SURFACE_ALT, 0.28)};
+        border: 1px solid {blend_hex(SUCCESS_GREEN, "#FFFFFF", 0.18)};
+    }}
+
+    QCheckBox#ModelProfileEnabledSwitch::indicator:checked:hover {{
+        background: {blend_hex(SUCCESS_GREEN, "#FFFFFF", 0.16)};
     }}
 
     QDialog#ModelSettingsDialog QLineEdit,
@@ -288,6 +338,35 @@ def build_stylesheet() -> str:
         color: {TEXT_MUTED};
         font-size: 8.5pt;
         background: transparent;
+    }}
+
+    QLabel#ComposerCapabilityBadge {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.18)};
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.04)};
+        border: none;
+        border-radius: {SOFT_RADIUS_SM}px;
+        padding: 4px 8px;
+        font-size: 8.6pt;
+        font-weight: 600;
+    }}
+
+    QLabel#ComposerNoticeLabel {{
+        color: {TEXT_MUTED};
+        background: transparent;
+        font-size: 8.8pt;
+        padding-left: 2px;
+    }}
+
+    QLabel#ComposerNoticeLabel[severity="warning"] {{
+        color: {AMBER_WARNING};
+    }}
+
+    QLabel#ComposerNoticeLabel[severity="error"] {{
+        color: {ERROR_RED};
+    }}
+
+    QLabel#ComposerNoticeLabel[severity="success"] {{
+        color: {SUCCESS_GREEN};
     }}
 
     QLabel#UserChoiceCardTitle {{
@@ -647,8 +726,8 @@ def build_stylesheet() -> str:
 
     QPushButton#ComposerSendButton:disabled {{
         background: {_SEND_BTN_DISABLED};
-        color: {TEXT_DIM};
-        border: none;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.2)};
+        border: 1px solid {blend_hex(_SEND_BTN_DISABLED, "#FFFFFF", 0.08)};
     }}
 
     QToolButton#ComposerAttachButton {{

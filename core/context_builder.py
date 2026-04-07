@@ -19,6 +19,10 @@ from langchain_core.messages import (
 from core import constants
 from core.config import AgentConfig
 from core.message_utils import stringify_content
+from core.multimodal import (
+    human_message_has_image_content,
+    materialize_user_message_content_for_model,
+)
 from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
 from core.state import AgentState
 
@@ -158,7 +162,17 @@ class ContextBuilder:
                         normalized_message = normalized_message.model_copy(update={"tool_call_id": mapped_tool_id})
                         remapped_count += 1
 
-            if self.config.provider == "openai":
+            if isinstance(normalized_message, HumanMessage) and human_message_has_image_content(normalized_message.content):
+                materialized_content = materialize_user_message_content_for_model(
+                    normalized_message.content,
+                    provider=self.config.provider,
+                )
+                if materialized_content != normalized_message.content:
+                    normalized_message = normalized_message.model_copy(update={"content": materialized_content})
+
+            if self.config.provider == "openai" and not (
+                isinstance(normalized_message, HumanMessage) and human_message_has_image_content(normalized_message.content)
+            ):
                 raw_content = getattr(normalized_message, "content", None)
                 normalized_content = stringify_content(raw_content)
                 if normalized_content != raw_content:
@@ -275,6 +289,15 @@ class ContextBuilder:
                 system_messages.append(message)
             else:
                 non_system_messages.append(message)
+        if self.config.provider == "openai" and len(system_messages) > 1:
+            merged_system_content = "\n\n".join(
+                stringify_content(message.content).strip()
+                for message in system_messages
+                if stringify_content(message.content).strip()
+            ).strip()
+            if merged_system_content:
+                return [SystemMessage(content=merged_system_content), *non_system_messages]
+            return non_system_messages
         return [*system_messages, *non_system_messages]
 
     def assert_provider_safe_context(

@@ -20,6 +20,17 @@ from core.config import AgentConfig
 from core.constants import AGENT_VERSION, BASE_DIR
 from core.logging_config import setup_logging
 from core.message_utils import is_tool_message_error, stringify_content
+from core.multimodal import (
+    DEFAULT_MODEL_CAPABILITIES,
+    build_user_message_content,
+    extract_user_turn_data,
+    normalize_model_capabilities,
+    normalize_request_payload,
+    resolve_model_capabilities,
+    request_has_content,
+    request_task_text,
+    request_user_text,
+)
 from core.run_logger import JsonlRunLogger
 from core.model_profiles import ModelProfileStore, find_active_profile, normalize_profiles_payload
 from core.session_store import (
@@ -69,12 +80,16 @@ def setup_runtime() -> AgentConfig:
     return config
 
 
-def build_initial_state(user_input: str, session_id: str, safety_mode: str = "default") -> dict:
+def build_initial_state(user_input: Any, session_id: str, safety_mode: str = "default") -> dict:
+    request_payload = normalize_request_payload(user_input)
+    user_text = request_payload["text"]
+    attachments = request_payload["attachments"]
+    current_task = request_task_text(request_payload)
     return {
-        "messages": [("user", user_input)],
+        "messages": [HumanMessage(content=build_user_message_content(user_text, attachments))],
         "steps": 0,
         "token_usage": {},
-        "current_task": user_input,
+        "current_task": current_task,
         "session_id": session_id,
         "run_id": uuid.uuid4().hex,
         "turn_id": 1,
@@ -313,10 +328,11 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
 
     for message in values.get("messages", []) or []:
         if isinstance(message, HumanMessage):
-            text = stringify_content(message.content).strip()
-            if not text:
+            text, attachments = extract_user_turn_data(message.content)
+            text = text.strip()
+            if not text and not attachments:
                 continue
-            current_turn = {"user_text": text, "blocks": []}
+            current_turn = {"user_text": text, "attachments": attachments, "blocks": []}
             turns.append(current_turn)
             continue
 
@@ -509,18 +525,25 @@ async def build_ui_payload(
     store: SessionStore,
     snapshot: SessionSnapshot,
     model_profiles: dict[str, Any] | None = None,
+    model_capabilities: dict[str, Any] | None = None,
     *,
     agent_app=None,
     include_transcript: bool = False,
 ) -> dict[str, Any]:
     runtime_snapshot = build_runtime_snapshot(config, tool_registry, snapshot)
+    normalized_profiles = normalize_profiles_payload(model_profiles or {})
+    effective_capabilities = resolve_model_capabilities(
+        find_active_profile(normalized_profiles),
+        model_capabilities if model_capabilities is not None else getattr(tool_registry, "model_capabilities", None),
+    )
     payload = {
         "snapshot": runtime_snapshot,
         "tools": runtime_snapshot["tools"],
         "help_markdown": build_help_markdown(),
         "sessions": serialize_session_entries(store.list_sessions()),
         "active_session_id": snapshot.session_id,
-        "model_profiles": normalize_profiles_payload(model_profiles or {}),
+        "model_profiles": normalized_profiles,
+        "model_capabilities": effective_capabilities,
     }
     if include_transcript and agent_app is not None:
         payload["transcript"] = await load_transcript_payload(agent_app, snapshot.thread_id)
@@ -558,6 +581,8 @@ class AgentRunWorker(QObject):
         self.store: SessionStore | None = None
         self.profile_store: ModelProfileStore | None = None
         self.model_profiles: dict[str, Any] = {"active_profile": None, "profiles": []}
+        self.runtime_model_capabilities: dict[str, Any] = dict(DEFAULT_MODEL_CAPABILITIES)
+        self.model_capabilities: dict[str, Any] = dict(DEFAULT_MODEL_CAPABILITIES)
         self._runtime_profile_id: str = ""
         self.agent_app = None
         self.tool_registry = None
@@ -566,6 +591,8 @@ class AgentRunWorker(QObject):
         self._is_busy = False
         self._awaiting_approval = False
         self._awaiting_interrupt_kind = ""
+        self._active_run_elapsed_seconds = 0.0
+        self._active_request_has_images = False
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None:
@@ -757,6 +784,7 @@ class AgentRunWorker(QObject):
             self.store,
             self.current_session,
             model_profiles=self.model_profiles,
+            model_capabilities=self.model_capabilities,
             agent_app=self.agent_app,
             include_transcript=include_transcript,
         )
@@ -874,6 +902,16 @@ class AgentRunWorker(QObject):
         active = find_active_profile(model_profiles)
         return str(active.get("id") or "").strip() if active else ""
 
+    def _set_effective_model_capabilities(
+        self,
+        runtime_capabilities: Any,
+        *,
+        model_profiles: dict[str, Any] | None = None,
+    ) -> None:
+        self.runtime_model_capabilities = normalize_model_capabilities(runtime_capabilities)
+        active_profile = find_active_profile(model_profiles or self.model_profiles or {})
+        self.model_capabilities = resolve_model_capabilities(active_profile, self.runtime_model_capabilities)
+
     async def _rebuild_runtime_for_active_profile(self, model_profiles: dict[str, Any]) -> None:
         active_profile = find_active_profile(model_profiles)
         if active_profile is None:
@@ -887,6 +925,9 @@ class AgentRunWorker(QObject):
         self.config = new_config
         self.agent_app = new_agent_app
         self.tool_registry = new_tool_registry
+        self._set_effective_model_capabilities(
+            getattr(new_tool_registry, "model_capabilities", None)
+        )
         self._configure_cli_output_bridge()
 
         if self.current_session is not None:
@@ -911,12 +952,35 @@ class AgentRunWorker(QObject):
         *,
         success_notice_kind: str,
         success_notice_message: str,
+        sync_runtime: bool = False,
+        runtime_failure_kind: str = "model_switch_failed",
+        runtime_failure_message_prefix: str = "Не удалось применить выбранную модель",
     ) -> bool:
         if self.profile_store is None:
             raise RuntimeError("Model profile store is not initialized.")
 
         normalized_target = self.profile_store.save(candidate_payload)
         self.model_profiles = normalized_target
+        self._set_effective_model_capabilities(
+            self.runtime_model_capabilities,
+            model_profiles=normalized_target,
+        )
+        if sync_runtime and self._selected_profile_id(normalized_target):
+            try:
+                await self._rebuild_runtime_for_active_profile(normalized_target)
+            except Exception as exc:
+                self.event_emitted.emit(
+                    StreamEvent(
+                        "summary_notice",
+                        {
+                            "message": f"{runtime_failure_message_prefix}: {exc}",
+                            "kind": runtime_failure_kind,
+                        },
+                    )
+                )
+                await self._emit_session_payload(include_transcript=False)
+                return False
+            self._runtime_profile_id = self._selected_profile_id(normalized_target)
         self.event_emitted.emit(
             StreamEvent(
                 "summary_notice",
@@ -1005,6 +1069,9 @@ class AgentRunWorker(QObject):
         self.ui_run_logger = JsonlRunLogger(self.config.run_log_dir)
         self.store = SessionStore(self.config.session_state_path)
         self.agent_app, self.tool_registry = await build_agent_app(self.config)
+        self._set_effective_model_capabilities(
+            getattr(self.tool_registry, "model_capabilities", None)
+        )
         self._configure_cli_output_bridge()
         selected_session = self._select_session_for_project(force_new_session=force_new_session)
         self.current_session = self._activate_session_with_workdir_or_fallback(
@@ -1024,47 +1091,77 @@ class AgentRunWorker(QObject):
             self.store,
             self.current_session,
             model_profiles=self.model_profiles,
+            model_capabilities=self.model_capabilities,
             agent_app=self.agent_app,
             include_transcript=True,
         )
         self.initialized.emit(payload)
         self.session_changed.emit(payload)
 
-    @Slot(str)
-    def start_run(self, user_text: str) -> None:
-        if not user_text.strip() or self._is_busy or self._awaiting_approval or not self.current_session:
+    @Slot(object)
+    def start_run(self, user_text: object) -> None:
+        request_payload = normalize_request_payload(user_text)
+        if not request_has_content(request_payload) or self._is_busy or self._awaiting_approval or not self.current_session:
             return
         if find_active_profile(self.model_profiles) is None:
+            profiles_exist = bool((self.model_profiles or {}).get("profiles"))
             self.event_emitted.emit(
                 StreamEvent(
                     "summary_notice",
                     {
-                        "message": "No models configured. Open Settings and add a profile.",
+                        "message": (
+                            "No enabled models available. Open Settings and enable a profile."
+                            if profiles_exist
+                            else "No models configured. Open Settings and add a profile."
+                        ),
                         "kind": "model_missing",
+                    },
+                )
+            )
+            return
+        if request_payload["attachments"] and not bool(self.model_capabilities.get("image_input_supported")):
+            self.event_emitted.emit(
+                StreamEvent(
+                    "summary_notice",
+                    {
+                        "message": "Current model does not accept image input. Switch to an image-capable model or remove the images.",
+                        "kind": "image_input_unsupported",
+                        "level": "warning",
                     },
                 )
             )
             return
         if not self._run(self._ensure_runtime_matches_selected_profile()):
             return
-        if self._maybe_set_session_title(user_text):
+        if self._maybe_set_session_title(request_user_text(request_payload)):
             self._run(self._emit_session_payload(include_transcript=False))
         self._set_busy(True)
         try:
-            self._run(self._start_run_async(user_text))
+            self._run(self._start_run_async(request_payload))
         except Exception as exc:
             self.event_emitted.emit(StreamEvent("run_failed", {"message": str(exc)}))
             self._set_busy(False)
 
-    async def _start_run_async(self, user_text: str) -> None:
+    async def _start_run_async(self, user_text: object) -> None:
+        request_payload = normalize_request_payload(user_text)
+        self._active_run_elapsed_seconds = 0.0
+        self._active_request_has_images = bool(request_payload["attachments"])
         repair_notices = await self._repair_current_session_if_needed()
         if repair_notices:
             self._log_ui_run_event(
                 "pre_run_session_repair",
                 repaired_count=len(repair_notices),
             )
-        self.event_emitted.emit(StreamEvent("run_started", {"text": user_text}))
-        await self._run_graph_payload(build_initial_state(user_text, session_id=self.current_session.session_id))
+        self.event_emitted.emit(
+            StreamEvent(
+                "run_started",
+                {
+                    "text": request_payload["text"],
+                    "attachments": request_payload["attachments"],
+                },
+            )
+        )
+        await self._run_graph_payload(build_initial_state(request_payload, session_id=self.current_session.session_id))
 
     async def _run_graph_payload(self, payload: dict | Command) -> None:
         try:
@@ -1080,8 +1177,10 @@ class AgentRunWorker(QObject):
                     text_max_chars=self.config.stream_text_max_chars,
                     events_max=self.config.stream_events_max,
                     tool_buffer_max=self.config.stream_tool_buffer_max,
+                    base_elapsed_seconds=self._active_run_elapsed_seconds,
                 )
                 result = await processor.process_stream(stream)
+                self._active_run_elapsed_seconds = result.elapsed_seconds
 
                 if result.cancelled:
                     self._log_ui_run_event(
@@ -1089,12 +1188,16 @@ class AgentRunWorker(QObject):
                         interrupted_tool_count=len(result.cancelled_tools),
                     )
                     await self._repair_current_session_if_needed()
+                    self._active_run_elapsed_seconds = 0.0
+                    self._active_request_has_images = False
                     self._set_busy(False)
                     return
 
                 if result.interrupt is None:
                     self.store.save_active_session(self.current_session, touch=True, set_active=True)
                     await self._emit_session_payload(include_transcript=False)
+                    self._active_run_elapsed_seconds = 0.0
+                    self._active_request_has_images = False
                     self._set_busy(False)
                     return
 
@@ -1120,6 +1223,23 @@ class AgentRunWorker(QObject):
                 self._set_busy(False)
                 return
         except Exception as exc:
+            self._active_run_elapsed_seconds = 0.0
+            if self._active_request_has_images:
+                self.event_emitted.emit(
+                    StreamEvent(
+                        "summary_notice",
+                        {
+                            "message": (
+                                "Модель не приняла прикреплённое изображение. "
+                                "Проверьте чекбокс поддержки изображений у профиля "
+                                "или отправьте запрос без картинки."
+                            ),
+                            "kind": "image_input_failed",
+                            "level": "warning",
+                        },
+                    )
+                )
+            self._active_request_has_images = False
             self.event_emitted.emit(StreamEvent("run_failed", {"message": str(exc)}))
             self._set_busy(False)
 
@@ -1318,14 +1438,17 @@ class AgentRunWorker(QObject):
         target_profile = find_active_profile(candidate)
         target_model = str((target_profile or {}).get("model") or "").strip()
         success_notice_message = (
-            f"Модель переключена на {target_model}. Новый выбор будет использован в следующем запросе."
+            f"Модель переключена на {target_model}."
             if target_model
-            else "Модель переключена. Новый выбор будет использован в следующем запросе."
+            else "Модель переключена."
         )
         await self._apply_model_profiles(
             candidate,
             success_notice_kind="model_switched",
             success_notice_message=success_notice_message,
+            sync_runtime=True,
+            runtime_failure_kind="model_switch_failed",
+            runtime_failure_message_prefix="Не удалось применить выбранную модель",
         )
 
     @Slot(object)
@@ -1361,7 +1484,10 @@ class AgentRunWorker(QObject):
         await self._apply_model_profiles(
             config_payload,
             success_notice_kind="profiles_saved",
-            success_notice_message="Профили моделей сохранены. Изменения будут использованы в следующем запросе.",
+            success_notice_message="Профили моделей сохранены.",
+            sync_runtime=True,
+            runtime_failure_kind="profiles_apply_failed",
+            runtime_failure_message_prefix="Профили сохранены, но не удалось применить активную модель",
         )
 
     @Slot()
@@ -1390,7 +1516,7 @@ class AgentRuntimeController(QObject):
     busy_changed = Signal(bool)
 
     _initialize_requested = Signal()
-    _start_run_requested = Signal(str)
+    _start_run_requested = Signal(object)
     _stop_run_requested = Signal()
     _resume_requested = Signal(bool, bool)
     _resume_user_choice_requested = Signal(str)
@@ -1439,7 +1565,7 @@ class AgentRuntimeController(QObject):
     def reinitialize(self, force_new_session: bool = False) -> None:
         self._reinitialize_requested.emit(force_new_session)
 
-    def start_run(self, user_text: str) -> None:
+    def start_run(self, user_text: object) -> None:
         self._start_run_requested.emit(user_text)
 
     def stop_run(self) -> None:

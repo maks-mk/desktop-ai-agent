@@ -4,6 +4,7 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from ui.theme import ACCENT_BLUE, AMBER_WARNING, ERROR_RED, SUCCESS_GREEN, TEXT_MUTED
+from .attachments import ImageAttachmentStripWidget
 from .foundation import AutoTextBrowser, CodeBlockWidget, _collapsed_user_message_text, _fa_icon
 
 
@@ -100,7 +101,7 @@ class StatusIndicatorWidget(QFrame):
 
 
 class UserMessageWidget(QFrame):
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, attachments: list[dict] | None = None) -> None:
         super().__init__()
         self.full_text = text
         self.preview_text, self.is_expandable = _collapsed_user_message_text(text)
@@ -123,6 +124,10 @@ class UserMessageWidget(QFrame):
         bubble_layout.setContentsMargins(14, 10, 14, 10)
         bubble_layout.setSpacing(4)
 
+        self.attachments_strip = ImageAttachmentStripWidget(thumb_size=40, removable=False)
+        self.attachments_strip.set_attachments(list(attachments or []))
+        bubble_layout.addWidget(self.attachments_strip)
+
         self.body = QLabel(self.preview_text if self.is_expandable else self.full_text)
         self.body.setObjectName("TranscriptBody")
         self.body.setWordWrap(True)
@@ -140,6 +145,7 @@ class UserMessageWidget(QFrame):
         self.body.setMinimumWidth(ideal_width)
         self.body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.body.setMaximumWidth(680)
+        self.body.setVisible(bool(text.strip()))
         bubble_layout.addWidget(self.body)
 
         self.toggle_button = QToolButton()

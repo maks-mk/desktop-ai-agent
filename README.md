@@ -1,6 +1,6 @@
 # Autonomous AI Agent (GUI)
 
-Версия: `v0.65.6b`
+Версия: `v0.65.7b`
 
 Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PySide6`.
 Приложение ориентировано на повседневную разработку: работа с файлами проекта, запуск инструментов, безопасные approvals для рискованных действий, структурированный user-choice flow через `interrupt()` и удобная история чатов по проектам.
@@ -8,7 +8,7 @@ Desktop AI-агент с графовым runtime (`LangGraph`) и GUI на `PyS
 ## Структура проекта
 
 ```text
-v0.65.6b/
+v0.65.7b/
 ├─ agent.py
 ├─ main.py
 ├─ prompt.txt
@@ -50,6 +50,10 @@ v0.65.6b/
 - Поддержка MCP-инструментов (включая Context7 при соответствующей конфигурации).
 - Runtime-статусы (`Thinking`, `Self-correcting`, `Ready`, ошибки) в UI.
 - Inline-статус `Thinking` стабильно показывается перед выводом в каждом новом run (включая длинный transcript и повторные запросы).
+- Надежный multimodal input для разных провайдеров:
+  - для `gemini` используется стандартный LangChain image block,
+  - для `openai`/OpenAI-compatible используется provider-native `image_url` (`data:<mime>;base64,...`),
+  - для strict OpenAI-compatible API все runtime `SystemMessage` объединяются в один system-prefix, чтобы избежать ошибок формата вида `System message must be at the beginning`.
 - Профили моделей в GUI:
   - окно `Settings` (CRUD профилей),
   - селектор активной модели рядом с `+` в composer,
@@ -143,6 +147,9 @@ v0.65.6b/
 - Отдельный `tool selector` удалён: агент получает полный набор доступных инструментов на turn.
 - Безопасность исполнения обеспечивают метаданные инструментов, `PolicyEngine`, `stability_guard` и реальные platform/workspace boundaries.
 - `request_user_input` всегда доступен и не проходит через approval flow.
+- Multimodal routing учитывает провайдера:
+  - `openai`/OpenAI-compatible получает картинки в формате `image_url`,
+  - остальные провайдеры получают стандартные LangChain image blocks.
 - Для tool-mode в системном overlay зафиксировано требование: перед каждым tool-call агент формулирует короткое намерение, после чего отправляет структурированный вызов инструмента.
 - Словарный `intent` больше не участвует в боевом control flow; живая message-context логика вынесена в `MessageContextHelper`, а `IntentEngine` оставлен только для совместимости.
 - Если turn-policy требует инструменты, а модель отвечает без tool-calls, включается детерминированный путь self-correction/handoff (reason: `action_requires_tools`).
@@ -156,6 +163,32 @@ v0.65.6b/
 - UI показывает inline-карточку выбора, а затем резюмирует тот же run через `Command(resume=...)`.
 - Значение, переданное в `resume`, возвращается обратно как результат вызова `request_user_input`.
 - Это штатный HITL-поток LangGraph; обычные текстовые вопросы в ответе модели не заменяют этот механизм.
+
+## Поддержка изображений (вход)
+
+- Агент поддерживает image input в пользовательском сообщении (multimodal turn).
+- Поддерживаются несколько изображений в одном запросе.
+- Изображения сохраняются в managed storage сессии (`.agent_state/attachments/<session_id>/...`) и восстанавливаются после перезапуска вместе с transcript.
+
+### Как включить
+
+- Откройте `Settings` → `Model Settings`.
+- Для нужного профиля включите чекбокс `Поддержка изображений`.
+- Если у профиля выключена поддержка изображений, рядом с моделью отображается бейдж `no img`, а image-attach path блокируется.
+
+### Как пользоваться
+
+- Вставка из буфера обмена: `Ctrl+V` (если в буфере изображение, добавляется image attachment с мини-превью).
+- Добавление из файла: кнопка `+` в composer → `Add image...`.
+- Обычные файлы через `+` → `Insert file path...` сохраняют старое поведение (как текстовые пути), не становятся image-attachments.
+- После отправки изображения идут в модель как multimodal content:
+  - `openai`/OpenAI-compatible: provider-native `image_url` (`data:<mime>;base64,...`),
+  - другие провайдеры: стандартные LangChain image blocks.
+
+### Поведение при ошибках
+
+- Если профиль отключен для image input, запрос с изображением не запускается и показывается понятный notice.
+- Если профиль включен, но upstream-модель фактически не приняла изображение, runtime возвращает безопасный notice `image_input_failed` вместо падения приложения.
 
 ## Поведение self-correction
 

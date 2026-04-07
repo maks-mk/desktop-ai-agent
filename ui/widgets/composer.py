@@ -5,10 +5,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QMimeData, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QTextCursor
 from PySide6.QtWidgets import QApplication, QFrame, QListWidget, QListWidgetItem, QPlainTextEdit, QVBoxLayout, QWidget
 
+from core.multimodal import can_read_image_file
 from .foundation import (
     COMPOSER_MENTION_EXCLUDED_DIRS,
     COMPOSER_MENTION_MAX_ITEMS,
@@ -19,6 +20,8 @@ from .foundation import (
 
 class ComposerTextEdit(QPlainTextEdit):
     submit_requested = Signal()
+    image_pasted = Signal(object)
+    image_files_pasted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -134,14 +137,28 @@ class ComposerTextEdit(QPlainTextEdit):
         self._refresh_mention_popup()
 
     def insertFromMimeData(self, source: QMimeData) -> None:
+        if source.hasImage():
+            image = source.imageData()
+            if image is not None:
+                self.image_pasted.emit(image)
+                self._refresh_mention_popup()
+                return
         if source.hasUrls():
             parts = []
+            image_paths: list[str] = []
             for url in source.urls():
                 if url.isLocalFile():
-                    parts.append(self.format_file_reference(url.toLocalFile()))
+                    local_path = url.toLocalFile()
+                    if can_read_image_file(local_path):
+                        image_paths.append(local_path)
+                    else:
+                        parts.append(self.format_file_reference(local_path))
+            if image_paths:
+                self.image_files_pasted.emit(image_paths)
             if parts:
                 self.insertPlainText(" ".join(parts))
                 self._refresh_mention_popup()
+            if image_paths:
                 return
         if source.hasText():
             self.insertPlainText(self._normalize_pasted_text(source.text()))

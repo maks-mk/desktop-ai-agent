@@ -11,7 +11,7 @@ from .tools import ToolCardWidget
 
 
 class ConversationTurnWidget(QWidget):
-    def __init__(self, user_text: str) -> None:
+    def __init__(self, user_text: str, attachments: list[dict[str, Any]] | None = None) -> None:
         super().__init__()
         self._assistant_markdown = ""
         self._layout = QVBoxLayout(self)
@@ -22,7 +22,7 @@ class ConversationTurnWidget(QWidget):
         self.tool_cards: dict[str, ToolCardWidget] = {}
         self.status_widget: StatusIndicatorWidget | None = None
         self.summary_notice_widget: NoticeWidget | None = None
-        self._append_block("user", UserMessageWidget(user_text))
+        self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or [])))
 
     @staticmethod
     def _common_prefix_length(first: str, second: str) -> int:
@@ -244,8 +244,8 @@ class ChatTranscriptWidget(QWidget):
         self.layout.insertWidget(self.layout.count() - 1, NoticeWidget(message, level=level))
         self.notify_content_changed()
 
-    def start_turn(self, user_text: str) -> ConversationTurnWidget:
-        turn = ConversationTurnWidget(user_text)
+    def start_turn(self, user_text: str, attachments: list[dict[str, Any]] | None = None) -> ConversationTurnWidget:
+        turn = ConversationTurnWidget(user_text, attachments=attachments)
         self.layout.insertWidget(self.layout.count() - 1, turn)
         self.notify_content_changed(force=True)
         return turn
@@ -258,7 +258,8 @@ class ChatTranscriptWidget(QWidget):
             self.add_global_notice(summary_notice, level="info")
         for turn_data in payload.get("turns", []) or []:
             user_text = str(turn_data.get("user_text", "") or "")
-            turn = ConversationTurnWidget(user_text)
+            attachments = list(turn_data.get("attachments", []) or [])
+            turn = ConversationTurnWidget(user_text, attachments=attachments)
             turn.restore_blocks(list(turn_data.get("blocks", []) or []))
             self.layout.insertWidget(self.layout.count() - 1, turn)
         self.notify_content_changed(force=True)
