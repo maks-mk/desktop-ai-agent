@@ -75,7 +75,7 @@ v0.65.7b/
 - [`ui/widgets/`](ui/widgets): UI-виджеты, разложенные по зонам ответственности.
 - [`ui/theme.py`](ui/theme.py): палитра, размеры и stylesheet для PySide6.
 - [`ui/visibility.py`](ui/visibility.py): контракт внутренних assistant/recovery сообщений и политика их показа в UI.
-- [`core/nodes.py`](core/nodes.py): узлы графа, recovery-loop (`stability_guard` + `recovery`), structured repair strategies, loop-guards, tool-preflight и safety flow.
+- [`core/nodes.py`](core/nodes.py): узлы графа `summarize -> classify_turn -> agent -> {approval|tools|recovery|END}`, bounded-recovery, loop-guards, tool-preflight и safety flow.
 - [`core/context_builder.py`](core/context_builder.py): сборка и нормализация LLM-контекста с provider-safe ordering.
 - [`core/runtime_prompt_policy.py`](core/runtime_prompt_policy.py): runtime policy overlays и динамические system-инструкции (OS/shell/path style, workspace/cwd, timezone, tool-access, `request_user_input` rules). Языковая политика по умолчанию задается в `prompt.txt`.
 - [`core/session_store.py`](core/session_store.py): хранение и индекс сессий.
@@ -91,7 +91,7 @@ v0.65.7b/
 - [`core/constants.py`](core/constants.py): базовые константы и пути проекта.
 - [`core/checkpointing.py`](core/checkpointing.py): backend checkpoint-хранилища для LangGraph.
 - [`core/errors.py`](core/errors.py): единый формат ошибок.
-- [`core/intent_engine.py`](core/intent_engine.py): детерминированная классификация turn intent и follow-up сигналов.
+- [`core/message_context.py`](core/message_context.py): history-derived message-context helpers для follow-up и tool-context сигналов.
 - [`core/logging_config.py`](core/logging_config.py): конфигурация логирования приложения.
 - [`core/message_utils.py`](core/message_utils.py): утилиты для работы с сообщениями и текстом.
 - [`core/model_profiles.py`](core/model_profiles.py): профили моделей и merge логика для GUI.
@@ -105,11 +105,9 @@ v0.65.7b/
 - [`core/session_store.py`](core/session_store.py): persistence для чатов и индексов сессий.
 - [`core/session_utils.py`](core/session_utils.py): вспомогательная логика по сессиям.
 - [`core/state.py`](core/state.py): схема состояния LangGraph.
-- [`core/stream_processor.py`](core/stream_processor.py): сборка и буферизация стрим-событий.
 - [`core/text_utils.py`](core/text_utils.py): компактное форматирование и текстовые helper-ы.
 - [`core/tool_policy.py`](core/tool_policy.py): метаданные инструментов и default policy.
 - [`core/tool_results.py`](core/tool_results.py): парсинг результатов инструментов и статусов.
-- [`core/ui_theme.py`](core/ui_theme.py): compatibility-shim на `ui/theme.py`.
 - [`core/utils.py`](core/utils.py): общие helper-ы.
 - [`core/validation.py`](core/validation.py): валидация результатов и входных данных.
 
@@ -135,7 +133,6 @@ v0.65.7b/
 - [`tools/tool_registry.py`](tools/tool_registry.py): загрузка локальных и MCP инструментов.
 - [`tools/filesystem.py`](tools/filesystem.py): файловые инструменты верхнего уровня.
 - [`tools/filesystem_impl/`](tools/filesystem_impl): внутренняя реализация файлового слоя (`manager`, `pathing`, `editing`).
-- [`tools/delete_tools.py`](tools/delete_tools.py): удаление файлов и директорий.
 - [`tools/local_shell.py`](tools/local_shell.py): shell/terminal execution tools.
 - [`tools/process_tools.py`](tools/process_tools.py): управление процессами.
 - [`tools/search_tools.py`](tools/search_tools.py): web/search tools.
@@ -145,14 +142,14 @@ v0.65.7b/
 ## Tool Routing
 
 - Отдельный `tool selector` удалён: агент получает полный набор доступных инструментов на turn.
-- Безопасность исполнения обеспечивают метаданные инструментов, `PolicyEngine`, `stability_guard` и реальные platform/workspace boundaries.
+- Безопасность исполнения обеспечивают метаданные инструментов, `PolicyEngine`, approval flow и реальные platform/workspace boundaries.
 - `request_user_input` всегда доступен и не проходит через approval flow.
 - Multimodal routing учитывает провайдера:
   - `openai`/OpenAI-compatible получает картинки в формате `image_url`,
   - остальные провайдеры получают стандартные LangChain image blocks.
 - Для tool-mode в системном overlay зафиксировано требование: перед каждым tool-call агент формулирует короткое намерение, после чего отправляет структурированный вызов инструмента.
-- Словарный `intent` больше не участвует в боевом control flow; живая message-context логика вынесена в `MessageContextHelper`, а `IntentEngine` оставлен только для совместимости.
-- Если turn-policy требует инструменты, а модель отвечает без tool-calls, включается детерминированный путь self-correction/handoff (reason: `action_requires_tools`).
+- `intent` используется в `classify_turn` только для определения режима хода (`chat`/`inspect`/`act`/`recover`) и требования evidence; доступность инструментов от `intent` не зависит.
+- Если turn-policy требует evidence, а модель завершает шаг без tool-calls и без подтверждения, включается детерминированный путь self-correction/handoff (reason: `action_requires_tools`).
 - Для коротких follow-up (`продолжай`, `еще раз`) при наличии tool-контекста приоритет отдаётся контексту предыдущего turn, а не только словарю ключевых фраз.
 
 ## Что Такое `request_user_input`
@@ -192,8 +189,10 @@ v0.65.7b/
 
 ## Поведение self-correction
 
-- В графе нет отдельного LLM-узла критика: контроль стабильности выполняют `stability_guard` и явный узел `recovery`.
-- При ошибке инструмента runtime сначала пробует детерминированные recovery-стратегии (`normalize_args`, `switch_tool`, `verify_side_effect`, `repair_then_rerun`, `resume_after_transient_failure`), затем при необходимости включает LLM-replan.
+- В графе нет отдельного LLM-узла критика и нет глобального post-pass `stability_guard` в happy-path.
+- Recovery запускается только при реальной проблеме: `open_tool_issue`, protocol violation, hard loop budget или отсутствие требуемого evidence.
+- При ошибке инструмента runtime сначала пробует детерминированные recovery-стратегии (`normalize_args`, `switch_tool`, `verify_side_effect`, `repair_then_rerun`, `resume_after_transient_failure`), затем при необходимости выполняет один `llm_replan`.
+- Recovery bounded по issue fingerprint (жесткий ceiling), чтобы исключить бесконечные репланы.
 - Остановка допустима только при подтверждённом успехе, реальном внешнем блокере, platform/workspace boundary или опасной необратимой операции, требующей явного approval.
 
 ## Хранение данных

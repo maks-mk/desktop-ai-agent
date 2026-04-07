@@ -46,6 +46,10 @@ from ui.widgets import (
     _fa_icon,
 )
 
+COMPOSER_ATTACH_TOOLTIP = "Add image or insert file path"
+COMPOSER_ADD_IMAGE_LABEL = "Add image…"
+COMPOSER_INSERT_FILE_PATH_LABEL = "Insert file path…"
+
 
 def _configure_qt_logging() -> None:
     rule = "qt.text.font.db=false"
@@ -319,10 +323,10 @@ class MainWindow(QMainWindow):
         self.attach_button.setIconSize(QSize(12, 12))
         self.attach_button.setFixedSize(28, 28)
         self.attach_button.setObjectName("ComposerAttachButton")
-        self.attach_button.setToolTip("Add image or Add files")
+        self.attach_button.setToolTip(COMPOSER_ATTACH_TOOLTIP)
         self.attach_menu = QMenu(self.attach_button)
-        self.add_image_action = self.attach_menu.addAction("Add image…")
-        self.insert_file_path_action = self.attach_menu.addAction("Add files…")
+        self.add_image_action = self.attach_menu.addAction(COMPOSER_ADD_IMAGE_LABEL)
+        self.insert_file_path_action = self.attach_menu.addAction(COMPOSER_INSERT_FILE_PATH_LABEL)
         self.attach_button.setMenu(self.attach_menu)
         self.attach_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         control_row.addWidget(self.attach_button, 0, Qt.AlignVCenter)
@@ -645,6 +649,8 @@ class MainWindow(QMainWindow):
     def _on_summary_notice(self, payload: dict) -> None:
         kind = str(payload.get("kind", "") or "")
         level = str(payload.get("level", "info") or "info")
+        if kind == "agent_internal_notice":
+            return
         if kind == "auto_summary":
             self._summarize_in_progress = False
             if self.current_turn is not None:

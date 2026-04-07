@@ -13,11 +13,11 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar
 
 import main as agent_cli
-from core.gui_runtime import build_runtime_snapshot, summarize_approval_request
 from core.model_profiles import normalize_profiles_payload
-from core.stream_processor import StreamEvent
 from core.tool_policy import ToolMetadata
-from core.ui_theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
+from ui.runtime import build_runtime_snapshot, summarize_approval_request
+from ui.streaming import StreamEvent
+from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
 from ui.widgets.foundation import AutoTextBrowser, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
 
 
@@ -1181,7 +1181,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(tool_card.cli_exec_widget.meta_label.property("severity"), "error")
         self.assertTrue(tool_card.cli_exec_widget.meta_label.text().lower().startswith("error"))
 
-    def test_hidden_internal_notice_renders_as_notice_without_assistant_block(self):
+    def test_hidden_internal_notice_event_is_ignored_in_ui(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Проверь остановку"}))
         self.window._handle_event(
@@ -1195,9 +1195,7 @@ class GuiUxTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
-        notice = self.window.current_turn.layout().itemAt(1).widget()
-        self.assertEqual(notice.text_label.text(), "Автоматическое продолжение остановлено. Нужен новый запрос.")
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
 
     def test_tool_args_missing_diagnostic_is_not_shown_in_transcript(self):
         self.window._handle_initialized(self._snapshot_payload())

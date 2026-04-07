@@ -33,16 +33,6 @@ class RuntimeExecutionEnvironment:
 
 class RuntimePromptPolicyBuilder:
     REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
-    REQUEST_USER_INPUT_DEMO_MARKERS = (
-        "request_user_input",
-        "test",
-        "demo",
-        "demonstrat",
-        "example",
-        "тест",
-        "демо",
-        "пример",
-    )
 
     def __init__(self, *, config: AgentConfig) -> None:
         self.config = config
@@ -63,10 +53,6 @@ class RuntimePromptPolicyBuilder:
         request_user_input_message = self._build_request_user_input_policy(context)
         if request_user_input_message:
             messages.append(SystemMessage(content=request_user_input_message))
-
-        demo_policy_message = self._build_request_user_input_demo_policy(context)
-        if demo_policy_message:
-            messages.append(SystemMessage(content=demo_policy_message))
 
         if context.user_choice_locked:
             messages.append(
@@ -98,6 +84,10 @@ class RuntimePromptPolicyBuilder:
                 "Ask for clarification only when the request cannot be executed correctly and safely with the available "
                 "context and tools."
             ),
+            (
+                "Before using any tool or tool batch, write one brief sentence about your immediate intention, then call "
+                "the tool."
+            ),
             "After any system change (installation, configuration, file edits), verify the result before reporting success.",
             "Be concise. No preamble, no summaries after actions, no unsolicited explanations.",
             f"Current date: {datetime.now().strftime('%Y-%m-%d')}",
@@ -121,27 +111,26 @@ class RuntimePromptPolicyBuilder:
     def _build_tool_access_message(self, context: RuntimePromptContext) -> str:
         if not context.tools_available:
             return (
-                "TOOL ACCESS FOR THIS REQUEST:\n"
-                "Tools are disabled for this request.\n"
-                "ACTIVE_TOOLS_FOR_THIS_REQUEST: none. Do not claim any tool is available."
+                "TOOLS:\n"
+                "No tools are available in this runtime. Do not claim tool access."
             )
 
         names = self._normalized_tool_names(context.active_tool_names)
         if not names:
             return (
-                "TOOL ACCESS FOR THIS REQUEST:\n"
-                "Use only tools bound in this request."
+                "TOOLS:\n"
+                "Tools are available in this runtime. Use tool calls when they help."
             )
         if len(names) <= 4:
             return (
-                "TOOL ACCESS FOR THIS REQUEST:\n"
-                "ACTIVE_TOOLS_FOR_THIS_REQUEST: "
+                "TOOLS:\n"
+                "Available tools: "
                 + ", ".join(names)
-                + ". Do not claim other tools are available."
+                + ". Use them when helpful. Do not invent unavailable tools."
             )
         return (
-            "TOOL ACCESS FOR THIS REQUEST:\n"
-            "ACTIVE_TOOLS_FOR_THIS_REQUEST: use only tools bound in this request."
+            "TOOLS:\n"
+            "Tools are available in this runtime. Use tool calls when the task needs files, shell, web, or system access. Do not invent unavailable tools."
         )
 
     def _build_request_user_input_policy(self, context: RuntimePromptContext) -> str:
@@ -154,25 +143,6 @@ class RuntimePromptPolicyBuilder:
             "Ask exactly one user-choice question per turn. Never batch multiple request_user_input calls.\n"
             "After resume, continue with the chosen answer instead of asking again."
         )
-
-    def _build_request_user_input_demo_policy(self, context: RuntimePromptContext) -> str:
-        if self.REQUEST_USER_INPUT_TOOL_NAME not in self._normalized_tool_names(context.active_tool_names):
-            return ""
-        if not self._looks_like_request_user_input_demo(context.current_task):
-            return ""
-        return (
-            "REQUEST_USER_INPUT TEST POLICY:\n"
-            "The current task is a test or demonstration of request_user_input.\n"
-            "Do exactly one request_user_input call.\n"
-            "After resume, reply briefly with the selected value.\n"
-            "Do not add file writes, shell commands, extra verification, or more questions unless the user explicitly asked for them."
-        )
-
-    def _looks_like_request_user_input_demo(self, current_task: str) -> bool:
-        text = str(current_task or "").casefold()
-        if self.REQUEST_USER_INPUT_TOOL_NAME not in text:
-            return False
-        return any(marker in text for marker in self.REQUEST_USER_INPUT_DEMO_MARKERS[1:])
 
     def _detect_execution_environment(self) -> RuntimeExecutionEnvironment:
         os_family = self._detect_os_family()

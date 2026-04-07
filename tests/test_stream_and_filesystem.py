@@ -9,7 +9,7 @@ import httpx
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from core.text_utils import prepare_markdown_for_render
-from core.stream_processor import StreamProcessor
+from ui.streaming import StreamProcessor
 from tools import filesystem, local_shell
 from tools.filesystem import FilesystemManager, _DOWNLOAD_HEADERS, _format_download_http_error
 
@@ -240,6 +240,27 @@ class StreamAndFilesystemTests(unittest.TestCase):
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
         self.assertEqual(len(deltas), 1)
         self.assertIn("Автовыполнение остановлено", deltas[0]["full_text"])
+
+    def test_stream_processor_hides_internal_handoff_messages_from_ui_events(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content="internal handoff",
+                additional_kwargs={
+                    "agent_internal": {
+                        "kind": "tool_issue_handoff",
+                        "visible_in_ui": False,
+                        "ui_notice": "Нужен новый запрос.",
+                    }
+                },
+            )
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(processor.full_text, "")
+        self.assertEqual(processor.clean_full, "")
 
     def test_stream_processor_marks_stability_guard_as_self_correcting(self):
         events = []

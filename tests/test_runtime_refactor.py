@@ -15,15 +15,6 @@ from langgraph.types import Command
 from agent import create_agent_workflow
 from core.checkpointing import create_checkpoint_runtime
 from core.config import AgentConfig
-from core import gui_runtime
-from core.gui_runtime import (
-    append_project_label,
-    build_initial_state,
-    build_transcript_payload,
-    build_user_choice_payload,
-    generate_chat_title,
-    short_project_label,
-)
 from core.multimodal import (
     extract_model_capabilities,
     materialize_user_message_content_for_model,
@@ -34,10 +25,19 @@ from core.model_profiles import ModelProfileStore
 from core.nodes import AgentNodes
 from core.run_logger import JsonlRunLogger
 from core.session_store import SessionSnapshot, SessionStore
-from core.stream_processor import StreamProcessor
 from core.tool_policy import ToolMetadata
 from tools import process_tools
 from tools.tool_registry import ToolRegistry
+import ui.runtime as gui_runtime
+from ui.runtime import (
+    append_project_label,
+    build_initial_state,
+    build_transcript_payload,
+    build_user_choice_payload,
+    generate_chat_title,
+    short_project_label,
+)
+from ui.streaming import StreamProcessor
 
 
 class FakeLLM:
@@ -1141,7 +1141,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["turns"][0]["blocks"][0]["payload"]["name"], "edit_file")
         self.assertIn("Готово", payload["turns"][0]["blocks"][1]["markdown"])
 
-    def test_build_transcript_payload_hides_internal_handoff_and_restores_notice(self):
+    def test_build_transcript_payload_hides_internal_handoff_completely(self):
         payload = build_transcript_payload(
             {
                 "messages": [
@@ -1162,10 +1162,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(payload["turns"]), 1)
         self.assertEqual(payload["turns"][0]["user_text"], "Проверь завершение")
-        blocks = payload["turns"][0]["blocks"]
-        self.assertEqual([block["type"] for block in blocks], ["notice"])
-        self.assertEqual(blocks[0]["message"], "Автопродолжение остановлено. Нужен новый запрос.")
-        self.assertEqual(blocks[0]["level"], "warning")
+        self.assertEqual(payload["turns"][0]["blocks"], [])
 
     def test_build_transcript_payload_keeps_assistant_text_without_pending_choice_state(self):
         payload = build_transcript_payload(
@@ -1564,15 +1561,12 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await nodes.agent_node(self._initial_state("исправь файл demo.txt"))
 
-        self.assertEqual(result["turn_outcome"], "")
+        self.assertEqual(result["turn_outcome"], "recover_agent")
         self.assertTrue(result["has_protocol_error"])
         self.assertIsNotNone(result["open_tool_issue"])
         self.assertEqual(result["open_tool_issue"]["kind"], "protocol_error")
         self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "action_requires_tools")
         self.assertEqual(len(agent_llm.invocations), 1)
-
-        guard_result = await nodes.stability_guard_node({**self._initial_state("исправь файл demo.txt"), **result})
-        self.assertEqual(guard_result["turn_outcome"], "recover_agent")
 
     async def test_agent_node_marks_malformed_tool_payload_as_protocol_error(self):
         agent_llm = FakeLLM(
@@ -1601,13 +1595,10 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await nodes.agent_node(self._initial_state("прочитай README.md"))
 
-        self.assertEqual(result["turn_outcome"], "")
+        self.assertEqual(result["turn_outcome"], "recover_agent")
         self.assertTrue(result["has_protocol_error"])
         self.assertEqual(result["open_tool_issue"]["kind"], "protocol_error")
         self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "tool_protocol_error")
-
-        guard_result = await nodes.stability_guard_node({**self._initial_state("прочитай README.md"), **result})
-        self.assertEqual(guard_result["turn_outcome"], "recover_agent")
 
     async def test_agent_node_detects_history_tool_mismatch_before_llm_invoke(self):
         agent_llm = FakeLLM([AIMessage(content="Это сообщение не должно быть вызвано.")])
@@ -1665,7 +1656,10 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             llm_with_tools=agent_llm,
         )
 
-        result = await nodes.agent_node(self._initial_state("Проведи тест user input"))
+        state = self._initial_state("Проведи тест user input")
+        state["turn_mode"] = "act"
+        state["requires_evidence"] = True
+        result = await nodes.agent_node(state)
 
         self.assertEqual(result["turn_outcome"], "run_tools")
         self.assertTrue(result["has_protocol_error"])
@@ -1720,7 +1714,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await nodes.agent_node(state)
 
-        self.assertEqual(result["turn_outcome"], "")
+        self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertFalse(result["has_protocol_error"])
         response = result["messages"][-1]
         self.assertIsInstance(response, AIMessage)
@@ -1757,12 +1751,34 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                 name="request_user_input",
             ),
         ]
+        state["turn_mode"] = "act"
+        state["requires_evidence"] = True
 
         await nodes.agent_node(state)
 
         self.assertTrue(agent_llm.bound_tool_name_batches)
         self.assertNotIn("request_user_input", agent_llm.bound_tool_name_batches[-1])
         self.assertIn("read_file", agent_llm.bound_tool_name_batches[-1])
+
+    async def test_agent_node_binds_all_tools_for_regular_turn_without_intent_scoping(self):
+        base_llm = FakeLLM([AIMessage(content="Этот экземпляр не должен вызываться.")])
+        tools_llm = FakeBindableLLM([AIMessage(content="Сначала посмотрю проект через инструменты.")])
+        read_tool = FakeTool("read_file", "ok")
+        edit_tool = FakeTool("edit_file", "ok")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=base_llm,
+            tools=[read_tool, edit_tool],
+            llm_with_tools=tools_llm,
+        )
+        state = self._initial_state("Проанализируй проект в папке")
+        state["turn_mode"] = "chat"
+        state["requires_evidence"] = False
+
+        await nodes.agent_node(state)
+
+        self.assertEqual(base_llm.invocations, [])
+        self.assertEqual(len(tools_llm.invocations), 1)
 
     async def test_worker_delete_active_session_switches_to_fallback_session(self):
         tmp = self._workspace_tempdir()
@@ -2292,28 +2308,9 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual([event.type for event in events], ["summary_notice"])
-        self.assertEqual(events[0].payload.get("kind"), "agent_internal_notice")
-        self.assertEqual(events[0].payload.get("message"), "Нужен новый запрос.")
-        self.assertEqual(events[0].payload.get("level"), "warning")
+        self.assertEqual(events, [])
         self.assertEqual(processor.full_text, "")
         self.assertEqual(processor.clean_full, "")
-
-    def test_core_gui_shims_reexport_ui_symbols(self):
-        from core.gui_runtime import AgentRuntimeController as ShimController
-        from core.gui_widgets import ComposerTextEdit as ShimComposer
-        from core.stream_processor import StreamProcessor as ShimStreamProcessor
-        from core.ui_theme import build_stylesheet as shim_build_stylesheet
-        from ui.runtime import AgentRuntimeController as UiController
-        from ui.streaming import StreamProcessor as UiStreamProcessor
-        from ui.theme import build_stylesheet as ui_build_stylesheet
-        from ui.widgets import ComposerTextEdit as UiComposer
-
-        self.assertIs(ShimController, UiController)
-        self.assertIs(ShimStreamProcessor, UiStreamProcessor)
-        self.assertIs(ShimComposer, UiComposer)
-        self.assertIs(shim_build_stylesheet, ui_build_stylesheet)
-
 
 if __name__ == "__main__":
     unittest.main()

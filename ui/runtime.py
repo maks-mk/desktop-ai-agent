@@ -45,7 +45,7 @@ from core.text_utils import format_tool_display, format_tool_output, parse_thoug
 from core.tool_policy import ToolMetadata
 from ui.streaming import StreamEvent, StreamProcessor
 from ui.tool_message_utils import extract_tool_args
-from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
+from ui.visibility import is_hidden_internal_message
 
 logger = logging.getLogger("agent")
 
@@ -90,6 +90,8 @@ def build_initial_state(user_input: Any, session_id: str, safety_mode: str = "de
         "steps": 0,
         "token_usage": {},
         "current_task": current_task,
+        "turn_mode": "chat",
+        "requires_evidence": False,
         "session_id": session_id,
         "run_id": uuid.uuid4().hex,
         "turn_id": 1,
@@ -348,15 +350,6 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
                         "args": tool_call.get("args", {}),
                     }
             if is_hidden_internal_message(message):
-                notice = get_internal_ui_notice(message)
-                if notice:
-                    current_turn["blocks"].append(
-                        {
-                            "type": "notice",
-                            "message": notice,
-                            "level": "warning",
-                        }
-                    )
                 continue
             text = _extract_ai_text(message)
             if text.strip():

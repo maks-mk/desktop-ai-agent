@@ -54,7 +54,7 @@ class RefactorServicesTests(unittest.TestCase):
         system_text = "\n".join(
             str(message.content) for message in context if isinstance(message, SystemMessage)
         )
-        self.assertIn("use only tools bound in this request", system_text)
+        self.assertIn("Tools are available in this runtime.", system_text)
         self.assertNotIn("tool_0, tool_1", system_text)
 
     def test_context_builder_injects_runtime_contract_from_code(self):
@@ -82,8 +82,9 @@ class RefactorServicesTests(unittest.TestCase):
         joined = "\n".join(system_texts)
         self.assertIn("RUNTIME CONTRACT:", joined)
         self.assertNotIn("Always respond in Russian.", joined)
+        self.assertIn("Before using any tool or tool batch", joined)
         self.assertIn("After any system change", joined)
-        self.assertIn("TOOL ACCESS FOR THIS REQUEST:", joined)
+        self.assertIn("TOOLS:", joined)
         self.assertIn("Execution environment: os=windows;", joined)
         self.assertIn("paths=windows.", joined)
         self.assertIn("Workspace root:", joined)
@@ -94,7 +95,7 @@ class RefactorServicesTests(unittest.TestCase):
         prompt_text = (Path(__file__).resolve().parents[1] / "prompt.txt").read_text(encoding="utf-8")
         self.assertIn("Always respond in Russian.", prompt_text)
 
-    def test_context_builder_hardcodes_short_intention_before_tool_call(self):
+    def test_context_builder_keeps_only_workspace_safety_overlay_for_tools(self):
         builder = ContextBuilder(
             config=self._make_config(),
             prompt_loader=lambda: "Editable prompt only",
@@ -117,8 +118,8 @@ class RefactorServicesTests(unittest.TestCase):
 
         system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
         joined = "\n".join(system_texts)
-        self.assertIn("Before every tool call, write one short sentence stating your immediate intention.", joined)
-        self.assertIn("write that short intention and then emit a valid structured tool call", joined)
+        self.assertIn("SAFETY POLICY: Any write, delete, move, or process-launch working directory must stay inside the active workspace.", joined)
+        self.assertNotIn("Before every tool call", joined)
 
     def test_runtime_prompt_policy_maps_supported_operating_systems(self):
         builder = RuntimePromptPolicyBuilder(config=self._make_config())
@@ -224,7 +225,7 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("REQUEST_USER_INPUT POLICY:", joined)
         self.assertIn("Never batch multiple request_user_input calls.", joined)
 
-    def test_context_builder_injects_request_user_input_demo_policy_only_for_demo_requests(self):
+    def test_context_builder_does_not_inject_request_user_input_demo_policy(self):
         builder = ContextBuilder(
             config=self._make_config(),
             prompt_loader=lambda: "Editable prompt only",
@@ -247,8 +248,7 @@ class RefactorServicesTests(unittest.TestCase):
 
         system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
         joined = "\n".join(system_texts)
-        self.assertIn("REQUEST_USER_INPUT TEST POLICY:", joined)
-        self.assertIn("Do exactly one request_user_input call.", joined)
+        self.assertNotIn("REQUEST_USER_INPUT TEST POLICY:", joined)
 
         regular_context = builder.build(
             [],
@@ -263,7 +263,7 @@ class RefactorServicesTests(unittest.TestCase):
         regular_texts = [str(message.content) for message in regular_context if isinstance(message, SystemMessage)]
         self.assertFalse(any("REQUEST_USER_INPUT TEST POLICY:" in text for text in regular_texts))
 
-    def test_context_builder_inserts_short_bridge_after_tool_before_user(self):
+    def test_context_builder_preserves_tool_then_user_sequence_without_bridge_messages(self):
         builder = ContextBuilder(
             config=self._make_config(),
             prompt_loader=lambda: "Base prompt {{current_date}}",
@@ -280,11 +280,11 @@ class RefactorServicesTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(len(sanitized), 3)
-        self.assertIsInstance(sanitized[1], AIMessage)
-        self.assertEqual(str(sanitized[1].content), "Continuing.")
+        self.assertEqual(len(sanitized), 2)
+        self.assertIsInstance(sanitized[0], ToolMessage)
+        self.assertIsInstance(sanitized[1], HumanMessage)
 
-    def test_context_builder_repeats_current_task_after_tool_result(self):
+    def test_context_builder_does_not_repeat_current_task_after_tool_result(self):
         builder = ContextBuilder(
             config=self._make_config(),
             prompt_loader=lambda: "Base prompt {{current_date}}",
@@ -305,8 +305,8 @@ class RefactorServicesTests(unittest.TestCase):
             recovery_state=None,
         )
 
-        self.assertIsInstance(context[-1], HumanMessage)
-        self.assertIn("Проверь list_mistral_models.py", str(context[-1].content))
+        self.assertIsInstance(context[-1], ToolMessage)
+        self.assertEqual(str(context[-1].content), "ok")
 
     def test_context_builder_locks_user_choice_after_choice_was_collected(self):
         builder = ContextBuilder(

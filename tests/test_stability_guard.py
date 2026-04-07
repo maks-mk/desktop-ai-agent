@@ -58,7 +58,7 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_hard_loop_ceiling_matches_max_loops(self):
         nodes = self._build_nodes(MAX_LOOPS=7, SELF_CORRECTION_HARD_CEILING=5)
-        self.assertEqual(nodes._hard_loop_ceiling(), 7)
+        self.assertEqual(nodes._hard_loop_ceiling(), 5)
 
     def test_mutating_tools_require_approval(self):
         nodes = self._build_nodes(
@@ -228,10 +228,36 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         }
 
         result = await nodes.stability_guard_node(state)
-        self.assertEqual(result["turn_outcome"], "recover_agent")
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(result["completion_reason"], "recovery_stagnated")
         self.assertGreaterEqual(result["self_correction_retry_count"], 1)
-        self.assertIsNotNone(result["open_tool_issue"])
-        self.assertTrue(result["recovery_state"]["strategy_queue"])
+        self.assertIsNone(result["open_tool_issue"])
+        self.assertFalse(result["recovery_state"]["strategy_queue"])
+        self.assertIn("стагнац", str(result["messages"][-1].content).lower())
+
+    async def test_stability_guard_finishes_when_self_correction_hard_ceiling_is_reached(self):
+        nodes = self._build_nodes(MAX_LOOPS=20, SELF_CORRECTION_HARD_CEILING=2)
+        state = self._base_state("исправь файл")
+        state["self_correction_retry_count"] = 2
+        state["open_tool_issue"] = {
+            "turn_id": 1,
+            "kind": "protocol_error",
+            "summary": "Model kept replying with prose instead of tools.",
+            "tool_names": ["edit_file"],
+            "tool_args": {"path": "demo.txt"},
+            "source": "agent",
+            "error_type": "PROTOCOL",
+            "fingerprint": "fp-hard-cap",
+            "progress_fingerprint": "fp-hard-cap",
+            "details": {"protocol_reason": "action_requires_tools"},
+        }
+
+        result = await nodes.stability_guard_node(state)
+
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertEqual(result["completion_reason"], "recovery_stagnated")
+        self.assertIsNone(result["open_tool_issue"])
+        self.assertFalse(result["recovery_state"]["strategy_queue"])
 
     async def test_stability_guard_stops_on_workspace_boundary_violation(self):
         nodes = self._build_nodes()

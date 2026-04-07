@@ -92,18 +92,6 @@ class ContextBuilder:
         if recovery_message:
             full_context.append(recovery_message)
         full_context.extend(sanitized_messages)
-        last_visible = self.get_last_model_visible_message(full_context)
-        if not isinstance(last_visible, (HumanMessage, ToolMessage)):
-            full_context.append(HumanMessage(content=current_task))
-        if isinstance(last_visible, ToolMessage) and not recovery_message and not open_tool_issue:
-            task_text = current_task.strip() or "Continue the user's latest explicit request."
-            full_context.append(
-                HumanMessage(
-                    content=constants.RECOVERY_CONTINUE_PROMPT_TEMPLATE.format(
-                        current_task=task_text
-                    )
-                )
-            )
         return self.normalize_system_prefix(full_context)
 
     def sanitize_messages(
@@ -183,15 +171,6 @@ class ContextBuilder:
                 content = stringify_content(normalized_message.content).strip()
                 if content == constants.REFLECTION_PROMPT:
                     continue
-                last_visible = self.get_last_model_visible_message(sanitized)
-                if isinstance(last_visible, ToolMessage):
-                    sanitized.append(AIMessage(content="Continuing."))
-                    self._log_run_event(
-                        state,
-                        "provider_role_order_bridge",
-                        run_id=None if state is None else state.get("run_id", ""),
-                        reason="user_after_tool",
-                    )
             sanitized.append(normalized_message)
 
         if remapped_count:
@@ -317,7 +296,7 @@ class ContextBuilder:
             seen_non_system = True
 
         last_visible = self.get_last_model_visible_message(context)
-        valid = isinstance(last_visible, (HumanMessage, ToolMessage)) and not system_after_non_system
+        valid = isinstance(last_visible, (AIMessage, HumanMessage, ToolMessage)) and not system_after_non_system
         self._log_run_event(
             state,
             "provider_context_valid",
@@ -330,7 +309,7 @@ class ContextBuilder:
             return
 
         raise RuntimeError(
-            "Provider-unsafe agent context: system messages must form a prefix and the last model-visible message must be HumanMessage or ToolMessage."
+            "Provider-unsafe agent context: system messages must form a prefix and the last model-visible message must be AIMessage, HumanMessage, or ToolMessage."
         )
 
     def get_last_model_visible_message(self, context: List[BaseMessage]) -> BaseMessage | None:
@@ -376,12 +355,6 @@ class ContextBuilder:
         if not tools_available:
             return ""
         overlay_lines: List[str] = []
-        overlay_lines.append(
-            "TOOL MODE: Before every tool call, write one short sentence stating your immediate intention."
-        )
-        overlay_lines.append(
-            "TOOL MODE: When a concrete action requires tools, write that short intention and then emit a valid structured tool call instead of only describing the action in prose."
-        )
         overlay_lines.append(
             "SAFETY POLICY: Any write, delete, move, or process-launch working directory must stay inside the active workspace."
         )

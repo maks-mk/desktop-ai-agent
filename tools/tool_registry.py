@@ -184,10 +184,11 @@ class ToolRegistry:
                 },
             ),
             ToolLoaderSpec(
-                name="local_delete_fallback",
+                name="filesystem_delete",
                 enabled=lambda config: not config.enable_filesystem_tools,
-                module_name="tools.delete_tools",
+                module_name="tools.filesystem",
                 tool_names=("safe_delete_file", "safe_delete_directory"),
+                configure=self._configure_safety,
                 metadata={
                     "safe_delete_file": ToolMetadata(
                         name="safe_delete_file",
@@ -375,14 +376,46 @@ class ToolRegistry:
         token_source = " ".join(part for part in (normalized_name, normalized_title, normalized_description) if part)
         tokens = set(_MCP_TOKEN_RE.findall(token_source))
 
-        read_only_hint = bool(raw_metadata.get("readOnlyHint"))
-        destructive_hint = bool(raw_metadata.get("destructiveHint"))
-        destructive = destructive_hint or bool(tokens & _MCP_DESTRUCTIVE_KEYWORDS)
-        execution = bool(tokens & _MCP_EXECUTION_KEYWORDS)
-        mutating_signal = bool(tokens & _MCP_MUTATING_KEYWORDS)
+        def _first_metadata_flag(*keys: str) -> bool | None:
+            for key in keys:
+                if key in raw_metadata:
+                    return bool(raw_metadata.get(key))
+            return None
+
+        read_only_hint = _first_metadata_flag("readOnlyHint", "read_only", "readOnly")
+        destructive_hint = _first_metadata_flag("destructiveHint", "destructive", "is_destructive")
+        mutating_hint = _first_metadata_flag("mutatingHint", "mutating", "writes")
+        execution_hint = _first_metadata_flag("executionHint", "executes", "runsCommands")
+        requires_approval_hint = _first_metadata_flag("requiresApproval", "approvalRequired")
+        networked_hint = _first_metadata_flag("networkHint", "networked", "usesNetwork")
+
+        destructive = (
+            destructive_hint
+            if destructive_hint is not None
+            else bool(tokens & _MCP_DESTRUCTIVE_KEYWORDS)
+        )
+        execution = (
+            execution_hint
+            if execution_hint is not None
+            else bool(tokens & _MCP_EXECUTION_KEYWORDS)
+        )
+        mutating_signal = (
+            mutating_hint
+            if mutating_hint is not None
+            else bool(tokens & _MCP_MUTATING_KEYWORDS)
+        )
         mutating = destructive or execution or mutating_signal
-        read_only = read_only_hint and not destructive and not execution and not mutating_signal
-        requires_approval = destructive or execution or mutating
+        read_only = (
+            bool(read_only_hint)
+            if read_only_hint is not None
+            else not destructive and not execution and not mutating_signal
+        )
+        requires_approval = (
+            bool(requires_approval_hint)
+            if requires_approval_hint is not None
+            else destructive or execution or mutating
+        )
+        networked = True if networked_hint is None else bool(networked_hint)
 
         return ToolMetadata(
             name=tool_name,
@@ -390,7 +423,7 @@ class ToolRegistry:
             mutating=mutating,
             destructive=destructive,
             requires_approval=requires_approval,
-            networked=True,
+            networked=networked,
             source="mcp",
         )
 
@@ -462,6 +495,7 @@ class ToolRegistry:
                     logger.error("❌ MCP Server '%s' Error: %s", name, err)
                     continue
 
+                if client is not None:
                     self.mcp_clients.append(client)
                 if mcp_tools:
                     self.tools.extend(mcp_tools)

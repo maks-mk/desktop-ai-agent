@@ -309,6 +309,23 @@ class RecoveryManager:
                     else ""
                 ),
             }
+        elif open_tool_issue and int(next_retry_count or 0) >= max(1, int(hard_loop_ceiling or 1)):
+            next_recovery_state["active_issue"] = open_tool_issue
+            next_recovery_state["active_strategy"] = None
+            next_recovery_state["strategy_queue"] = []
+            next_recovery_state["external_blocker"] = {
+                "reason": "recovery_stagnated",
+                "issue_summary": str(open_tool_issue.get("summary", "")),
+            }
+            branch = {
+                "completion_reason": "recovery_stagnated",
+                "turn_outcome": "finish_turn",
+                "next_open_tool_issue": None,
+                "handoff_message": self.build_tool_issue_handoff_text(
+                    open_tool_issue,
+                    repair_plan=repair_plan,
+                ),
+            }
         elif not open_tool_issue:
             next_recovery_state["active_issue"] = None
             next_recovery_state["active_strategy"] = None
@@ -513,12 +530,19 @@ class RecoveryManager:
 
         next_recovery_state["active_issue"] = open_tool_issue
         next_recovery_state["active_strategy"] = None
-        next_recovery_state["strategy_queue"] = [strategy_payload]
-        next_recovery_state["external_blocker"] = None
+        next_recovery_state["strategy_queue"] = []
+        next_recovery_state["external_blocker"] = {
+            "reason": "recovery_stagnated",
+            "issue_summary": str(open_tool_issue.get("summary", "")),
+        }
         return {
-            "completion_reason": f"recover_{repair_plan.strategy}",
-            "turn_outcome": "recover_agent",
-            "next_open_tool_issue": open_tool_issue,
+            "completion_reason": "recovery_stagnated",
+            "turn_outcome": "finish_turn",
+            "next_open_tool_issue": None,
+            "handoff_message": self.build_tool_issue_handoff_text(
+                open_tool_issue,
+                repair_plan=repair_plan,
+            ),
             "next_retry_count": max(int(value or 0) for value in attempts_by_strategy.values()),
             "next_fingerprint_history": list(progress_markers),
         }

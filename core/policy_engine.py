@@ -83,9 +83,18 @@ _HTTP_WRITE_FLAG_PATTERNS = (
     re.compile(r"(^|[\s;|&])-(?:d|f|t)\b", re.IGNORECASE),
     re.compile(r"--(?:data(?:-raw|-binary|-ascii|-urlencode)?|form|string|upload-file|json)\b", re.IGNORECASE),
 )
-_PATH_HINT_RE = re.compile(r"(?:[A-Za-z]:\\|[./~]|[\w\-]+\.[A-Za-z0-9]{1,8}\b)")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"\b[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]*")
+_UNIX_ABSOLUTE_PATH_RE = re.compile(r"(?<!\w)/(?:[^/\s]+/)*[^/\s]+")
+_RELATIVE_PATH_RE = re.compile(r"(?:^|[\s'\"`])(?:\./|\.\./|~[\\/])\S+")
+_STRUCTURED_PATH_RE = re.compile(r"\b(?=[^\s]*[A-Za-z_.-])(?:[\w.-]+[\\/])+[\w.-]+\b")
+_FILE_REFERENCE_RE = re.compile(r"\b[\w.-]+\.[A-Za-z0-9]{1,8}\b")
 _ACTION_KEYWORDS = (
     "исправ",
+    "почини",
+    "сделай",
+    "выполни",
+    "подготов",
+    "внеси",
     "измени",
     "обнови",
     "запиши",
@@ -108,6 +117,8 @@ _ACTION_KEYWORDS = (
     "edit ",
     "write ",
     "fix ",
+    "do ",
+    "make ",
     "change ",
     "update ",
     "save ",
@@ -129,6 +140,8 @@ _ACTION_KEYWORDS = (
 )
 _MUTATING_KEYWORDS = (
     "исправ",
+    "почини",
+    "внеси",
     "измени",
     "обнови",
     "запиши",
@@ -155,6 +168,19 @@ _MUTATING_KEYWORDS = (
     "run ",
     "start ",
     "stop ",
+)
+_ANALYSIS_KEYWORDS = (
+    "анализ",
+    "проанализ",
+    "изучи",
+    "исследуй",
+    "разбер",
+    "ревью",
+    "code review",
+    "review ",
+    "analyze ",
+    "analyse ",
+    "audit ",
 )
 _READ_ONLY_KEYWORDS = (
     "проверь",
@@ -195,8 +221,9 @@ _CONTINUE_KEYWORDS = ("продолж", "continue", "дальше", "go on", "е
 
 @dataclass(frozen=True)
 class TurnPolicyDecision:
+    turn_mode: str
     inspect_only: bool
-    requires_operational_evidence: bool
+    requires_evidence: bool
     prefer_read_only_fallback: bool
     intent: str
     should_force_tools: bool
@@ -206,6 +233,22 @@ class TurnPolicyDecision:
 class ToolCallPolicyDecision:
     allowed: bool
     reason: str = ""
+
+
+def _contains_path_hint(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return any(
+        pattern.search(normalized)
+        for pattern in (
+            _WINDOWS_ABSOLUTE_PATH_RE,
+            _UNIX_ABSOLUTE_PATH_RE,
+            _RELATIVE_PATH_RE,
+            _STRUCTURED_PATH_RE,
+            _FILE_REFERENCE_RE,
+        )
+    )
 
 
 def _is_http_probe_command(command: str) -> bool:
@@ -297,14 +340,15 @@ class PolicyEngine:
         normalized_task = " ".join(str(task or "").strip().lower().split())
         if not normalized_task:
             return TurnPolicyDecision(
+                turn_mode="chat",
                 inspect_only=False,
-                requires_operational_evidence=False,
+                requires_evidence=False,
                 prefer_read_only_fallback=False,
                 intent="chat",
                 should_force_tools=False,
             )
 
-        has_path_hint = bool(_PATH_HINT_RE.search(normalized_task))
+        has_path_hint = _contains_path_hint(normalized_task)
         previous_turn_had_tools = self._previous_turn_had_tools(
             messages,
             current_turn_id=current_turn_id,
@@ -312,16 +356,18 @@ class PolicyEngine:
         )
         continue_request = any(keyword in normalized_task for keyword in _CONTINUE_KEYWORDS)
         chat_only = any(keyword in normalized_task for keyword in _CHAT_ONLY_KEYWORDS)
+        analysis_request = any(keyword in normalized_task for keyword in _ANALYSIS_KEYWORDS)
         mutating = any(keyword in normalized_task for keyword in _MUTATING_KEYWORDS)
-        read_only = any(keyword in normalized_task for keyword in _READ_ONLY_KEYWORDS)
+        read_only = analysis_request or any(keyword in normalized_task for keyword in _READ_ONLY_KEYWORDS)
         action_like = has_path_hint or mutating or read_only or any(
             keyword in normalized_task for keyword in _ACTION_KEYWORDS
         )
 
         if continue_request and previous_turn_had_tools:
             return TurnPolicyDecision(
+                turn_mode="act",
                 inspect_only=False,
-                requires_operational_evidence=True,
+                requires_evidence=True,
                 prefer_read_only_fallback=False,
                 intent="continue_action",
                 should_force_tools=True,
@@ -329,8 +375,9 @@ class PolicyEngine:
 
         if mutating:
             return TurnPolicyDecision(
+                turn_mode="act",
                 inspect_only=False,
-                requires_operational_evidence=True,
+                requires_evidence=True,
                 prefer_read_only_fallback=False,
                 intent="mutating_action",
                 should_force_tools=True,
@@ -338,8 +385,9 @@ class PolicyEngine:
 
         if read_only and not chat_only:
             return TurnPolicyDecision(
+                turn_mode="inspect",
                 inspect_only=True,
-                requires_operational_evidence=True,
+                requires_evidence=True,
                 prefer_read_only_fallback=True,
                 intent="inspect",
                 should_force_tools=True,
@@ -347,16 +395,18 @@ class PolicyEngine:
 
         if action_like and not chat_only:
             return TurnPolicyDecision(
+                turn_mode="act",
                 inspect_only=False,
-                requires_operational_evidence=True,
+                requires_evidence=True,
                 prefer_read_only_fallback=False,
                 intent="action",
                 should_force_tools=True,
             )
 
         return TurnPolicyDecision(
+            turn_mode="chat",
             inspect_only=False,
-            requires_operational_evidence=False,
+            requires_evidence=False,
             prefer_read_only_fallback=False,
             intent="chat",
             should_force_tools=False,

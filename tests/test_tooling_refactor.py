@@ -3,10 +3,10 @@ import re
 import shutil
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 from uuid import uuid4
-from types import SimpleNamespace
 
 from core.config import AgentConfig
 from core.multimodal import DEFAULT_MODEL_CAPABILITIES
@@ -57,6 +57,32 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_registry_initializes_model_capabilities_slot(self):
         registry = ToolRegistry(self._make_config())
         self.assertEqual(registry.model_capabilities, DEFAULT_MODEL_CAPABILITIES)
+
+    async def test_mcp_clients_are_registered_for_cleanup(self):
+        tmp = self._workspace_tempdir()
+        mcp_config_path = tmp / "mcp.json"
+        mcp_config_path.write_text("{}", encoding="utf-8")
+        registry = ToolRegistry(self._make_config(MCP_CONFIG_PATH=mcp_config_path))
+        fake_client = mock.AsyncMock()
+        fake_tool = SimpleNamespace(
+            name="context7:resolve-library-id",
+            description="Resolve a Context7 library id",
+            metadata={"readOnlyHint": True},
+        )
+
+        with (
+            mock.patch.object(ToolRegistry, "_read_mcp_config", return_value={"context7": {"enabled": True}}),
+            mock.patch.object(
+                ToolRegistry,
+                "_load_single_mcp_server",
+                new=mock.AsyncMock(return_value=("context7", fake_client, [fake_tool], None)),
+            ),
+        ):
+            await registry.load_all()
+
+        self.assertEqual(registry.mcp_clients, [fake_client])
+        await registry.cleanup()
+        fake_client.aclose.assert_awaited_once()
 
     def test_mcp_metadata_keeps_safe_tools_read_only(self):
         metadata = ToolRegistry._infer_mcp_metadata("context7:resolve-library-id")

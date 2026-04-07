@@ -56,20 +56,21 @@ def create_agent_workflow(
     config: AgentConfig,
     tools_enabled: Optional[bool] = None,
 ) -> StateGraph:
-    """Builds the LangGraph workflow with deterministic stability/self-correction guard."""
+    """Builds the LangGraph workflow with explicit turn classification and bounded recovery."""
     tools_enabled = bool(nodes.tools) and config.model_supports_tools if tools_enabled is None else tools_enabled
     approval_enabled = bool(tools_enabled and config.enable_approvals)
 
     workflow = StateGraph(AgentState)
 
     workflow.add_node("summarize", nodes.summarize_node)
+    workflow.add_node("classify_turn", nodes.classify_turn_node)
     workflow.add_node("agent", nodes.agent_node)
-    workflow.add_node("stability_guard", nodes.stability_guard_node)
     workflow.add_node("recovery", nodes.recovery_node)
     workflow.add_node("update_step", lambda state: {"steps": state.get("steps", 0) + 1})
 
     workflow.add_edge(START, "summarize")
-    workflow.add_edge("summarize", "update_step")
+    workflow.add_edge("summarize", "classify_turn")
+    workflow.add_edge("classify_turn", "update_step")
     workflow.add_edge("update_step", "agent")
 
     if tools_enabled:
@@ -81,26 +82,22 @@ def create_agent_workflow(
         steps = state.get("steps", 0)
         messages = state.get("messages") or []
 
-        if steps >= config.max_loops:
-            # Do not end immediately on budget boundary: run a deterministic guard pass
-            # to produce a clean user-facing handoff and avoid dangling tool calls.
-            if messages:
+        if not messages:
+            logger.warning("Agent node returned no messages; ending turn safely.")
+            return END
+
+        turn_outcome = str(state.get("turn_outcome") or "").strip().lower()
+        has_open_tool_issue = bool(state.get("open_tool_issue"))
+        has_protocol_error = bool(state.get("has_protocol_error"))
+
+        if tools_enabled and turn_outcome == "run_tools":
+            if steps >= config.max_loops:
                 logger.warning(
-                    "Loop guard reached at step %s/%s. Routing to stability_guard for graceful termination.",
+                    "Loop guard reached at step %s/%s with pending tool calls. Routing to recovery.",
                     steps,
                     config.max_loops,
                 )
-                return "stability_guard"
-            logger.debug("🛑 Loop Guard: %s steps reached with empty message state.", steps)
-            return END
-
-        if not messages:
-            logger.warning("Agent node returned no messages; routing to stability_guard for a safe fallback.")
-            return "stability_guard"
-
-        turn_outcome = str(state.get("turn_outcome") or "").strip().lower()
-
-        if tools_enabled and turn_outcome == "run_tools":
+                return "recovery"
             pending_ai_with_tools = nodes._get_last_pending_ai_with_tool_calls(messages)
             if isinstance(pending_ai_with_tools, AIMessage) and pending_ai_with_tools.tool_calls:
                 if approval_enabled and nodes.tool_calls_require_approval(pending_ai_with_tools.tool_calls):
@@ -108,31 +105,36 @@ def create_agent_workflow(
                 return "tools"
             logger.warning(
                 "Agent reported run_tools outcome without a valid tool call payload. "
-                "Routing to stability_guard."
+                "Routing to recovery."
             )
-            return "stability_guard"
-
-        return "stability_guard"
-
-    def route_after_stability_guard(state: AgentState):
-        if state.get("turn_outcome") == "recover_agent":
             return "recovery"
-        if state.get("turn_outcome") == "continue_agent":
+
+        if turn_outcome == "recover_agent" or has_open_tool_issue or has_protocol_error:
+            return "recovery"
+
+        return END
+
+    def route_after_tools(state: AgentState):
+        if state.get("open_tool_issue"):
+            return "recovery"
+        return "update_step"
+
+    def route_after_recovery(state: AgentState):
+        if state.get("turn_outcome") == "recover_agent":
             return "update_step"
         return END
 
     if tools_enabled:
-        agent_routes = ["tools", "stability_guard", END]
+        agent_routes = ["tools", "recovery", END]
         if approval_enabled:
             agent_routes.insert(0, "approval")
             workflow.add_edge("approval", "tools")
         workflow.add_conditional_edges("agent", route_after_agent, agent_routes)
-        workflow.add_edge("tools", "stability_guard")
+        workflow.add_conditional_edges("tools", route_after_tools, ["recovery", "update_step"])
     else:
-        workflow.add_conditional_edges("agent", route_after_agent, ["stability_guard", END])
+        workflow.add_conditional_edges("agent", route_after_agent, ["recovery", END])
 
-    workflow.add_conditional_edges("stability_guard", route_after_stability_guard, ["recovery", "update_step", END])
-    workflow.add_edge("recovery", "update_step")
+    workflow.add_conditional_edges("recovery", route_after_recovery, ["update_step", END])
 
     return workflow
 

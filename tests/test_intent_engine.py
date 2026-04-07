@@ -2,13 +2,11 @@ import unittest
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from core.intent_engine import IntentEngine, TurnIntent
 from core.message_context import MessageContextHelper
 
 
-class IntentEngineTests(unittest.TestCase):
+class MessageContextHelperTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.engine = IntentEngine()
         self.helper = MessageContextHelper()
         self.no_internal_retry = lambda _msg: False
 
@@ -51,20 +49,6 @@ class IntentEngineTests(unittest.TestCase):
                 is_internal_retry=self.no_internal_retry,
             )
         )
-
-    def test_compat_intent_engine_is_neutral_without_phrase_lexicon(self):
-        task = "Проверь статус процесса на порту 8080"
-        decision = self.engine.decide(
-            task=task,
-            messages=[HumanMessage(content=task)],
-            current_turn_id=1,
-            is_internal_retry=self.no_internal_retry,
-        )
-        self.assertEqual(decision.intent, TurnIntent.CHAT)
-        self.assertFalse(decision.inspect_only)
-        self.assertFalse(decision.requires_operational_evidence)
-        self.assertFalse(decision.should_force_tools)
-
 
 if __name__ == "__main__":
     unittest.main()

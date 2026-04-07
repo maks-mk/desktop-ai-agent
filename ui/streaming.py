@@ -16,7 +16,7 @@ from core.text_utils import (
     prepare_markdown_for_render,
 )
 from ui.tool_message_utils import extract_tool_args, extract_tool_duration
-from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
+from ui.visibility import is_hidden_internal_message
 
 DIFF_REGEX = re.compile(r"```diff\r?\n(.*?)```", re.DOTALL)
 logger = logging.getLogger("agent")
@@ -265,16 +265,6 @@ class StreamProcessor:
                 self._emit_tool_started(tool_call)
 
         if is_hidden_internal_message(message):
-            notice = get_internal_ui_notice(message)
-            if notice:
-                self._emit(
-                    "summary_notice",
-                    {
-                        "message": notice,
-                        "kind": "agent_internal_notice",
-                        "level": "warning",
-                    },
-                )
             return
 
         chunk = self._extract_text_content(message.content)

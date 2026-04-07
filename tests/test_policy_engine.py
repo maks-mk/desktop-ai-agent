@@ -76,9 +76,36 @@ class PolicyEngineTests(unittest.TestCase):
             is_internal_retry=lambda _msg: False,
         )
         self.assertTrue(decision.inspect_only)
-        self.assertTrue(decision.requires_operational_evidence)
+        self.assertEqual(decision.turn_mode, "inspect")
+        self.assertTrue(decision.requires_evidence)
         self.assertTrue(decision.should_force_tools)
         self.assertEqual(decision.intent, "inspect")
+
+    def test_evaluate_turn_treats_analysis_request_as_inspect_even_with_generic_make_verb(self):
+        decision = self.engine.evaluate_turn(
+            task="Сделай анализ кода в папке",
+            messages=[],
+            current_turn_id=1,
+            is_internal_retry=lambda _msg: False,
+        )
+        self.assertTrue(decision.inspect_only)
+        self.assertEqual(decision.turn_mode, "inspect")
+        self.assertTrue(decision.requires_evidence)
+        self.assertTrue(decision.should_force_tools)
+        self.assertEqual(decision.intent, "inspect")
+
+    def test_evaluate_turn_does_not_treat_plain_slash_text_as_path_hint(self):
+        decision = self.engine.evaluate_turn(
+            task="Какая производительность у моделей на видеокартах типа 4090/5090 16gb?",
+            messages=[],
+            current_turn_id=1,
+            is_internal_retry=lambda _msg: False,
+        )
+        self.assertFalse(decision.inspect_only)
+        self.assertEqual(decision.turn_mode, "chat")
+        self.assertFalse(decision.requires_evidence)
+        self.assertFalse(decision.should_force_tools)
+        self.assertEqual(decision.intent, "chat")
 
 
 if __name__ == "__main__":
