@@ -315,7 +315,8 @@ async def cli_exec(command: str) -> str:
        If you need to change directories, chain commands: e.g., `cd folder && npm install`.
     2. NO INTERACTIVE COMMANDS: DO NOT run commands that require user input (e.g., `nano`, `vim`, `python` without args, `less`, `top`). 
        They will hang until timeout!
-    3. BACKGROUND TASKS: Do not run blocking servers (e.g., `npm start`, `python -m http.server`) unless you background them or use an appropriate tool.
+    3. BACKGROUND TASKS: Never use cli_exec to start background processes or services.
+       Background runs (dev server, watcher, daemon) are not allowed in cli_exec.
     4. LONG SCRIPTS: For complex logic, write a script file using `write_file` and then execute it.
     
     Supports pipe (|), redirects (>), and chain operators (&&).
@@ -336,8 +337,7 @@ async def cli_exec(command: str) -> str:
     if command_profile["long_running_service"]:
         return format_error(
             ErrorType.VALIDATION,
-            "Foreground service/server commands are not supported in cli_exec. "
-            "Use run_background_process for long-running services.",
+            "Foreground service/server commands are not supported in cli_exec.",
         )
     command_env = _prepare_shell_env(normalized_command)
 
@@ -442,7 +442,7 @@ async def cli_exec(command: str) -> str:
                 ErrorType.EXECUTION,
                 "Interactive prompt detected in cli_exec output "
                 f"('{interactive_prompt}'). Run command in non-interactive mode "
-                "(for npm/npx add -y/--yes), or use run_background_process for services."
+                "(for npm/npx add -y/--yes)."
                 f"{details}",
             )
 

@@ -11,6 +11,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
+from pydantic import BaseModel, RootModel
 
 from agent import create_agent_workflow
 from core.checkpointing import create_checkpoint_runtime
@@ -93,6 +94,15 @@ class FakeTool:
         if callable(self.result):
             return self.result(args)
         return self.result
+
+
+class FakeSchemaTool(FakeTool):
+    def __init__(self, name, result, schema):
+        super().__init__(name, result)
+        self._schema = schema
+
+    def get_input_schema(self):
+        return self._schema
 
 
 class FakeProfileLLM:
@@ -184,6 +194,79 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             ),
             {"image_input_supported": True},
         )
+
+    def test_root_model_tool_schema_does_not_require_literal_root_field(self):
+        class SequentialThinkingArgs(RootModel[dict]):
+            pass
+
+        tool = FakeSchemaTool("sequentialthinking", "ok", SequentialThinkingArgs)
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+
+        missing = nodes._missing_required_tool_fields(
+            "sequentialthinking",
+            {"thought": "test", "thoughtNumber": 1, "totalThoughts": 1},
+        )
+
+        self.assertEqual(missing, [])
+
+    def test_root_model_ref_schema_uses_inner_required_fields(self):
+        class SequentialThinkingPayload(BaseModel):
+            thought: str
+            nextThoughtNeeded: bool
+            thoughtNumber: int
+            totalThoughts: int
+
+        class SequentialThinkingArgs(RootModel[SequentialThinkingPayload]):
+            pass
+
+        tool = FakeSchemaTool("sequentialthinking", "ok", SequentialThinkingArgs)
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+
+        missing = nodes._missing_required_tool_fields(
+            "sequentialthinking",
+            {"thought": "test", "thoughtNumber": 1, "totalThoughts": 1},
+        )
+
+        self.assertEqual(missing, ["nextThoughtNeeded"])
+
+    async def test_process_tool_call_allows_repeated_distinct_args_without_name_based_budget(self):
+        tool = FakeTool("analysis_helper", "ok")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+        state = self._initial_state(task="Проведи анализ")
+        recent_calls = [
+            {"name": "analysis_helper", "args": {"step": 1}},
+            {"name": "analysis_helper", "args": {"step": 2}},
+            {"name": "analysis_helper", "args": {"step": 3}},
+            {"name": "analysis_helper", "args": {"step": 4}},
+        ]
+
+        tool_message, had_error, issue = await nodes._process_tool_call(
+            {"id": "call_123", "name": "analysis_helper", "args": {"step": 5}},
+            recent_calls,
+            state,
+            approval_state={},
+            current_turn_id=1,
+        )
+
+        self.assertFalse(had_error)
+        self.assertIsNone(issue)
+        self.assertEqual(tool.calls, [{"step": 5}])
+        self.assertEqual(tool_message.status, "success")
 
     def test_build_initial_state_supports_text_and_image_attachments(self):
         state = build_initial_state(

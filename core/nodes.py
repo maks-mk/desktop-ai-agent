@@ -109,10 +109,6 @@ class AgentNodes:
             "batch_web_search",
         }
     )
-    # Planning/reasoning tools are helpful, but can easily create oscillation when
-    # the model keeps "thinking" instead of switching to concrete actions.
-    PLANNING_TOOL_NAMES = frozenset({"sequentialthinking", "sequential-thinking", "sequential_thinking"})
-    PLANNING_TOOL_MAX_CALLS_PER_TURN = 4
     PROVIDER_SAFE_TOOL_CALL_ID_RE = re.compile(r"^[A-Za-z0-9]{9}$")
     PATCH_STYLE_MARKERS = (
         "```",
@@ -223,10 +219,52 @@ class AgentNodes:
     def _normalize_tool_name(self, tool_name: str) -> str:
         return str(tool_name or "").strip().lower()
 
-    def _is_planning_tool(self, tool_name: str) -> bool:
-        normalized = self._normalize_tool_name(tool_name)
-        condensed = normalized.replace("-", "").replace("_", "")
-        return normalized in self.PLANNING_TOOL_NAMES or condensed == "sequentialthinking"
+    @staticmethod
+    def _resolve_local_json_schema_ref(
+        json_schema: Dict[str, Any],
+        ref: str,
+    ) -> Dict[str, Any] | None:
+        if not isinstance(json_schema, dict) or not isinstance(ref, str) or not ref.startswith("#/"):
+            return None
+
+        cursor: Any = json_schema
+        for raw_segment in ref[2:].split("/"):
+            segment = raw_segment.replace("~1", "/").replace("~0", "~")
+            if not isinstance(cursor, dict) or segment not in cursor:
+                return None
+            cursor = cursor[segment]
+
+        return cursor if isinstance(cursor, dict) else None
+
+    def _top_level_object_json_schema(self, json_schema: Dict[str, Any]) -> Dict[str, Any] | None:
+        if not isinstance(json_schema, dict):
+            return None
+
+        current = json_schema
+        seen_refs: set[str] = set()
+        while isinstance(current, dict):
+            if current.get("type") == "object":
+                return current
+
+            ref = current.get("$ref")
+            if isinstance(ref, str):
+                if ref in seen_refs:
+                    return None
+                seen_refs.add(ref)
+                resolved = self._resolve_local_json_schema_ref(json_schema, ref)
+                if not isinstance(resolved, dict):
+                    return None
+                current = resolved
+                continue
+
+            composed_schema = current.get("allOf")
+            if isinstance(composed_schema, list) and len(composed_schema) == 1 and isinstance(composed_schema[0], dict):
+                current = composed_schema[0]
+                continue
+
+            return None
+
+        return None
 
     def _required_tool_fields(self, tool_name: str) -> List[str]:
         tool = self.tools_map.get(tool_name)
@@ -235,6 +273,21 @@ class AgentNodes:
         try:
             schema = tool.get_input_schema()
         except Exception:
+            return []
+
+        try:
+            json_schema = schema.model_json_schema()
+        except Exception:
+            json_schema = {}
+
+        object_schema = self._top_level_object_json_schema(json_schema)
+        if isinstance(object_schema, dict):
+            required_fields = object_schema.get("required")
+            if isinstance(required_fields, list):
+                return [str(field_name) for field_name in required_fields if str(field_name).strip()]
+            return []
+
+        if getattr(schema, "__pydantic_root_model__", False):
             return []
 
         fields = getattr(schema, "model_fields", {}) or {}
@@ -2217,39 +2270,12 @@ class AgentNodes:
         loop_count = sum(
             1 for tc in recent_calls if tc.get("name") == t_name and tc.get("args") == t_args
         )
-        same_tool_count = sum(
-            1 for tc in recent_calls
-            if self._normalize_tool_name(tc.get("name") or "") == self._normalize_tool_name(t_name)
-        )
-
         loop_limit = (
             self.config.effective_tool_loop_limit_readonly
             if t_name in self.READ_ONLY_LOOP_TOLERANT_TOOL_NAMES
             else self.config.effective_tool_loop_limit_mutating
         )
-        planning_limit_reached = self._is_planning_tool(t_name) and (
-            same_tool_count >= self.PLANNING_TOOL_MAX_CALLS_PER_TURN
-        )
-
-        if planning_limit_reached:
-            content = format_error(
-                ErrorType.LOOP_DETECTED,
-                (
-                    f"Planning tool budget reached for '{t_name}'. "
-                    "Stop further planning tool calls in this turn and proceed with concrete action tools."
-                ),
-            )
-            had_error = True
-            self._log_run_event(
-                state,
-                "tool_call_planning_budget_blocked",
-                run_id=state.get("run_id", ""),
-                tool_name=t_name,
-                tool_args=t_args,
-                same_tool_count=same_tool_count,
-                planning_limit=self.PLANNING_TOOL_MAX_CALLS_PER_TURN,
-            )
-        elif loop_count >= loop_limit:
+        if loop_count >= loop_limit:
             content = format_error(
                 ErrorType.LOOP_DETECTED,
                 f"Loop detected. You have called '{t_name}' with these exact arguments {loop_limit} times in the recent history. Please try a different approach.",
@@ -2290,11 +2316,9 @@ class AgentNodes:
                 {
                     "loop_detected": True,
                     "loop_count": loop_count,
-                    "loop_limit": (
-                        self.PLANNING_TOOL_MAX_CALLS_PER_TURN if planning_limit_reached else loop_limit
-                    ),
+                    "loop_limit": loop_limit,
                 }
-                if planning_limit_reached or loop_count >= loop_limit
+                if loop_count >= loop_limit
                 else None
             ),
         )

@@ -239,6 +239,14 @@ def build_stylesheet() -> str:
         background: {blend_hex(SUCCESS_GREEN, "#FFFFFF", 0.16)};
     }}
 
+    QCheckBox#ModelSupportsImagesCheckbox {{
+        background: transparent;
+        border: none;
+        padding: 0px;
+        spacing: 6px;
+        color: {TEXT_PRIMARY};
+    }}
+
     QDialog#ModelSettingsDialog QLineEdit,
     QDialog#ModelSettingsDialog QComboBox {{
         background: {blend_hex(SURFACE_CARD, "#FFFFFF", 0.055)};
