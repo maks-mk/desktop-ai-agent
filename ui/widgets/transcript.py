@@ -43,14 +43,14 @@ class ConversationTurnWidget(QWidget):
     def has_rendered_output(self) -> bool:
         return len(self._timeline) > 1
 
-    def set_status(self, label: str) -> None:
+    def set_status(self, label: str, *, meta: str = "", phase: str = "working") -> None:
         if self.status_widget is None:
             self.status_widget = StatusIndicatorWidget(label)
             self._layout.addWidget(self.status_widget)
-            return
-        self._layout.removeWidget(self.status_widget)
-        self._layout.addWidget(self.status_widget)
-        self.status_widget.set_label(label)
+        else:
+            self._layout.removeWidget(self.status_widget)
+            self._layout.addWidget(self.status_widget)
+        self.status_widget.set_state(label, meta=meta, phase=phase)
 
     def clear_status(self) -> None:
         if self.status_widget is None:
@@ -131,8 +131,7 @@ class ConversationTurnWidget(QWidget):
             card = ToolCardWidget(payload)
             self.tool_cards[tool_id] = card
             self._append_block("tool", card)
-        else:
-            card.update_started_payload(payload)
+        card.update_started_payload(payload)
         return card
 
     def finish_tool(self, payload: dict[str, Any], *, collapse_delay_ms: int | None = None) -> None:

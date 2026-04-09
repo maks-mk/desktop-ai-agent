@@ -271,7 +271,7 @@ class StreamAndFilesystemTests(unittest.TestCase):
         statuses = [event.payload for event in events if event.type == "status_changed"]
         self.assertTrue(statuses)
         self.assertEqual(statuses[-1]["node"], "stability_guard")
-        self.assertEqual(statuses[-1]["label"], "Self-correcting")
+        self.assertEqual(statuses[-1]["label"], "Reviewing results")
 
     def test_stream_processor_does_not_parse_choice_requests_from_plain_text(self):
         events = []
@@ -390,7 +390,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
             finished[0]["args"],
             {"path": "demo.txt", "old_string": "old", "new_string": "new"},
         )
-        self.assertIn("demo.txt", finished[0]["display"])
+        self.assertEqual(finished[0]["display"], "Editing file")
+        self.assertIn("demo.txt", finished[0]["subtitle"])
+        self.assertIn("demo.txt", finished[0]["raw_display"])
 
     def test_stream_processor_emits_tool_started_refresh_when_args_arrive_late(self):
         events = []
@@ -410,6 +412,21 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertGreaterEqual(len(started), 2)
         self.assertEqual(started[-1]["args"]["path"], "late.txt")
         self.assertTrue(started[-1].get("refresh"))
+
+    def test_stream_processor_preview_payload_avoids_empty_signature_flash(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._remember_tool_call({"id": "call-write", "name": "write_file", "args": {}})
+        processor._emit_tool_started({"id": "call-write", "name": "write_file", "args": {}})
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["display_state"], "preview")
+        self.assertEqual(started[0]["args_state"], "pending")
+        self.assertEqual(started[0]["display"], "Preparing file write")
+        self.assertEqual(started[0]["subtitle"], "Waiting for arguments…")
+        self.assertEqual(started[0]["raw_display"], "write_file")
 
     def test_stream_processor_tool_display_flattens_multiline_command(self):
         events = []
@@ -433,8 +450,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         started = [event.payload for event in events if event.type == "tool_started"]
         self.assertEqual(len(started), 1)
-        self.assertIn("cli_exec", started[0]["display"])
-        self.assertNotIn("\n", started[0]["display"])
+        self.assertEqual(started[0]["display"], "Preparing command")
+        self.assertNotIn("\n", started[0]["subtitle"])
+        self.assertIn("cli_exec", started[0]["raw_display"])
 
     def test_stream_processor_finish_before_start_keeps_args_when_buffer_has_tool_call(self):
         events = []
@@ -490,7 +508,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
                 "new_string": "bar",
             },
         )
-        self.assertIn("parse_yandex_forecast_fixed.py", finished[0]["display"])
+        self.assertEqual(finished[0]["display"], "Editing file")
+        self.assertIn("parse_yandex_forecast_fixed.py", finished[0]["subtitle"])
+        self.assertIn("parse_yandex_forecast_fixed.py", finished[0]["raw_display"])
 
     def test_stream_processor_prefers_tool_execution_duration_from_metadata(self):
         events = []

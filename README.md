@@ -2,6 +2,7 @@
 
 Desktop AI-агент с графовым runtime на `LangGraph` и интерфейсом на `PySide6`.
 Проект ориентирован на локальную разработку: работа с файлами, запуск инструментов, approvals для рискованных действий, история сессий и интеграция MCP-инструментов.
+Позиционирование: **Portable desktop agent** — после сборки в `.exe` не требует установки и может запускаться с флешки на другом ПК.
 
 ## Что в проекте сейчас
 
@@ -17,18 +18,29 @@ Desktop AI-агент с графовым runtime на `LangGraph` и интер
 ```text
 .
 ├─ agent.py
+├─ build.bat
+├─ env_example.txt
 ├─ main.py
+├─ mcp.json
 ├─ prompt.txt
+├─ requirements.txt
 ├─ core/
 ├─ tools/
 ├─ ui/
-└─ tests/
+├─ tests/
+└─ utils/
 ```
 
 - `core/` — runtime, policy, recovery, state, checkpoints, конфигурация.
 - `tools/` — реестр и реализации локальных/MCP инструментов.
 - `ui/` — окно, runtime-воркер, стриминг событий, виджеты.
 - `tests/` — регрессионные и функциональные тесты.
+- `utils/` — вспомогательные скрипты для диагностики и обслуживания проекта.
+- `.agent_state/`, `logs/` — служебные директории состояния сессий и логов во время работы.
+- `build.bat` — сборка portable `.exe`.
+- `env_example.txt` — шаблон env-конфига.
+- `mcp.json` — конфигурация MCP-серверов/инструментов.
+- `requirements.txt` — зависимости проекта.
 
 ## Основные компоненты
 
@@ -36,9 +48,17 @@ Desktop AI-агент с графовым runtime на `LangGraph` и интер
 - `core/config.py` — типизированная загрузка env и runtime-лимитов.
 - `core/nodes.py` — узлы графа, tool-calling, approvals, recovery.
 - `core/context_builder.py` — подготовка и нормализация контекста для провайдера.
+- `core/policy_engine.py` — определение intent и политик режима выполнения.
+- `core/recovery_manager.py`, `core/self_correction_engine.py` — автоматическое восстановление после tool/runtime-ошибок.
+- `core/session_store.py`, `core/session_utils.py`, `core/checkpointing.py` — хранение и восстановление сессий/чекпоинтов.
+- `core/model_profiles.py`, `core/multimodal.py` — профили моделей и мультимодальный ввод.
 - `tools/tool_registry.py` — загрузка локальных и MCP инструментов, метаданные безопасности.
+- `tools/filesystem.py`, `tools/search_tools.py`, `tools/system_tools.py`, `tools/process_tools.py`, `tools/local_shell.py` — основные группы локальных инструментов.
 - `ui/runtime.py` — orchestration GUI <-> graph, payloads, resume approval/user-choice.
+- `ui/main_window.py` — главное окно и wiring UI-событий.
 - `ui/streaming.py` — обработка stream-событий и tool lifecycle в transcript.
+- `ui/theme.py` — централизованная тема и стили интерфейса.
+- `ui/tool_message_utils.py`, `ui/visibility.py` — нормализация tool payload и фильтрация внутренних сообщений.
 - `ui/widgets/composer.py` — composer, history, paste, `@`-mentions.
 
 ## Инструменты
@@ -79,6 +99,22 @@ Copy-Item env_example.txt .env
 ```bash
 python main.py
 ```
+
+## Portable-сборка (exe без установки)
+
+Сценарий использования:
+
+1. Собрать приложение:
+
+```powershell
+.\build.bat
+```
+
+2. Взять собранный `.exe` (и файлы рядом с ним из output-папки сборки).
+3. Скопировать на флешку или в любую папку на другом ПК.
+4. Запустить `.exe` — установка не требуется.
+
+Это позволяет использовать агента как переносимый desktop-инструмент: "собрал один раз -> перенес -> запустил".
 
 ## Переменные окружения
 

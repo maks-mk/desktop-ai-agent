@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, To
 from core.message_utils import is_tool_message_error, stringify_content
 from core.text_utils import (
     TokenTracker,
+    build_tool_ui_labels,
+    classify_tool_args_state,
     format_tool_display,
     format_tool_output,
     parse_thought,
@@ -325,16 +327,9 @@ class StreamProcessor:
         # If the card is already visible and we learned richer args later (stream races),
         # push a lightweight refresh so UI updates command/args immediately.
         if tool_id in self.printed_tool_ids and (merged_args != existing_args or tool_name != existing_name):
-            self._emit(
-                "tool_started",
-                {
-                    "tool_id": tool_id,
-                    "name": tool_name,
-                    "args": merged_args,
-                    "display": format_tool_display(tool_name, merged_args),
-                    "refresh": True,
-                },
-            )
+            payload = self._build_tool_event_payload(tool_id, tool_name, merged_args, phase="preparing")
+            payload["refresh"] = True
+            self._emit("tool_started", payload)
 
     def _merge_tool_args(self, current_args: Any, incoming_args: Any) -> Dict[str, Any]:
         current = canonicalize_tool_args(current_args)
@@ -382,18 +377,7 @@ class StreamProcessor:
         self.printed_tool_ids.add(tool_id)
         self.active_node = "tools"
         self._emit_status(force=True)
-        self._emit(
-            "tool_started",
-            {
-                "tool_id": tool_id,
-                "name": tool_name,
-                "args": tool_args,
-                "display": format_tool_display(
-                    tool_name,
-                    tool_args,
-                ),
-            },
-        )
+        self._emit("tool_started", self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="preparing"))
 
     def _handle_tool_result(self, message: ToolMessage) -> None:
         tool_id = str(message.tool_call_id or "")
@@ -440,10 +424,6 @@ class StreamProcessor:
 
         diff_blocks = [match.group(1).strip() for match in DIFF_REGEX.finditer(content_str)]
         payload = {
-            "tool_id": tool_id,
-            "name": tool_name,
-            "args": tool_args,
-            "display": format_tool_display(tool_name, tool_args),
             "content": content_str,
             "summary": summary,
             "is_error": is_error,
@@ -451,6 +431,7 @@ class StreamProcessor:
             "diff": diff_blocks[0] if diff_blocks else "",
             "diff_blocks": diff_blocks,
         }
+        payload.update(self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="finished", is_error=is_error))
         self._emit("tool_finished", payload)
         if tool_id:
             self.tool_buffer.pop(tool_id, None)
@@ -476,10 +457,6 @@ class StreamProcessor:
                 elapsed = time.perf_counter() - start_time
             content = "Error: Execution interrupted (system limit reached or user stop). Please retry."
             payload = {
-                "tool_id": tool_id,
-                "name": tool_name,
-                "args": tool_args,
-                "display": format_tool_display(tool_name, tool_args),
                 "content": content,
                 "summary": format_tool_output(tool_name, content, True),
                 "is_error": True,
@@ -489,6 +466,7 @@ class StreamProcessor:
                 "interrupted": True,
                 "interruption_reason": reason,
             }
+            payload.update(self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="finished", is_error=True))
             self._emit("tool_finished", payload)
             interrupted_payloads.append(payload)
             self.tool_buffer.pop(tool_id, None)
@@ -505,13 +483,60 @@ class StreamProcessor:
 
     def _status_label(self) -> str:
         node_labels = {
-            "agent": "Thinking",
-            "stability_guard": "Self-correcting",
+            "agent": "Analyzing request",
+            "stability_guard": "Reviewing results",
             "tools": "Running tools",
             "summarize": "Compressing context",
             "approval": "Waiting for approval",
         }
         return node_labels.get(self.active_node, "Thinking")
+
+    def _status_phase(self) -> str:
+        phase_map = {
+            "agent": "working",
+            "stability_guard": "reviewing",
+            "tools": "active",
+            "summarize": "system",
+            "approval": "waiting",
+        }
+        return phase_map.get(self.active_node, "working")
+
+    def _status_elapsed_text(self) -> str:
+        elapsed = self._elapsed_seconds()
+        if elapsed < 4.0:
+            return ""
+        if elapsed < 10.0:
+            return f"{elapsed:.1f}s"
+        return f"{int(round(elapsed))}s"
+
+    def _build_tool_event_payload(
+        self,
+        tool_id: str,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        *,
+        phase: str,
+        is_error: bool = False,
+    ) -> Dict[str, Any]:
+        args_state = classify_tool_args_state(tool_name, tool_args)
+        labels = build_tool_ui_labels(tool_name, tool_args, phase=phase, is_error=is_error)
+        display_state = "finished" if phase == "finished" else ("resolved" if args_state == "complete" else "preview")
+        if phase == "preparing" and args_state == "complete":
+            phase = "running"
+        status_hint = labels.get("subtitle") or ("Preparing tool call…" if display_state == "preview" else "")
+        return {
+            "tool_id": tool_id,
+            "name": tool_name,
+            "args": tool_args,
+            "display": labels.get("title") or tool_name,
+            "subtitle": labels.get("subtitle", ""),
+            "raw_display": labels.get("raw_display") or format_tool_display(tool_name, tool_args),
+            "args_state": args_state,
+            "display_state": display_state,
+            "phase": phase,
+            "status_hint": status_hint,
+            "source_kind": labels.get("source_kind", "tool"),
+        }
 
     def _emit_status(self, force: bool = False) -> None:
         label = self._status_label()
@@ -525,6 +550,8 @@ class StreamProcessor:
                 "node": self.active_node,
                 "label": label,
                 "elapsed": self._elapsed_seconds(),
+                "elapsed_text": self._status_elapsed_text(),
+                "phase": self._status_phase(),
                 "has_thought": self.has_thought,
             },
         )

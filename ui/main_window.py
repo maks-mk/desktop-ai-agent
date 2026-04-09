@@ -598,20 +598,22 @@ class MainWindow(QMainWindow):
         )
         self._summarize_in_progress = False
         if self.current_turn is not None:
-            self.current_turn.set_status("Thinking")
+            self.current_turn.set_status("Analyzing request", phase="working")
             self.transcript.notify_content_changed(force=True)
-        self._set_status_visual("Thinking…", busy=True)
+        self._set_status_visual("Analyzing request…", busy=True)
 
     def _on_status_changed(self, payload: dict) -> None:
         label = payload.get("label")
         node = str(payload.get("node", "") or "")
+        elapsed_text = str(payload.get("elapsed_text", "") or "")
+        phase = str(payload.get("phase", "working") or "working")
         if not label:
             return
 
         self._set_status_visual(label, busy=node != "approval")
         transcript_changed = False
         if self.current_turn is not None:
-            self.current_turn.set_status(label)
+            self.current_turn.set_status(label, meta=elapsed_text, phase=phase)
             transcript_changed = True
             if node == "summarize":
                 self._summarize_in_progress = True

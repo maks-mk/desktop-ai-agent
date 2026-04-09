@@ -337,7 +337,7 @@ async def cli_exec(command: str) -> str:
     if command_profile["long_running_service"]:
         return format_error(
             ErrorType.VALIDATION,
-            "Foreground service/server commands are not supported in cli_exec.",
+            "Foreground service/server commands are not supported in cli_exec. Use run_background_process instead.",
         )
     command_env = _prepare_shell_env(normalized_command)
 

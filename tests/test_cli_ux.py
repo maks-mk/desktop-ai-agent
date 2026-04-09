@@ -708,7 +708,7 @@ class GuiUxTests(unittest.TestCase):
             self.window._handle_event(StreamEvent("run_started", {"text": "Ещё запрос"}))
 
         self.assertIsNotNone(self.window.current_turn.status_widget)
-        self.assertEqual(self.window.current_turn.status_widget.label.text(), "Thinking")
+        self.assertEqual(self.window.current_turn.status_widget.label.text(), "Analyzing request")
         self.assertGreaterEqual(notify_mock.call_count, 2)
         self.assertEqual(notify_mock.call_args_list[-1].kwargs.get("force"), True)
 
@@ -864,6 +864,57 @@ class GuiUxTests(unittest.TestCase):
         self.assertFalse(tool_card.args_container.isHidden())
         self.assertIn("Success", tool_card.args_view.toPlainText())
         self.assertNotIn('"path"', tool_card.args_view.toPlainText())
+
+    def test_preview_tool_card_stays_hidden_until_resolved_refresh_arrives(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Сохрани файл"}))
+        self.window._handle_event(
+            StreamEvent(
+                "tool_started",
+                {
+                    "tool_id": "call-preview",
+                    "name": "write_file",
+                    "args": {},
+                    "display": "Preparing file write",
+                    "subtitle": "Waiting for arguments…",
+                    "raw_display": "write_file",
+                    "args_state": "pending",
+                    "display_state": "preview",
+                    "phase": "preparing",
+                    "source_kind": "tool",
+                },
+            )
+        )
+        self._process_events()
+
+        tool_card = self.window.current_turn.tool_cards["call-preview"]
+        self.assertTrue(tool_card.isHidden())
+
+        self.window._handle_event(
+            StreamEvent(
+                "tool_started",
+                {
+                    "tool_id": "call-preview",
+                    "name": "write_file",
+                    "args": {"path": "notes.md"},
+                    "display": "Writing file",
+                    "subtitle": "notes.md",
+                    "raw_display": "write_file(notes.md)",
+                    "args_state": "complete",
+                    "display_state": "resolved",
+                    "phase": "running",
+                    "source_kind": "tool",
+                    "refresh": True,
+                },
+            )
+        )
+        self._process_events()
+
+        self.assertFalse(tool_card.isHidden())
+        self.assertEqual(tool_card.tool_button.text(), "Writing file")
+        self.assertEqual(tool_card.subtitle_label.text(), "notes.md")
+        self.assertEqual(tool_card.phase_badge.text(), "Running")
+        self.assertNotIn("write_file()", tool_card.tool_button.text())
 
     def test_cli_exec_renders_live_terminal_panel_and_streams_output(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1150,6 +1201,49 @@ class GuiUxTests(unittest.TestCase):
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertIsNotNone(tool_card.cli_exec_widget)
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
+        self.assertEqual(tool_card.phase_badge.text(), "✓")
+
+    def test_finished_tool_restored_from_transcript_keeps_success_badge(self):
+        payload = self._snapshot_payload()
+        payload["transcript"] = {
+            "summary_notice": "",
+            "turns": [
+                {
+                    "user_text": "прочитай файл",
+                    "blocks": [
+                        {
+                            "type": "tool",
+                            "payload": {
+                                "tool_id": "call-restored-finished",
+                                "name": "read_file",
+                                "args": {"path": "index.html"},
+                                "display": "Reading file",
+                                "subtitle": "index.html",
+                                "raw_display": "read_file(index.html)",
+                                "args_state": "complete",
+                                "display_state": "finished",
+                                "phase": "finished",
+                                "source_kind": "tool",
+                                "summary": "Read 78 lines (3574 chars)",
+                                "content": "Read 78 lines.",
+                                "is_error": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        self.window._handle_initialized(payload)
+        self._process_events()
+
+        restored_turn = self.window.transcript.layout.itemAt(0).widget()
+        tool_card = restored_turn.tool_cards["call-restored-finished"]
+        self.assertEqual(tool_card.tool_button.text(), "Reading file")
+        self.assertTrue(tool_card.subtitle_label.text().startswith("index.html · Read 78"))
+        self.assertEqual(tool_card.subtitle_label.toolTip(), "read_file(index.html)")
+        self.assertEqual(tool_card.phase_badge.text(), "✓")
+        self.assertNotEqual(tool_card.phase_badge.text(), "Running")
 
     def test_tool_error_output_is_collapsed_by_default(self):
         self.window._handle_initialized(self._snapshot_payload())

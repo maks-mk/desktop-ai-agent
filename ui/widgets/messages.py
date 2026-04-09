@@ -94,10 +94,31 @@ class StatusIndicatorWidget(QFrame):
         self.label = QLabel(label)
         self.label.setObjectName("TranscriptMeta")
         layout.addWidget(self.label, 0, Qt.AlignVCenter)
+
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("MetaText")
+        self.meta_label.setVisible(False)
+        layout.addWidget(self.meta_label, 0, Qt.AlignVCenter)
         layout.addStretch(1)
+        self.set_state(label)
+
+    def set_state(self, label: str, meta: str = "", phase: str = "working") -> None:
+        self.label.setText(label)
+        meta_text = str(meta or "").strip()
+        self.meta_label.setText(meta_text)
+        self.meta_label.setVisible(bool(meta_text))
+        if self.property("phase") != phase:
+            self.setProperty("phase", phase)
+            style = self.style()
+            if style is not None:
+                style.unpolish(self)
+                style.polish(self)
+        icon_name = "fa5s.pause-circle" if phase == "waiting" else "fa5s.spinner"
+        icon_color = TEXT_MUTED if phase not in {"active", "reviewing"} else ACCENT_BLUE
+        self.spinner.setIcon(_fa_icon(icon_name, color=icon_color, size=12))
 
     def set_label(self, label: str) -> None:
-        self.label.setText(label)
+        self.set_state(label)
 
 
 class UserMessageWidget(QFrame):

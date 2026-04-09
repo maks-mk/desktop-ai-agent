@@ -226,6 +226,165 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
     return f"{tool_name}({args_str})"
 
 
+def classify_tool_args_state(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    args = dict(tool_args or {})
+    if not args:
+        return "pending"
+
+    anchor_keys: tuple[str, ...] = ()
+    if tool_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace", "tail_file"}:
+        anchor_keys = ("path", "file_path")
+    elif tool_name in {"web_search", "WebSearch"}:
+        anchor_keys = ("query",)
+    elif tool_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+        anchor_keys = ("pattern", "name_pattern")
+    elif tool_name in {"execute", "RunCommand", "cli_exec"}:
+        anchor_keys = ("command",)
+    elif tool_name in {"fetch_url", "WebFetch", "fetch_content", "download_file"}:
+        anchor_keys = ("url", "urls")
+
+    if anchor_keys and not any(args.get(key) for key in anchor_keys):
+        return "partial"
+    return "complete"
+
+
+def tool_source_kind(tool_name: str) -> str:
+    normalized = str(tool_name or "").strip().lower()
+    if normalized == "cli_exec":
+        return "cli"
+    if ":" in normalized:
+        return "mcp"
+    return "tool"
+
+
+def tool_title_case(tool_name: str) -> str:
+    words = str(tool_name or "").replace(":", " ").replace("_", " ").strip().split()
+    if not words:
+        return "Tool"
+    return " ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def tool_target_summary(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    args = dict(tool_args or {})
+    normalized_name = str(tool_name or "").strip()
+
+    if normalized_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace", "tail_file"}:
+        path_value = args.get("file_path") or args.get("path")
+        return abbreviate_path(str(path_value)) if path_value else ""
+    if normalized_name in {"ls", "LS", "list_directory"}:
+        path_value = args.get("path")
+        return abbreviate_path(str(path_value)) if path_value else "current directory"
+    if normalized_name in {"web_search", "WebSearch"}:
+        query = args.get("query")
+        return truncate_value(_single_line_preview(query), 80) if query else ""
+    if normalized_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+        pattern_val = args.get("pattern") or args.get("name_pattern")
+        return truncate_value(_single_line_preview(pattern_val), 70) if pattern_val else ""
+    if normalized_name in {"execute", "RunCommand", "cli_exec"}:
+        command = args.get("command")
+        return truncate_value(_single_line_preview(command), 100) if command else ""
+    if normalized_name in {"fetch_url", "WebFetch", "fetch_content", "download_file"}:
+        url_val = args.get("url") or args.get("urls")
+        return truncate_value(_single_line_preview(url_val), 80) if url_val else ""
+    return ""
+
+
+def build_tool_ui_labels(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    *,
+    phase: str = "running",
+    is_error: bool = False,
+) -> Dict[str, str]:
+    normalized_name = str(tool_name or "").strip() or "unknown_tool"
+    args = dict(tool_args or {})
+    args_state = classify_tool_args_state(normalized_name, args)
+    target = tool_target_summary(normalized_name, args)
+
+    action_map = {
+        "read_file": "Reading file",
+        "tail_file": "Reading file",
+        "write_file": "Writing file",
+        "edit_file": "Editing file",
+        "Read": "Reading file",
+        "Write": "Writing file",
+        "SearchReplace": "Editing file",
+        "ls": "Listing directory",
+        "LS": "Listing directory",
+        "list_directory": "Listing directory",
+        "web_search": "Searching web",
+        "WebSearch": "Searching web",
+        "grep": "Searching files",
+        "Grep": "Searching files",
+        "glob": "Finding files",
+        "Glob": "Finding files",
+        "search_in_file": "Searching file",
+        "search_in_directory": "Searching directory",
+        "find_file": "Finding file",
+        "fetch_url": "Fetching URL",
+        "WebFetch": "Fetching URL",
+        "fetch_content": "Fetching content",
+        "download_file": "Downloading file",
+        "execute": "Running command",
+        "RunCommand": "Running command",
+        "cli_exec": "Running command",
+    }
+    preparing_map = {
+        "read_file": "Preparing file read",
+        "tail_file": "Preparing file read",
+        "write_file": "Preparing file write",
+        "edit_file": "Preparing edit",
+        "Read": "Preparing file read",
+        "Write": "Preparing file write",
+        "SearchReplace": "Preparing edit",
+        "ls": "Preparing directory listing",
+        "LS": "Preparing directory listing",
+        "list_directory": "Preparing directory listing",
+        "web_search": "Preparing search",
+        "WebSearch": "Preparing search",
+        "grep": "Preparing search",
+        "Grep": "Preparing search",
+        "glob": "Preparing file search",
+        "Glob": "Preparing file search",
+        "search_in_file": "Preparing file search",
+        "search_in_directory": "Preparing directory search",
+        "find_file": "Preparing file search",
+        "fetch_url": "Preparing fetch",
+        "WebFetch": "Preparing fetch",
+        "fetch_content": "Preparing fetch",
+        "download_file": "Preparing download",
+        "execute": "Preparing command",
+        "RunCommand": "Preparing command",
+        "cli_exec": "Preparing command",
+    }
+    base_title = action_map.get(normalized_name, tool_title_case(normalized_name))
+
+    if is_error:
+        title = f"{base_title} failed"
+    elif phase == "finished":
+        title = base_title
+    elif phase == "preparing":
+        title = preparing_map.get(normalized_name, f"Preparing {base_title.lower()}")
+    else:
+        title = base_title
+
+    if args_state == "pending":
+        subtitle = "Waiting for arguments…"
+    elif args_state == "partial":
+        subtitle = target or "Resolving arguments…"
+    else:
+        subtitle = target
+
+    raw_display = format_tool_display(normalized_name, args) if args_state == "complete" else normalized_name
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "raw_display": raw_display,
+        "args_state": args_state,
+        "source_kind": tool_source_kind(normalized_name),
+    }
+
+
 def _collapse_non_code_markdown(text: str) -> str:
     parts = []
     last_index = 0

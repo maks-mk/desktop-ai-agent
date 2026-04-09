@@ -41,7 +41,7 @@ from core.session_store import (
     normalize_project_path,
 )
 from core.session_utils import repair_session_if_needed
-from core.text_utils import format_tool_display, format_tool_output, parse_thought, prepare_markdown_for_render
+from core.text_utils import build_tool_ui_labels, format_tool_output, parse_thought, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
 from ui.streaming import StreamEvent, StreamProcessor
@@ -368,6 +368,7 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
                 tool_args = extract_tool_args(message)
             content = stringify_content(message.content)
             is_error = is_tool_message_error(message)
+            labels = build_tool_ui_labels(tool_name, tool_args, phase="finished", is_error=is_error)
             current_turn["blocks"].append(
                 {
                     "type": "tool",
@@ -375,7 +376,13 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
                         "tool_id": message.tool_call_id,
                         "name": tool_name,
                         "args": tool_args,
-                        "display": format_tool_display(tool_name, tool_args),
+                        "display": labels.get("title") or tool_name,
+                        "subtitle": labels.get("subtitle", ""),
+                        "raw_display": labels.get("raw_display", tool_name),
+                        "args_state": labels.get("args_state", "complete"),
+                        "display_state": "finished",
+                        "phase": "finished",
+                        "source_kind": labels.get("source_kind", "tool"),
                         "summary": _plain_summary_text(format_tool_output(tool_name, content, is_error)),
                         "content": content,
                         "is_error": is_error,

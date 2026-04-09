@@ -414,6 +414,19 @@ def build_stylesheet() -> str:
         font-weight: 600;
     }}
 
+    QFrame#InlineStatusRow {{
+        border: none;
+    }}
+
+    QFrame#InlineStatusRow[phase="active"] QLabel#TranscriptMeta,
+    QFrame#InlineStatusRow[phase="reviewing"] QLabel#TranscriptMeta {{
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.08)};
+    }}
+
+    QFrame#InlineStatusRow[phase="waiting"] QLabel#TranscriptMeta {{
+        color: {blend_hex(AMBER_WARNING, TEXT_PRIMARY, 0.24)};
+    }}
+
     QToolButton#InlineStatusSpinner {{
         background: transparent;
         border: none;
@@ -527,6 +540,48 @@ def build_stylesheet() -> str:
         font-family: "{MONO_FONT_FAMILY}";
         font-size: 9.3pt;
         font-weight: 500;
+    }}
+
+    QLabel#ToolSubtitle {{
+        background: transparent;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.30)};
+        font-size: 8.9pt;
+        padding-left: 13px;
+        padding-bottom: 1px;
+    }}
+
+    QLabel#ToolPhaseBadge {{
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.04)};
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.34)};
+        border: none;
+        border-radius: {SOFT_RADIUS_XS + 5}px;
+        padding: 2px 7px;
+        font-size: 8.1pt;
+        font-weight: 600;
+    }}
+
+    QLabel#ToolPhaseBadge[variant="pending"] {{
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.05)};
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.26)};
+    }}
+
+    QLabel#ToolPhaseBadge[variant="active"] {{
+        background: {blend_hex(ACCENT_BLUE_SOFT, ACCENT_BLUE, 0.18)};
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.04)};
+    }}
+
+    QLabel#ToolPhaseBadge[variant="success"] {{
+        background: transparent;
+        color: {SUCCESS_GREEN};
+        padding: 0px;
+        border-radius: 0px;
+        font-size: 9.2pt;
+        font-weight: 700;
+    }}
+
+    QLabel#ToolPhaseBadge[variant="error"] {{
+        background: {blend_hex(ERROR_RED, SURFACE_ALT, 0.18)};
+        color: {TEXT_PRIMARY};
     }}
 
     QPlainTextEdit#CliExecOutput {{
@@ -859,9 +914,9 @@ def build_stylesheet() -> str:
         border: none;
         border-radius: {SOFT_RADIUS_SM}px;
         padding: 0px;
-        color: {tool_call_idle};
-        font-size: 11.5pt;
-        font-weight: 400;
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.06)};
+        font-size: 10.7pt;
+        font-weight: 500;
         text-align: left;
     }}
 

@@ -9,6 +9,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
+from core.text_utils import build_tool_ui_labels, format_tool_display
 from ui.theme import ERROR_RED, SUCCESS_GREEN, TEXT_MUTED
 from .foundation import (
     CLI_EXEC_MIN_VISIBLE_MS,
@@ -24,6 +25,7 @@ from .foundation import (
 )
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+TOOL_PREVIEW_REVEAL_DELAY_MS = 140
 
 
 def _strip_ansi_for_display(text: Any) -> str:
@@ -174,10 +176,11 @@ class ToolCardWidget(QFrame):
         self._cli_expanded = True
         self._cli_started_at_monotonic = time.monotonic() if self._is_cli_exec else None
         self._collapse_token = 0
+        self._preview_token = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 4)
-        layout.setSpacing(3)
+        layout.setSpacing(2)
 
         self.header_container = QWidget()
         header = QHBoxLayout(self.header_container)
@@ -203,11 +206,23 @@ class ToolCardWidget(QFrame):
             self.tool_button.toggled.connect(self._set_cli_expanded)
         header.addWidget(self.tool_button, 1)
 
+        self.phase_badge = QLabel("")
+        self.phase_badge.setObjectName("ToolPhaseBadge")
+        self.phase_badge.setVisible(False)
+        header.addWidget(self.phase_badge, 0, Qt.AlignVCenter)
+
         self.timing_label = QLabel("")
         self.timing_label.setObjectName("MetaText")
         self.timing_label.setVisible(False)
         header.addWidget(self.timing_label, 0, Qt.AlignVCenter | Qt.AlignRight)
         layout.addWidget(self.header_container)
+
+        self.subtitle_label = ElidedLabel(elide_mode=Qt.ElideRight)
+        self.subtitle_label.setObjectName("ToolSubtitle")
+        self.subtitle_label.setVisible(False)
+        self.subtitle_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.subtitle_label.setMinimumWidth(0)
+        layout.addWidget(self.subtitle_label)
 
         self.args_view = CopySafePlainTextEdit()
         self.args_view.setObjectName("InlineCodeView")
@@ -226,6 +241,7 @@ class ToolCardWidget(QFrame):
 
         self.diff_section: CollapsibleSection | None = None
 
+        self._apply_payload_visual_state(self.payload)
         if self._is_cli_exec:
             self.args_container.setVisible(False)
             self._ensure_cli_exec_widget()
@@ -271,6 +287,130 @@ class ToolCardWidget(QFrame):
             return f"{milliseconds}ms"
         return f"{value:.1f}s"
 
+    def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_args = self._normalize_args(payload.get("args", {}))
+        normalized = dict(payload)
+        normalized["args"] = normalized_args
+        labels = build_tool_ui_labels(
+            str(normalized.get("name", "") or ""),
+            normalized_args,
+            phase=str(normalized.get("phase", "running") or "running"),
+            is_error=bool(normalized.get("is_error", False)),
+        )
+        normalized.setdefault("display", labels.get("title") or normalized.get("name", "tool"))
+        normalized.setdefault("subtitle", labels.get("subtitle", ""))
+        normalized.setdefault("raw_display", labels.get("raw_display") or format_tool_display(str(normalized.get("name", "")), normalized_args))
+        normalized.setdefault("args_state", labels.get("args_state", "pending"))
+        normalized.setdefault("source_kind", labels.get("source_kind", "tool"))
+        normalized.setdefault(
+            "display_state",
+            "finished" if normalized.get("phase") == "finished" else ("resolved" if normalized.get("args_state") == "complete" else "preview"),
+        )
+        return normalized
+
+    @staticmethod
+    def _phase_badge_text(payload: dict[str, Any]) -> str:
+        if payload.get("is_error"):
+            return "Error"
+        phase = str(payload.get("phase", "running") or "running")
+        args_state = str(payload.get("args_state", "complete") or "complete")
+        if phase == "finished":
+            return "✓"
+        if phase == "preparing" and args_state in {"pending", "partial"}:
+            return "Preparing"
+        return "Running"
+
+    @staticmethod
+    def _phase_variant(payload: dict[str, Any]) -> str:
+        if payload.get("is_error"):
+            return "error"
+        phase = str(payload.get("phase", "running") or "running")
+        args_state = str(payload.get("args_state", "complete") or "complete")
+        if phase == "finished":
+            return "success"
+        if phase == "preparing" and args_state in {"pending", "partial"}:
+            return "pending"
+        return "active"
+
+    @staticmethod
+    def _compose_finished_subtitle(payload: dict[str, Any]) -> str:
+        summary = _strip_ansi_for_display(payload.get("summary", ""))
+        summary = " ".join(summary.split())
+        subtitle = str(payload.get("subtitle", "") or "").strip()
+        if summary and subtitle and summary.casefold() != subtitle.casefold():
+            return f"{subtitle} · {summary}"
+        if summary:
+            return summary
+        return subtitle
+
+    def _set_tool_visible(self, visible: bool) -> None:
+        if self.isHidden() == (not visible):
+            return
+        self.setVisible(visible)
+
+    def _cancel_preview_reveal(self) -> None:
+        self._preview_token += 1
+
+    def _queue_preview_reveal(self) -> None:
+        token = self._preview_token + 1
+        self._preview_token = token
+        self._set_tool_visible(False)
+        QTimer.singleShot(
+            TOOL_PREVIEW_REVEAL_DELAY_MS,
+            lambda current_token=token: self._show_preview_if_current(current_token),
+        )
+
+    def _show_preview_if_current(self, token: int) -> None:
+        if token != self._preview_token:
+            return
+        self._set_tool_visible(True)
+
+    def _apply_payload_visual_state(self, payload: dict[str, Any], *, finished: bool = False) -> None:
+        normalized = self._normalize_payload(payload)
+        self.payload = normalized
+
+        display = str(normalized.get("display", "") or normalized.get("name", "tool")).strip()
+        subtitle = str(normalized.get("subtitle", "") or "").strip()
+        raw_display = str(normalized.get("raw_display", "") or "").strip()
+        phase_variant = self._phase_variant(normalized)
+
+        self.tool_button.setText(display)
+        self.tool_button.setToolTip(raw_display if raw_display and raw_display != display else subtitle)
+
+        if finished:
+            subtitle = self._compose_finished_subtitle(normalized)
+        self.subtitle_label.set_full_text(subtitle)
+        self.subtitle_label.setToolTip(raw_display if raw_display and raw_display != subtitle else subtitle)
+        self.subtitle_label.setVisible(bool(subtitle))
+
+        badge_text = self._phase_badge_text(normalized)
+        self.phase_badge.setText(badge_text)
+        self.phase_badge.setVisible(bool(badge_text))
+        if self.phase_badge.property("variant") != phase_variant:
+            self.phase_badge.setProperty("variant", phase_variant)
+            style = self.phase_badge.style()
+            if style is not None:
+                style.unpolish(self.phase_badge)
+                style.polish(self.phase_badge)
+
+        icon_name = "fa5s.circle"
+        icon_color = TEXT_MUTED
+        if phase_variant == "active":
+            icon_color = "#A8A49E"
+        elif phase_variant == "success":
+            icon_name = "fa5s.check-circle"
+            icon_color = SUCCESS_GREEN
+        elif phase_variant == "error":
+            icon_name = "fa5s.times-circle"
+            icon_color = ERROR_RED
+        self.icon_label.setPixmap(_fa_icon(icon_name, color=icon_color, size=7).pixmap(7, 7))
+
+        if normalized.get("display_state") == "preview" and not normalized.get("refresh") and not finished:
+            self._queue_preview_reveal()
+        else:
+            self._cancel_preview_reveal()
+            self._set_tool_visible(True)
+
     def _ensure_cli_exec_widget(self) -> CliExecWidget:
         if self.cli_exec_widget is None:
             command = self._command_from_args(self._normalize_args(self.payload.get("args", {})))
@@ -299,28 +439,24 @@ class ToolCardWidget(QFrame):
             return
         if not self._is_cli_exec:
             return
+        self._cancel_preview_reveal()
+        self._set_tool_visible(True)
         self._ensure_cli_exec_widget().append_output(text, stream=stream)
 
     def update_started_payload(self, payload: dict[str, Any]) -> None:
         self._cancel_pending_cli_collapse()
-        normalized_args = self._normalize_args(payload.get("args", self.payload.get("args", {})))
         merged_payload = dict(self.payload)
         merged_payload.update(payload)
-        merged_payload["args"] = normalized_args
-        self.payload = merged_payload
-
-        display = str(self.payload.get("display", "") or "").strip()
-        if display:
-            self.tool_button.setText(display)
+        self._apply_payload_visual_state(merged_payload)
         self._set_inline_output(self.payload.get("content", ""), self.payload.get("summary", ""))
 
         self._is_cli_exec = self._is_cli_exec or self._is_cli_exec_name(self.payload.get("name", ""))
         if self._is_cli_exec:
             self._cli_started_at_monotonic = time.monotonic()
             cli_exec_widget = self._ensure_cli_exec_widget()
-            command = self._command_from_args(normalized_args)
+            command = self._command_from_args(self._normalize_args(self.payload.get("args", {})))
             if not command:
-                command = self._command_from_display(display, self.payload.get("name", "cli_exec"))
+                command = self._command_from_display(self.payload.get("raw_display", ""), self.payload.get("name", "cli_exec"))
             if command:
                 cli_exec_widget.set_command(command)
             # Keep cli_exec panel open while the tool is running.
@@ -328,17 +464,13 @@ class ToolCardWidget(QFrame):
             self._set_cli_expanded(True)
 
     def finish(self, payload: dict[str, Any], *, collapse_delay_ms: int | None = None) -> None:
-        previous_display = self.tool_button.text()
-        normalized_args = self._normalize_args(payload.get("args", self.payload.get("args", {})))
         merged_payload = dict(self.payload)
         merged_payload.update(payload)
-        merged_payload["args"] = normalized_args
-        self.payload = merged_payload
-        is_error = payload.get("is_error", False)
-        icon_name = "fa5s.circle" if not is_error else "fa5s.times-circle"
-        color = SUCCESS_GREEN if not is_error else ERROR_RED
-        self.icon_label.setPixmap(_fa_icon(icon_name, color=color, size=7).pixmap(7, 7))
-        self.tool_button.setText(self.payload.get("display", "") or previous_display or self.payload.get("name", "tool"))
+        merged_payload.setdefault("phase", "finished")
+        merged_payload.setdefault("display_state", "finished")
+        self._apply_payload_visual_state(merged_payload, finished=True)
+        normalized_args = self._normalize_args(self.payload.get("args", {}))
+        is_error = bool(self.payload.get("is_error", False))
         self._set_inline_output(self.payload.get("content", ""), self.payload.get("summary", ""))
 
         duration = self.payload.get("duration")

@@ -454,6 +454,13 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         tool_block = payload["turns"][0]["blocks"][0]["payload"]
         self.assertEqual(tool_block["name"], "write_file")
         self.assertEqual(tool_block["args"], {"path": "notes.md", "content": "line 1\nline 2"})
+        self.assertEqual(tool_block["display"], "Writing file")
+        self.assertEqual(tool_block["subtitle"], "notes.md")
+        self.assertEqual(tool_block["raw_display"], "write_file(notes.md)")
+        self.assertEqual(tool_block["args_state"], "complete")
+        self.assertEqual(tool_block["display_state"], "finished")
+        self.assertEqual(tool_block["phase"], "finished")
+        self.assertEqual(tool_block["source_kind"], "tool")
 
     def test_build_transcript_payload_restores_user_image_attachments(self):
         payload = build_transcript_payload(
