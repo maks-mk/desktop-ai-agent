@@ -327,10 +327,15 @@ class RecoveryManager:
                 ),
             }
         elif not open_tool_issue:
+            next_retry_count = 0
+            next_fingerprint_history = []
             next_recovery_state["active_issue"] = None
             next_recovery_state["active_strategy"] = None
             next_recovery_state["strategy_queue"] = []
+            next_recovery_state["attempts_by_strategy"] = {}
+            next_recovery_state["progress_markers"] = []
             next_recovery_state["external_blocker"] = None
+            next_recovery_state["llm_replan_attempted_for"] = []
             if isinstance(last_message, ToolMessage):
                 next_recovery_state["last_successful_evidence"] = str(
                     state.get("last_tool_result") or stringify_content(last_message.content)

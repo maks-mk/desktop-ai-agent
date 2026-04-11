@@ -4,6 +4,7 @@ from contextvars import ContextVar
 import os
 import re
 import shutil
+import subprocess
 from typing import Any, Callable, Iterator, Optional
 from langchain_core.tools import tool
 
@@ -231,6 +232,15 @@ def _powershell_executable() -> str:
     return shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
 
 
+def _windows_subprocess_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if not create_no_window:
+        return {}
+    return {"creationflags": create_no_window}
+
+
 async def _terminate_process_tree(process: Any) -> None:
     pid = getattr(process, "pid", None)
     if os.name == "nt" and pid:
@@ -243,6 +253,7 @@ async def _terminate_process_tree(process: Any) -> None:
                 "/F",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **_windows_subprocess_kwargs(),
             )
             await asyncio.wait_for(killer.wait(), timeout=3)
         except Exception:
@@ -353,6 +364,7 @@ async def cli_exec(command: str) -> str:
                 stdin=asyncio.subprocess.DEVNULL,
                 cwd=_WORKING_DIRECTORY,
                 env=command_env,
+                **_windows_subprocess_kwargs(),
             )
         else:
             process = await asyncio.create_subprocess_shell(

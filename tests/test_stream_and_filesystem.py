@@ -8,7 +8,7 @@ from unittest import mock
 import httpx
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
-from core.text_utils import prepare_markdown_for_render
+from core.text_utils import format_tool_output, prepare_markdown_for_render, split_markdown_segments
 from ui.streaming import StreamProcessor
 from tools import filesystem, local_shell
 from tools.filesystem import FilesystemManager, _DOWNLOAD_HEADERS, _format_download_http_error
@@ -61,6 +61,27 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("package main", rendered)
         self.assertIn("fmt.Println", rendered)
 
+    def test_format_tool_output_cli_summary_has_no_rich_markup(self):
+        summary = format_tool_output(
+            "cli_exec",
+            "curl -I google.com\nHTTP/1.1 301 Moved Permanently\nlocation: https://www.google.com/",
+            False,
+        )
+        self.assertIn("(+2 lines)", summary)
+        self.assertNotIn("[dim]", summary)
+        self.assertNotIn("[/]", summary)
+
+    def test_format_tool_output_error_summary_has_no_rich_markup(self):
+        summary = format_tool_output(
+            "read_file",
+            "ERROR[EXECUTION]: Unauthorized 401",
+            True,
+        )
+        self.assertIn("ERROR[EXECUTION]: Unauthorized 401", summary)
+        self.assertIn("Hint: Check your API keys in .env", summary)
+        self.assertNotIn("[red]", summary)
+        self.assertNotIn("[/]", summary)
+
     def test_prepare_markdown_normalizes_simple_latex_symbols(self):
         source = (
             'При загрузке страницы звук не инициализируется $\\rightarrow$ браузер не ругается.\n'
@@ -81,6 +102,24 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertIn("`$\\\\rightarrow$`", rendered)
         self.assertIn("```text\n$\\\\Rightarrow$\n```", rendered)
+
+    def test_prepare_markdown_keeps_open_fenced_code_literal_while_streaming(self):
+        source = "```text\n$\\\\Rightarrow$\n"
+
+        rendered = prepare_markdown_for_render(source)
+
+        self.assertEqual(rendered.rstrip("\n"), source.rstrip("\n"))
+
+    def test_split_markdown_segments_treats_unclosed_fence_as_code(self):
+        segments = split_markdown_segments("До кода\n```python\nprint('hi')\n")
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].kind, "markdown")
+        self.assertEqual(segments[0].text, "До кода\n")
+        self.assertEqual(segments[1].kind, "code")
+        self.assertEqual(segments[1].language, "python")
+        self.assertEqual(segments[1].text.rstrip("\n"), "print('hi')")
+        self.assertFalse(segments[1].closed)
 
     def test_download_headers_request_binary_content(self):
         self.assertEqual(_DOWNLOAD_HEADERS["Accept"], "*/*")
@@ -892,6 +931,58 @@ class StreamAndFilesystemTests(unittest.TestCase):
         normalized_command = captured_argv[0][3]
         self.assertIn("-o NUL", normalized_command)
         self.assertNotIn("/dev/null", normalized_command)
+
+    def test_cli_exec_hides_windows_console_for_powershell_process(self):
+        process = self._FakeProcess(
+            stdout_chunks=[b"ok\n"],
+            stderr_chunks=[],
+            returncode=0,
+        )
+        captured_kwargs: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return process
+
+        with (
+            mock.patch.object(local_shell.os, "name", "nt"),
+            mock.patch.object(local_shell.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            mock.patch.object(local_shell.asyncio, "create_subprocess_exec", side_effect=_fake_create_subprocess_exec),
+        ):
+            result = asyncio.run(local_shell.cli_exec.ainvoke({"command": "python --version"}))
+
+        self.assertIn("ok", result)
+        self.assertEqual(captured_kwargs.get("creationflags"), 0x08000000)
+
+    def test_terminate_process_tree_hides_windows_console_for_taskkill(self):
+        process = self._FakeProcess(
+            stdout_chunks=[],
+            stderr_chunks=[],
+            returncode=0,
+            pid=4321,
+        )
+        killer = self._FakeProcess(
+            stdout_chunks=[],
+            stderr_chunks=[],
+            returncode=0,
+        )
+        captured_argv: list[tuple[str, ...]] = []
+        captured_kwargs: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured_argv.append(tuple(str(part) for part in args))
+            captured_kwargs.update(kwargs)
+            return killer
+
+        with (
+            mock.patch.object(local_shell.os, "name", "nt"),
+            mock.patch.object(local_shell.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            mock.patch.object(local_shell.asyncio, "create_subprocess_exec", side_effect=_fake_create_subprocess_exec),
+        ):
+            asyncio.run(local_shell._terminate_process_tree(process))
+
+        self.assertEqual(captured_argv[0], ("taskkill", "/PID", "4321", "/T", "/F"))
+        self.assertEqual(captured_kwargs.get("creationflags"), 0x08000000)
 
     def test_cli_exec_cancellation_terminates_running_process(self):
         process = self._FakeProcess(

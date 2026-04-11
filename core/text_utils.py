@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
@@ -8,10 +9,82 @@ _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL)
 _CLEAN_MD_RE = re.compile(r"\n{3,}")
 _CRAWL_PAGES_RE = re.compile(r"(\d+) pages processed")
 _CRAWL_DEPTH_RE = re.compile(r"max_depth: (\d+)")
-_FENCED_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _FILE_EXT_RE = re.compile(r"\.([a-z0-9]+)\b", re.IGNORECASE)
 _SIMPLE_LATEX_INLINE_RE = re.compile(r"\$\s*(\\[A-Za-z]+)\s*\$")
+
+
+@dataclass(frozen=True)
+class MarkdownSegment:
+    kind: str
+    text: str
+    raw: str
+    language: str = ""
+    closed: bool = True
+
+
+def split_markdown_segments(text: str) -> list[MarkdownSegment]:
+    if text == "":
+        return [MarkdownSegment("markdown", "", "")]
+
+    segments: list[MarkdownSegment] = []
+    markdown_lines: list[str] = []
+    code_lines: list[str] = []
+    open_fence = ""
+    language = ""
+    in_fence = False
+
+    def _flush_markdown() -> None:
+        markdown_text = "".join(markdown_lines)
+        if markdown_text:
+            segments.append(MarkdownSegment("markdown", markdown_text, markdown_text))
+        markdown_lines.clear()
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if in_fence:
+                code_text = "".join(code_lines)
+                segments.append(
+                    MarkdownSegment(
+                        "code",
+                        code_text,
+                        f"{open_fence}{code_text}{line}",
+                        language=language,
+                        closed=True,
+                    )
+                )
+                code_lines.clear()
+                open_fence = ""
+                language = ""
+                in_fence = False
+            else:
+                _flush_markdown()
+                open_fence = line
+                language = stripped[3:].strip()
+                in_fence = True
+            continue
+
+        if in_fence:
+            code_lines.append(line)
+        else:
+            markdown_lines.append(line)
+
+    if in_fence:
+        code_text = "".join(code_lines)
+        segments.append(
+            MarkdownSegment(
+                "code",
+                code_text,
+                f"{open_fence}{code_text}",
+                language=language,
+                closed=False,
+            )
+        )
+    else:
+        _flush_markdown()
+
+    return segments or [MarkdownSegment("markdown", "", "")]
 
 # Matches Markdown links whose href is a local file path (not http/https/ftp/mailto).
 # Rich URL-encodes non-ASCII hrefs, which breaks Cyrillic filenames in output.
@@ -46,12 +119,11 @@ _SIMPLE_LATEX_SYMBOLS = {
 
 def _rewrite_outside_code(text: str, replacer: Callable[[str], str]) -> str:
     parts: list[str] = []
-    last = 0
-    for block in _FENCED_BLOCK_RE.finditer(text):
-        parts.append(_rewrite_outside_inline_code(text[last:block.start()], replacer))
-        parts.append(block.group(0))
-        last = block.end()
-    parts.append(_rewrite_outside_inline_code(text[last:], replacer))
+    for segment in split_markdown_segments(text):
+        if segment.kind == "code":
+            parts.append(segment.raw)
+        else:
+            parts.append(_rewrite_outside_inline_code(segment.text, replacer))
     return "".join(parts)
 
 
@@ -386,13 +458,12 @@ def build_tool_ui_labels(
 
 
 def _collapse_non_code_markdown(text: str) -> str:
-    parts = []
-    last_index = 0
-    for match in _FENCED_BLOCK_RE.finditer(text):
-        parts.append(_CLEAN_MD_RE.sub("\n\n", text[last_index:match.start()]))
-        parts.append(match.group(0))
-        last_index = match.end()
-    parts.append(_CLEAN_MD_RE.sub("\n\n", text[last_index:]))
+    parts: list[str] = []
+    for segment in split_markdown_segments(text):
+        if segment.kind == "code":
+            parts.append(segment.raw)
+        else:
+            parts.append(_CLEAN_MD_RE.sub("\n\n", segment.text))
     return "".join(parts)
 
 
@@ -579,7 +650,7 @@ def _format_cli_output(content: str) -> str:
     first_line = lines[0].replace("[stderr]", "").strip()
     preview = truncate_value(first_line, 60)
     if len(lines) > 1:
-        return f"{preview} [dim](+{len(lines) - 1} lines)[/]"
+        return f"{preview} (+{len(lines) - 1} lines)"
     return preview
 
 
@@ -613,7 +684,7 @@ def format_tool_output(name: str, content: str, is_error: bool) -> str:
         if "error[access_denied]" in lower_content or "cancelled by approval policy" in lower_content:
             return "Skipped"
         summary = truncate_value(content, 120)
-        return f"[red]{summary}[/][yellow italic]{_hint_for_error(content)}[/]"
+        return f"{summary}{_hint_for_error(content)}"
 
     name_lower = name.lower()
     for predicate, formatter in OUTPUT_RULES:

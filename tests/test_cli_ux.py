@@ -18,7 +18,8 @@ from core.tool_policy import ToolMetadata
 from ui.runtime import build_runtime_snapshot, summarize_approval_request
 from ui.streaming import StreamEvent
 from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
-from ui.widgets.foundation import AutoTextBrowser, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
+from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
+from ui.widgets.messages import AssistantMessageWidget
 
 
 class FakeTool:
@@ -301,6 +302,19 @@ class GuiUxTests(unittest.TestCase):
         enabled_icon_key = self.window.send_button.icon().cacheKey()
         self.assertTrue(self.window.send_button.isEnabled())
         self.assertNotEqual(disabled_icon_key, enabled_icon_key)
+
+    def test_assistant_message_widget_renders_unclosed_fenced_block_as_code_widget(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_markdown("Вот код:\n```python\nprint('hi')\n")
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 2)
+        self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+        self.assertIsInstance(widget.parts_widgets[1], CodeBlockWidget)
+        self.assertEqual(widget.parts_widgets[1].editor.toPlainText(), "print('hi')")
+        self.assertEqual(widget.parts_widgets[1].title_label.text(), "PYTHON")
 
     def test_user_choice_card_renders_above_composer_and_resumes_selected_option(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -865,6 +879,27 @@ class GuiUxTests(unittest.TestCase):
         self.assertIn("Success", tool_card.args_view.toPlainText())
         self.assertNotIn('"path"', tool_card.args_view.toPlainText())
 
+    def test_assistant_message_widget_preserves_prose_around_fenced_json_block(self):
+        widget = AssistantMessageWidget()
+        widget.set_markdown(
+            "Ошибка парсинга JSON: модель часто оборачивает JSON в блоки кода (\n"
+            "```json\n"
+            '{"name":"cli_exec","args":{"command":"python test.py"}}\n'
+            "```\n"
+            "), которые стандартный json.loads не обрабатывает."
+        )
+        self._process_events()
+
+        visible_parts = [part for part in widget.parts_widgets if not part.isHidden()]
+        self.assertEqual(len(visible_parts), 3)
+        self.assertIsInstance(visible_parts[0], AutoTextBrowser)
+        self.assertIsInstance(visible_parts[1], CodeBlockWidget)
+        self.assertIsInstance(visible_parts[2], AutoTextBrowser)
+        self.assertIn("Ошибка парсинга JSON", visible_parts[0].toPlainText())
+        self.assertEqual(visible_parts[1].title_label.text(), "JSON")
+        self.assertIn('"name":"cli_exec"', visible_parts[1].editor.toPlainText())
+        self.assertIn("json.loads", visible_parts[2].toPlainText())
+
     def test_preview_tool_card_stays_hidden_until_resolved_refresh_arrives(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Сохрани файл"}))
@@ -1202,6 +1237,86 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsNotNone(tool_card.cli_exec_widget)
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
         self.assertEqual(tool_card.phase_badge.text(), "✓")
+
+    def test_restoring_transcript_does_not_show_transient_top_level_widgets(self):
+        class _ShowSpy(QObject):
+            def __init__(self, main_window) -> None:
+                super().__init__()
+                self.main_window = main_window
+                self.top_level_widgets: list[tuple[str, str, str]] = []
+
+            def eventFilter(self, obj, event):  # type: ignore[override]
+                if event.type() != QEvent.Show:
+                    return False
+                if not hasattr(obj, "isWindow") or not hasattr(obj, "parentWidget"):
+                    return False
+                if not obj.isWindow():
+                    return False
+                if obj is self.main_window:
+                    return False
+                self.top_level_widgets.append(
+                    (
+                        type(obj).__name__,
+                        getattr(obj, "objectName", lambda: "")(),
+                        getattr(obj, "windowTitle", lambda: "")(),
+                    )
+                )
+                return False
+
+        payload = self._snapshot_payload()
+        payload["transcript"] = {
+            "summary_notice": "",
+            "turns": [
+                {
+                    "user_text": "прочитай и поправь",
+                    "blocks": [
+                        {
+                            "type": "tool",
+                            "payload": {
+                                "tool_id": "call-read",
+                                "name": "read_file",
+                                "args": {"path": "index.html"},
+                                "display": "Reading file",
+                                "subtitle": "index.html",
+                                "raw_display": "read_file(index.html)",
+                                "args_state": "complete",
+                                "display_state": "finished",
+                                "phase": "finished",
+                                "source_kind": "tool",
+                                "content": "Read 10 lines.",
+                            },
+                        },
+                        {
+                            "type": "tool",
+                            "payload": {
+                                "tool_id": "call-edit",
+                                "name": "edit_file",
+                                "args": {"path": "index.html"},
+                                "display": "Editing file",
+                                "subtitle": "index.html",
+                                "raw_display": "edit_file(index.html)",
+                                "args_state": "complete",
+                                "display_state": "finished",
+                                "phase": "finished",
+                                "source_kind": "tool",
+                                "content": "Success: File edited.",
+                                "diff": "@@ -1 +1 @@\n-old\n+new",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        spy = _ShowSpy(self.window)
+        self.app.installEventFilter(spy)
+        self.addCleanup(lambda: self.app.removeEventFilter(spy))
+        self.window.show()
+        self._process_events()
+
+        self.window._handle_initialized(payload)
+        self._process_events()
+
+        self.assertEqual(spy.top_level_widgets, [])
 
     def test_finished_tool_restored_from_transcript_keeps_success_badge(self):
         payload = self._snapshot_payload()

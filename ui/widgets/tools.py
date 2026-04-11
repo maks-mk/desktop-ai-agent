@@ -162,8 +162,8 @@ class CliExecWidget(QFrame):
 
 
 class ToolCardWidget(QFrame):
-    def __init__(self, payload: dict[str, Any]) -> None:
-        super().__init__()
+    def __init__(self, payload: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("ToolRow")
         self.setFrameShape(QFrame.NoFrame)
         self.tool_id = payload.get("tool_id", "")

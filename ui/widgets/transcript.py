@@ -11,8 +11,13 @@ from .tools import ToolCardWidget
 
 
 class ConversationTurnWidget(QWidget):
-    def __init__(self, user_text: str, attachments: list[dict[str, Any]] | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        user_text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self._assistant_markdown = ""
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -22,7 +27,7 @@ class ConversationTurnWidget(QWidget):
         self.tool_cards: dict[str, ToolCardWidget] = {}
         self.status_widget: StatusIndicatorWidget | None = None
         self.summary_notice_widget: NoticeWidget | None = None
-        self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or [])))
+        self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or []), parent=self))
 
     @staticmethod
     def _common_prefix_length(first: str, second: str) -> int:
@@ -45,7 +50,7 @@ class ConversationTurnWidget(QWidget):
 
     def set_status(self, label: str, *, meta: str = "", phase: str = "working") -> None:
         if self.status_widget is None:
-            self.status_widget = StatusIndicatorWidget(label)
+            self.status_widget = StatusIndicatorWidget(label, parent=self)
             self._layout.addWidget(self.status_widget)
         else:
             self._layout.removeWidget(self.status_widget)
@@ -64,7 +69,7 @@ class ConversationTurnWidget(QWidget):
         if not text:
             return
         if self.summary_notice_widget is None:
-            self.summary_notice_widget = NoticeWidget(text, level=level)
+            self.summary_notice_widget = NoticeWidget(text, level=level, parent=self)
             self._layout.addWidget(self.summary_notice_widget)
         else:
             self.summary_notice_widget.set_message(text)
@@ -83,7 +88,7 @@ class ConversationTurnWidget(QWidget):
     def _ensure_assistant_segment(self) -> AssistantMessageWidget:
         if self._timeline and self._timeline[-1][0] == "assistant":
             return self._timeline[-1][1]  # type: ignore[return-value]
-        segment = AssistantMessageWidget()
+        segment = AssistantMessageWidget(parent=self)
         self.assistant_segments.append(segment)
         self._append_block("assistant", segment)
         return segment
@@ -114,10 +119,10 @@ class ConversationTurnWidget(QWidget):
         self._assistant_markdown = markdown
 
     def add_notice(self, message: str, level: str = "info") -> None:
-        self._append_block("notice", NoticeWidget(message, level=level))
+        self._append_block("notice", NoticeWidget(message, level=level, parent=self))
 
     def add_assistant_message(self, markdown: str) -> AssistantMessageWidget:
-        segment = AssistantMessageWidget()
+        segment = AssistantMessageWidget(parent=self)
         segment.set_markdown(markdown)
         self.assistant_segments.append(segment)
         self._append_block("assistant", segment)
@@ -128,7 +133,7 @@ class ConversationTurnWidget(QWidget):
         tool_id = payload.get("tool_id", "")
         card = self.tool_cards.get(tool_id)
         if card is None:
-            card = ToolCardWidget(payload)
+            card = ToolCardWidget(payload, parent=self)
             self.tool_cards[tool_id] = card
             self._append_block("tool", card)
         card.update_started_payload(payload)
@@ -161,7 +166,7 @@ class ConversationTurnWidget(QWidget):
         )
 
     def complete(self, stats: str) -> None:
-        self._append_block("stats", RunStatsWidget(stats))
+        self._append_block("stats", RunStatsWidget(stats, parent=self))
 
     def restore_blocks(self, blocks: list[dict[str, Any]]) -> None:
         for block in blocks:
@@ -240,11 +245,11 @@ class ChatTranscriptWidget(QWidget):
         self._range_follow_force = False
 
     def add_global_notice(self, message: str, level: str = "info") -> None:
-        self.layout.insertWidget(self.layout.count() - 1, NoticeWidget(message, level=level))
+        self.layout.insertWidget(self.layout.count() - 1, NoticeWidget(message, level=level, parent=self.column))
         self.notify_content_changed()
 
     def start_turn(self, user_text: str, attachments: list[dict[str, Any]] | None = None) -> ConversationTurnWidget:
-        turn = ConversationTurnWidget(user_text, attachments=attachments)
+        turn = ConversationTurnWidget(user_text, attachments=attachments, parent=self.column)
         self.layout.insertWidget(self.layout.count() - 1, turn)
         self.notify_content_changed(force=True)
         return turn
@@ -258,7 +263,7 @@ class ChatTranscriptWidget(QWidget):
         for turn_data in payload.get("turns", []) or []:
             user_text = str(turn_data.get("user_text", "") or "")
             attachments = list(turn_data.get("attachments", []) or [])
-            turn = ConversationTurnWidget(user_text, attachments=attachments)
+            turn = ConversationTurnWidget(user_text, attachments=attachments, parent=self.column)
             turn.restore_blocks(list(turn_data.get("blocks", []) or []))
             self.layout.insertWidget(self.layout.count() - 1, turn)
         self.notify_content_changed(force=True)

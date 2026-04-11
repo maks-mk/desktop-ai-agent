@@ -32,8 +32,9 @@ class ImageAttachmentChipWidget(QFrame):
         *,
         thumb_size: int,
         removable: bool,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self.attachment_id = str(attachment.get("id") or "").strip()
         self.setObjectName("ImageAttachmentCard")
         self.setFrameShape(QFrame.NoFrame)
@@ -44,7 +45,7 @@ class ImageAttachmentChipWidget(QFrame):
         shell.setHorizontalSpacing(0)
         shell.setVerticalSpacing(0)
 
-        self.thumb = QLabel()
+        self.thumb = QLabel(self)
         self.thumb.setObjectName("ImageAttachmentThumb")
         self.thumb.setAlignment(Qt.AlignCenter)
         self.thumb.setFixedSize(thumb_size, thumb_size)
@@ -52,7 +53,7 @@ class ImageAttachmentChipWidget(QFrame):
         self.thumb.setPixmap(self._load_pixmap(attachment, thumb_size))
         shell.addWidget(self.thumb, 0, 0)
 
-        self.remove_button = QToolButton()
+        self.remove_button = QToolButton(self)
         self.remove_button.setObjectName("ImageAttachmentRemoveButton")
         self.remove_button.setAutoRaise(True)
         self.remove_button.setCursor(Qt.PointingHandCursor)
@@ -85,8 +86,8 @@ class ImageAttachmentChipWidget(QFrame):
 class ImageAttachmentStripWidget(QWidget):
     attachment_remove_requested = Signal(str)
 
-    def __init__(self, *, thumb_size: int = 52, removable: bool = False) -> None:
-        super().__init__()
+    def __init__(self, *, thumb_size: int = 52, removable: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self._thumb_size = thumb_size
         self._removable = removable
         self._chips: list[ImageAttachmentChipWidget] = []
@@ -115,6 +116,7 @@ class ImageAttachmentStripWidget(QWidget):
                 attachment,
                 thumb_size=self._thumb_size,
                 removable=self._removable,
+                parent=self,
             )
             chip.remove_requested.connect(self.attachment_remove_requested.emit)
             self._layout.addWidget(chip, 0, Qt.AlignLeft | Qt.AlignTop)

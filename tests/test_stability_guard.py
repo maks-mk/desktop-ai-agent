@@ -302,6 +302,32 @@ class StabilityPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["successful_tool_name"], "read_file")
         self.assertIsNone(result["open_tool_issue"])
 
+    async def test_stability_guard_resets_retry_state_after_successful_tool_result(self):
+        nodes = self._build_nodes()
+        tool_args = {"path": "demo.txt"}
+        state = self._base_state("проверь файл")
+        state["self_correction_retry_count"] = 2
+        state["self_correction_fingerprint_history"] = ["fp-1", "fp-2"]
+        state["recovery_state"]["attempts_by_strategy"] = {"read_file:fp-2": 2}
+        state["recovery_state"]["progress_markers"] = ["fp-2"]
+        state["recovery_state"]["llm_replan_attempted_for"] = ["fp-2"]
+        state["messages"] = [
+            HumanMessage(content="проверь файл"),
+            AIMessage(content="", tool_calls=[{"id": "tc-ok", "name": "read_file", "args": tool_args}]),
+            ToolMessage(content="ok", tool_call_id="tc-ok", name="read_file", additional_kwargs={"tool_args": tool_args}),
+        ]
+
+        result = await nodes.stability_guard_node(state)
+
+        self.assertEqual(result["turn_outcome"], "continue_agent")
+        self.assertEqual(result["completion_reason"], "tool_result_ready_for_agent")
+        self.assertEqual(result["self_correction_retry_count"], 0)
+        self.assertEqual(result["self_correction_fingerprint_history"], [])
+        self.assertEqual(result["recovery_state"]["attempts_by_strategy"], {})
+        self.assertEqual(result["recovery_state"]["progress_markers"], [])
+        self.assertEqual(result["recovery_state"]["llm_replan_attempted_for"], [])
+        self.assertIsNone(result["open_tool_issue"])
+
     async def test_stability_guard_loop_budget_handoff_uses_soft_specific_notice(self):
         nodes = self._build_nodes(MAX_LOOPS=2)
         state = self._base_state("проверь файл")

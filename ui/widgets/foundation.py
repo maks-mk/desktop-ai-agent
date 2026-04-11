@@ -461,8 +461,8 @@ class CodeHighlighter(QSyntaxHighlighter):
 
 
 class CodeBlockWidget(QWidget):
-    def __init__(self, code: str, language: str = "", title: str = "") -> None:
-        super().__init__()
+    def __init__(self, code: str, language: str = "", title: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)

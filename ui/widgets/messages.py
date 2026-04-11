@@ -3,14 +3,15 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
+from core.text_utils import split_markdown_segments
 from ui.theme import ACCENT_BLUE, AMBER_WARNING, ERROR_RED, SUCCESS_GREEN, TEXT_MUTED
 from .attachments import ImageAttachmentStripWidget
 from .foundation import AutoTextBrowser, CodeBlockWidget, _collapsed_user_message_text, _fa_icon
 
 
 class NoticeWidget(QFrame):
-    def __init__(self, message: str, level: str = "info") -> None:
-        super().__init__()
+    def __init__(self, message: str, level: str = "info", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("FlatNoticeRow")
         self.setFrameShape(QFrame.NoFrame)
         self._level = "info"
@@ -48,8 +49,8 @@ class NoticeWidget(QFrame):
 
 
 class RunStatsWidget(QWidget):
-    def __init__(self, stats: str) -> None:
-        super().__init__()
+    def __init__(self, stats: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 60)
         layout.setSpacing(0)
@@ -74,8 +75,8 @@ class RunStatsWidget(QWidget):
 
 
 class StatusIndicatorWidget(QFrame):
-    def __init__(self, label: str) -> None:
-        super().__init__()
+    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("InlineStatusRow")
         self.setFrameShape(QFrame.NoFrame)
         layout = QHBoxLayout(self)
@@ -122,8 +123,8 @@ class StatusIndicatorWidget(QFrame):
 
 
 class UserMessageWidget(QFrame):
-    def __init__(self, text: str, attachments: list[dict] | None = None) -> None:
-        super().__init__()
+    def __init__(self, text: str, attachments: list[dict] | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.full_text = text
         self.preview_text, self.is_expandable = _collapsed_user_message_text(text)
         self.setObjectName("TranscriptRow")
@@ -136,7 +137,7 @@ class UserMessageWidget(QFrame):
         # Пружина выталкивает пузырь вправо
         layout.addStretch(1)
 
-        self.bubble = QFrame()
+        self.bubble = QFrame(self)
         self.bubble.setObjectName("UserBubble")
         self.bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.bubble.setMaximumWidth(720)
@@ -145,11 +146,11 @@ class UserMessageWidget(QFrame):
         bubble_layout.setContentsMargins(14, 10, 14, 10)
         bubble_layout.setSpacing(4)
 
-        self.attachments_strip = ImageAttachmentStripWidget(thumb_size=40, removable=False)
+        self.attachments_strip = ImageAttachmentStripWidget(thumb_size=40, removable=False, parent=self.bubble)
         self.attachments_strip.set_attachments(list(attachments or []))
         bubble_layout.addWidget(self.attachments_strip)
 
-        self.body = QLabel(self.preview_text if self.is_expandable else self.full_text)
+        self.body = QLabel(self.preview_text if self.is_expandable else self.full_text, self.bubble)
         self.body.setObjectName("TranscriptBody")
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
@@ -169,7 +170,7 @@ class UserMessageWidget(QFrame):
         self.body.setVisible(bool(text.strip()))
         bubble_layout.addWidget(self.body)
 
-        self.toggle_button = QToolButton()
+        self.toggle_button = QToolButton(self.bubble)
         self.toggle_button.setObjectName("DisclosureButton")
         self.toggle_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle_button.setAutoRaise(True)
@@ -188,8 +189,8 @@ class UserMessageWidget(QFrame):
 
 
 class AssistantMessageWidget(QFrame):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("TranscriptRow")
         self.setFrameShape(QFrame.NoFrame)
         self._markdown = ""
@@ -206,20 +207,30 @@ class AssistantMessageWidget(QFrame):
 
         self.parts_widgets = []
 
+    @staticmethod
+    def _split_markdown_parts(markdown: str) -> list[tuple[str, str, str]]:
+        parts: list[tuple[str, str, str]] = []
+        for segment in split_markdown_segments(markdown):
+            if segment.kind == "code":
+                parts.append(("code", segment.text, segment.language))
+            elif segment.text.strip() or not parts:
+                parts.append(("markdown", segment.text, ""))
+        return parts
+
     def set_markdown(self, markdown: str) -> None:
         self._markdown = markdown
         text = markdown.strip() or "*Thinking…*"
-        
-        parts = text.split("```")
+
+        parts = self._split_markdown_parts(text)
 
         while len(self.parts_widgets) < len(parts):
             idx = len(self.parts_widgets)
-            is_code = (idx % 2 == 1)
+            is_code = parts[idx][0] == "code"
             if is_code:
-                w = CodeBlockWidget("", "")
+                w = CodeBlockWidget("", "", parent=self.content_widget)
                 self.content_layout.addWidget(w)
             else:
-                w = AutoTextBrowser()
+                w = AutoTextBrowser(self.content_widget)
                 w.setObjectName("AssistantBody")
                 self.content_layout.addWidget(w)
             self.parts_widgets.append(w)
@@ -231,18 +242,16 @@ class AssistantMessageWidget(QFrame):
 
         for idx, part in enumerate(parts):
             w = self.parts_widgets[idx]
-            is_code = (idx % 2 == 1)
-            
+            part_kind, part_text, part_language = part
+            is_code = part_kind == "code"
+
             if is_code:
-                lines = part.split("\n", 1)
-                lang = lines[0].strip() if len(lines) > 0 else ""
-                code = lines[1] if len(lines) > 1 else ""
-                title = lang.upper() if lang else "CODE"
-                w.set_code(code, lang, title)
+                title = part_language.upper() if part_language else "CODE"
+                w.set_code(part_text, part_language, title)
                 w.setVisible(True)
             else:
-                if part.strip() or idx == 0:
-                    w.setMarkdown(part)
+                if part_text.strip() or idx == 0:
+                    w.setMarkdown(part_text)
                     w.setVisible(True)
                 else:
                     w.setVisible(False)
