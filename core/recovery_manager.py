@@ -73,6 +73,25 @@ class RecoveryManager:
             recovery["llm_replan_attempted_for"] = []
         return recovery
 
+    def reset_after_success(
+        self,
+        recovery_state: Any,
+        *,
+        current_turn_id: int,
+        successful_evidence: str = "",
+    ) -> Dict[str, Any]:
+        next_state = self.empty_state(turn_id=current_turn_id)
+        evidence = str(successful_evidence or "").strip()
+        if evidence:
+            next_state["last_successful_evidence"] = evidence
+            return next_state
+
+        current_state = self.get_recovery_state(recovery_state, current_turn_id=current_turn_id)
+        previous_evidence = str(current_state.get("last_successful_evidence") or "").strip()
+        if previous_evidence:
+            next_state["last_successful_evidence"] = previous_evidence
+        return next_state
+
     def repair_plan_strategy_id(self, repair_plan: RepairPlan) -> str:
         payload = {
             "strategy": repair_plan.strategy,

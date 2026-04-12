@@ -388,6 +388,58 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertIsNone(result["open_tool_issue"])
 
+    async def test_retry_counter_resets_after_success_before_later_retryable_error(self):
+        cli_tool = FakeTool(
+            "cli_exec",
+            "ERROR[VALIDATION]: Foreground service/server commands are not supported. Use run_background_process.",
+        )
+        bg_tool = FakeTool("run_background_process", "Success: process started")
+        app, agent_llm = self._build_app(
+            agent_responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "cli_exec", "args": {"command": "python -m http.server"}, "id": "tc-1"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "run_background_process",
+                            "args": {"command": ["python", "-m", "http.server"]},
+                            "id": "tc-2",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "cli_exec", "args": {"command": "python -m http.server"}, "id": "tc-3"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "run_background_process",
+                            "args": {"command": ["python", "-m", "http.server"]},
+                            "id": "tc-4",
+                        }
+                    ],
+                ),
+                AIMessage(content="Готово."),
+            ],
+            tools=[cli_tool, bg_tool],
+        )
+
+        result = await app.ainvoke(
+            self._initial_state("Сделай задачу"),
+            config={"configurable": {"thread_id": "retry-reset-after-success"}, "recursion_limit": 64},
+        )
+
+        self.assertEqual(len(cli_tool.calls), 2)
+        self.assertEqual(len(bg_tool.calls), 2)
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertIsNone(result["open_tool_issue"])
+        self.assertEqual(str(result["messages"][-1].content), "Готово.")
+
     async def test_non_retryable_mutating_execution_issue_handoffs_without_auto_retry(self):
         tool = FakeTool("demo_tool", "ERROR[EXECUTION]: boom")
         app, agent_llm = self._build_app(

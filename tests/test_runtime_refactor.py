@@ -1185,6 +1185,42 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["open_tool_issue"]["kind"], "approval_denied")
         self.assertEqual(result["open_tool_issue"]["turn_id"], 1)
 
+    async def test_tools_node_resets_retry_state_after_successful_result(self):
+        tool = FakeTool("read_file", "Success: file contents")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+
+        state = self._initial_state("Проверь файл")
+        state["self_correction_retry_count"] = 2
+        state["self_correction_retry_turn_id"] = 1
+        state["recovery_state"]["active_issue"] = {"summary": "old issue"}
+        state["recovery_state"]["strategy_queue"] = [{"strategy": "llm_replan"}]
+        state["recovery_state"]["attempts_by_strategy"] = {"read_file:fp-2": 2}
+        state["recovery_state"]["progress_markers"] = ["fp-2"]
+        state["recovery_state"]["llm_replan_attempted_for"] = ["fp-2"]
+        state["messages"] = [
+            HumanMessage(content="Проверь файл"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read_file", "args": {"path": "demo.txt"}, "id": "tc-ok"}],
+            ),
+        ]
+
+        result = await nodes.tools_node(state)
+
+        self.assertEqual(result["self_correction_retry_count"], 0)
+        self.assertEqual(result["self_correction_retry_turn_id"], 1)
+        self.assertEqual(result["self_correction_fingerprint_history"], [])
+        self.assertIsNone(result["open_tool_issue"])
+        self.assertEqual(result["recovery_state"]["attempts_by_strategy"], {})
+        self.assertEqual(result["recovery_state"]["progress_markers"], [])
+        self.assertEqual(result["recovery_state"]["llm_replan_attempted_for"], [])
+        self.assertEqual(result["recovery_state"]["last_successful_evidence"], "Success: file contents")
+
     async def test_run_logger_writes_structured_tool_failure_event(self):
         tmp = self._workspace_tempdir()
         logger = JsonlRunLogger(tmp)

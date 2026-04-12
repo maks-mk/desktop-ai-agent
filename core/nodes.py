@@ -2207,7 +2207,7 @@ class AgentNodes:
                 has_error=has_error,
                 has_open_tool_issue=bool(merged_issue),
             )
-            return {
+            payload = {
                 "messages": final_messages,
                 "turn_id": current_turn_id,
                 "turn_outcome": "run_tools",
@@ -2217,6 +2217,20 @@ class AgentNodes:
                 "last_tool_error": last_error,
                 "last_tool_result": last_result,
             }
+            if not merged_issue:
+                payload.update(
+                    {
+                        "self_correction_retry_count": 0,
+                        "self_correction_retry_turn_id": current_turn_id,
+                        "self_correction_fingerprint_history": [],
+                        "recovery_state": self.recovery_manager.reset_after_success(
+                            state.get("recovery_state"),
+                            current_turn_id=current_turn_id,
+                            successful_evidence=last_result,
+                        ),
+                    }
+                )
+            return payload
         except Exception as e:
             self._log_node_error(
                 state,
