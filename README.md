@@ -129,7 +129,6 @@ python main.py
 ├─ tests/
 ├─ utils/
 ├─ prompt.txt
-├─ prompt_code.txt
 ├─ prompt_dev.txt
 ├─ env_example.txt
 ├─ requirements.txt
