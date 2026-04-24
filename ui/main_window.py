@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
             return
         
         elapsed = time.time() - self._run_start_time
-        elapsed_text = f"{elapsed:.1f}s"
+        elapsed_text = f"{int(elapsed)}s"
         
         # Чтобы не нагружать UI зря, обновляем только если текст изменился
         if self._last_rendered_elapsed_text == elapsed_text:
@@ -676,7 +676,7 @@ class MainWindow(QMainWindow):
         
         if self.current_turn is not None:
             current_elapsed = time.time() - self._run_start_time if self._run_start_time else 0.0
-            self._last_rendered_elapsed_text = f"{current_elapsed:.1f}s"
+            self._last_rendered_elapsed_text = f"{int(current_elapsed)}s"
             
             self.current_turn.set_status(label, meta=self._last_rendered_elapsed_text, phase=phase)
             transcript_changed = True
