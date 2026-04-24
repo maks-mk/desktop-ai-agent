@@ -47,9 +47,9 @@ from ui.widgets import (
     _fa_icon,
 )
 
-COMPOSER_ATTACH_TOOLTIP = "Add images or insert file paths"
+COMPOSER_ATTACH_TOOLTIP = "Add images or Add files"
 COMPOSER_ADD_IMAGE_LABEL = "Add image…"
-COMPOSER_INSERT_FILE_PATH_LABEL = "Insert file path…"
+COMPOSER_INSERT_FILE_PATH_LABEL = "Add files…"
 
 
 def _configure_qt_logging() -> None:
@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
         pill_layout.addWidget(self.composer_notice_label)
 
         self.composer = ComposerTextEdit()
-        self.composer.setPlaceholderText("Ask the agent, attach images, or insert file paths…")
+        self.composer.setPlaceholderText("Ask the agent, attach images, or @-Add files…")
         self.composer.setAccessibleName("Composer")
         self.composer.setAccessibleDescription("Write a request for the agent")
         line_spacing = max(14, self.composer.fontMetrics().lineSpacing())
@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         self.attach_button.setObjectName("ComposerAttachButton")
         self.attach_button.setToolTip(COMPOSER_ATTACH_TOOLTIP)
         self.attach_button.setAccessibleName("Add attachments")
-        self.attach_button.setAccessibleDescription("Add images or insert file paths")
+        self.attach_button.setAccessibleDescription("Add images or Add files")
         self.attach_menu = QMenu(self.attach_button)
         self.add_image_action = self.attach_menu.addAction(COMPOSER_ADD_IMAGE_LABEL)
         self.insert_file_path_action = self.attach_menu.addAction(COMPOSER_INSERT_FILE_PATH_LABEL)

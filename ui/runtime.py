@@ -257,7 +257,7 @@ def build_help_markdown() -> str:
         "- Use **Shift+Enter** for a new line.\n"
         "- Use **Up/Down** in an empty composer to browse earlier prompts from the current chat.\n"
         "- Type **@** to mention files from the current workspace.\n"
-        "- Use the **+** button to attach images or insert file paths.\n"
+        "- Use the **+** button to attach images or Add files.\n"
         "- You can also paste images or files directly into the composer.\n"
         "- Use **Ctrl+N** for **New Session**.\n"
         "- Use **Ctrl+B** to show or hide the chat history sidebar.\n"
