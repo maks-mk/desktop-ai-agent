@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent
@@ -33,6 +32,7 @@ from core.multimodal import (
 )
 from core.model_profiles import normalize_profiles_payload
 from ui.runtime import AgentRuntimeController
+from ui.main_window_state import ComposerStateController, RunStatusController, StreamEventRouter
 from ui.theme import ACCENT_BLUE, ERROR_RED, SUCCESS_GREEN, TEXT_MUTED, build_stylesheet
 from ui.widgets import (
     ApprovalRequestCardWidget,
@@ -47,7 +47,7 @@ from ui.widgets import (
     _fa_icon,
 )
 
-COMPOSER_ATTACH_TOOLTIP = "Add images or Add files"
+COMPOSER_ATTACH_TOOLTIP = "Add images or insert file paths"
 COMPOSER_ADD_IMAGE_LABEL = "Add image…"
 COMPOSER_INSERT_FILE_PATH_LABEL = "Add files…"
 
@@ -96,6 +96,9 @@ class MainWindow(QMainWindow):
         
         self._realtime_timer = QTimer(self)
         self._realtime_timer.timeout.connect(self._update_realtime_elapsed)
+        self._composer_state = ComposerStateController(self)
+        self._status_controller = RunStatusController(self)
+        self._event_router: StreamEventRouter | None = None
         
         self._build_ui()
         self._connect_signals()
@@ -104,23 +107,7 @@ class MainWindow(QMainWindow):
             self.controller.initialize()
 
     def _update_realtime_elapsed(self) -> None:
-        if self.current_turn is None or self._run_start_time is None or not self.is_busy:
-            return
-        
-        elapsed = time.time() - self._run_start_time
-        elapsed_text = f"{int(elapsed)}s"
-        
-        # Чтобы не нагружать UI зря, обновляем только если текст изменился
-        if self._last_rendered_elapsed_text == elapsed_text:
-            return
-            
-        self._last_rendered_elapsed_text = elapsed_text
-        self.current_turn.set_status(
-            self._current_status_label, 
-            meta=elapsed_text, 
-            phase=self._current_status_phase
-        )
-        self.transcript.notify_content_changed()
+        self._status_controller.update_realtime_elapsed()
     
     def _build_ui(self) -> None:
         self.setWindowTitle(f"AI Agent {AGENT_VERSION}")
@@ -485,9 +472,8 @@ class MainWindow(QMainWindow):
         self.controller.busy_changed.connect(self._handle_busy_changed)
 
     def _build_event_dispatch(self) -> None:
-        """Build a dispatch table for stream events, replacing the long if/elif chain.
-        Handlers are called with (payload: dict) when the matching event arrives."""
-        self._event_handlers: dict = {
+        self._event_router = StreamEventRouter(
+            {
             "run_started": self._on_run_started,
             "status_changed": self._on_status_changed,
             "assistant_delta": self._on_assistant_delta,
@@ -500,127 +486,58 @@ class MainWindow(QMainWindow):
             "run_finished": self._on_run_finished,
             "run_failed": self._on_run_failed,
             "chat_reset": self._on_chat_reset,
-        }
+            }
+        )
+        self._event_handlers = self._event_router.handlers
 
     def _queue_composer_height_sync(self, *_args) -> None:
-        if self._composer_height_sync_pending:
-            return
-        self._composer_height_sync_pending = True
-        QTimer.singleShot(0, self._flush_composer_height_sync)
+        self._composer_state.queue_height_sync(*_args)
 
     def _flush_composer_height_sync(self) -> None:
-        self._composer_height_sync_pending = False
-        self._update_composer_height()
+        self._composer_state.flush_height_sync()
 
     def _composer_visual_line_count(self) -> int:
-        """Count visual lines (including soft-wrap) in the composer document."""
-        block = self.composer.document().firstBlock()
-        total_lines = 0
-        while block.isValid():
-            layout = block.layout()
-            line_count = int(layout.lineCount()) if layout is not None else 0
-            total_lines += max(1, line_count)
-            block = block.next()
-        return max(1, total_lines)
+        return self._composer_state.composer_visual_line_count()
 
     def _update_composer_height(self, *_args) -> None:
-        """Auto-resize the composer text field as the user types."""
-        line_spacing = max(14, self.composer.fontMetrics().lineSpacing())
-        visual_lines = self._composer_visual_line_count()
-        doc_height = (visual_lines * line_spacing) + self._composer_height_padding
-        # Grow only for a couple of additional lines, then keep fixed height and let the scrollbar handle overflow.
-        new_height = max(self._composer_min_height, min(doc_height, self._composer_max_height))
-        if self.composer.height() != new_height:
-            self.composer.setFixedHeight(new_height)
+        self._composer_state.update_height(*_args)
 
     def _active_model_supports_images(self) -> bool:
         capabilities = resolve_model_capabilities(self._active_model_profile(), self.model_capabilities)
         return bool(capabilities.get("image_input_supported"))
 
     def _composer_has_request_content(self) -> bool:
-        return bool(self.composer.toPlainText().strip() or self.draft_image_attachments)
+        return self._composer_state.composer_has_request_content()
 
     def _request_blocked_by_image_capability(self) -> bool:
-        return bool(self.draft_image_attachments) and not self._active_model_supports_images()
+        return self._composer_state.request_blocked_by_image_capability()
 
     def _show_composer_notice(self, message: str, *, level: str = "warning") -> None:
-        self.composer_notice_label.setText(str(message or "").strip())
-        self.composer_notice_label.setProperty("severity", level)
-        self.composer_notice_label.style().unpolish(self.composer_notice_label)
-        self.composer_notice_label.style().polish(self.composer_notice_label)
-        self.composer_notice_label.setVisible(bool(message))
+        self._composer_state.show_composer_notice(message, level=level)
 
     def _clear_composer_notice(self) -> None:
-        self.composer_notice_label.clear()
-        self.composer_notice_label.setProperty("severity", "")
-        self.composer_notice_label.style().unpolish(self.composer_notice_label)
-        self.composer_notice_label.style().polish(self.composer_notice_label)
-        self.composer_notice_label.setVisible(False)
+        self._composer_state.clear_composer_notice()
 
     def _refresh_draft_attachments(self) -> None:
-        self.composer_attachments_strip.set_attachments(self.draft_image_attachments)
-        self._refresh_submit_controls()
+        self._composer_state.refresh_draft_attachments()
 
     def _clear_draft_image_attachments(self) -> None:
-        self.draft_image_attachments = []
-        self._refresh_draft_attachments()
+        self._composer_state.clear_draft_image_attachments()
 
     def _append_draft_image_attachments(self, attachments: list[dict] | None) -> None:
-        existing_paths = {str(item.get("path") or "").strip() for item in self.draft_image_attachments}
-        for attachment in normalize_image_attachments(attachments):
-            path = str(attachment.get("path") or "").strip()
-            if path and path not in existing_paths:
-                self.draft_image_attachments.append(attachment)
-                existing_paths.add(path)
-        self._refresh_draft_attachments()
+        self._composer_state.append_draft_image_attachments(attachments)
 
     def _remove_draft_attachment(self, attachment_id: str) -> None:
-        target_id = str(attachment_id or "").strip()
-        if not target_id:
-            return
-        self.draft_image_attachments = [
-            item for item in self.draft_image_attachments if str(item.get("id") or "").strip() != target_id
-        ]
-        if not self.draft_image_attachments:
-            self._clear_composer_notice()
-        self._refresh_draft_attachments()
+        self._composer_state.remove_draft_attachment(attachment_id)
 
     def _import_image_files(self, file_paths: list[str]) -> None:
-        if not file_paths:
-            return
-        if not self._active_model_supports_images():
-            self._show_composer_notice(
-                "Current model does not support image input. Switch models or use Add files instead.",
-                level="warning",
-            )
-            return
-        imported: list[dict] = []
-        for path in file_paths:
-            try:
-                imported.append(import_image_attachment_from_file(path, session_id=self.active_session_id))
-            except ValueError as exc:
-                self._show_composer_notice(str(exc), level="warning")
-        if imported:
-            self._append_draft_image_attachments(imported)
-            self._clear_composer_notice()
+        self._composer_state.import_image_files(file_paths)
 
     def _handle_pasted_image(self, image: object) -> None:
-        if not self._active_model_supports_images():
-            self._show_composer_notice(
-                "Current model does not support image input. Switch models or remove the pasted image.",
-                level="warning",
-            )
-            return
-        try:
-            attachment = import_image_attachment_from_qimage(image, session_id=self.active_session_id)
-        except ValueError as exc:
-            self._show_composer_notice(str(exc), level="warning")
-            return
-        self._append_draft_image_attachments([attachment])
-        self._clear_composer_notice()
+        self._composer_state.handle_pasted_image(image)
 
     def _handle_pasted_image_files(self, file_paths: object) -> None:
-        self._import_image_files([str(path) for path in list(file_paths or []) if str(path or "").strip()])
+        self._composer_state.handle_pasted_image_files(file_paths)
 
     def _refresh_submit_controls(self, *_args) -> None:
         self._set_input_enabled(True)
@@ -632,63 +549,10 @@ class MainWindow(QMainWindow):
     # --- Individual event handlers (called from dispatch table) ---
 
     def _on_run_started(self, payload: dict) -> None:
-        self._clear_user_choice_request()
-        self._clear_approval_request()
-        self.current_turn = self.transcript.start_turn(
-            payload.get("text", ""),
-            attachments=list(payload.get("attachments", []) or[]),
-        )
-        self._summarize_in_progress = False
-        
-        # Запоминаем время и статус
-        self._run_start_time = time.time()
-        self._current_status_label = "Analyzing request"
-        self._current_status_phase = "working"
-        
-        if self.current_turn is not None:
-            self.current_turn.set_status(self._current_status_label, phase=self._current_status_phase)
-            self.transcript.notify_content_changed()
-            
-        self._set_status_visual("Analyzing request…", busy=True)
-        self._realtime_timer.start(100)  # Запускаем обновление 10 раз в секунду
+        self._status_controller.on_run_started(payload)
         
     def _on_status_changed(self, payload: dict) -> None:
-        label = payload.get("label")
-        node = str(payload.get("node", "") or "")
-        elapsed_text = str(payload.get("elapsed_text", "") or "")
-        phase = str(payload.get("phase", "working") or "working")
-        if not label:
-            return
-
-        self._current_status_label = label
-        self._current_status_phase = phase
-
-        # Синхронизируем локальный отсчет с актуальным временем сервера
-        try:
-            if elapsed_text.endswith("s"):
-                server_elapsed = float(elapsed_text[:-1])
-                self._run_start_time = time.time() - server_elapsed
-        except ValueError:
-            pass
-
-        self._set_status_visual(label, busy=node != "approval")
-        transcript_changed = False
-        
-        if self.current_turn is not None:
-            current_elapsed = time.time() - self._run_start_time if self._run_start_time else 0.0
-            self._last_rendered_elapsed_text = f"{int(current_elapsed)}s"
-            
-            self.current_turn.set_status(label, meta=self._last_rendered_elapsed_text, phase=phase)
-            transcript_changed = True
-            
-            if node == "summarize":
-                self._summarize_in_progress = True
-                self.current_turn.set_summary_notice("Context is being compressed automatically…", level="info")
-            elif self._summarize_in_progress:
-                self._summarize_in_progress = False
-                self.current_turn.set_summary_notice("Context compressed", level="success")
-            if transcript_changed:
-                self.transcript.notify_content_changed()
+        self._status_controller.on_status_changed(payload)
     
     def _on_assistant_delta(self, payload: dict) -> None:
         if self.current_turn is None:
@@ -761,68 +625,24 @@ class MainWindow(QMainWindow):
         self.transcript.notify_content_changed()
 
     def _on_run_finished(self, payload: dict) -> None:
-        self._realtime_timer.stop() # <-- Остановка
-        if self.current_turn is not None:
-            self.current_turn.clear_status()
-            self.current_turn.complete(payload.get("stats", ""))
-            self.transcript.notify_content_changed()
-        self.status_meta.setText("")
-        self._set_status_visual("Ready", success=True)
+        self._status_controller.on_run_finished(payload)
 
     def _on_run_failed(self, payload: dict) -> None:
-        self._realtime_timer.stop() # <-- Остановка
-        self.status_meta.setText("")
-        msg = payload.get("message", "Run failed")
-        if self.current_turn is not None:
-            self.current_turn.clear_status()
-            self.current_turn.add_notice(msg, level="error")
-            self.transcript.notify_content_changed()
-        else:
-            self.transcript.add_global_notice(msg, level="error")
-        self._set_status_visual("Run failed", error=True)
+        self._status_controller.on_run_failed(payload)
 
     def _on_chat_reset(self, _payload: dict) -> None:
-        self._realtime_timer.stop() # <-- Остановка
-        self.composer.reset_history_navigation()
-        self.current_turn = None
-        self.transcript.clear_transcript()
-        self._clear_draft_image_attachments()
-        self._clear_composer_notice()
-        self._clear_user_choice_request()
-        self._clear_approval_request()
-        self._show_transient_status_message("Started a new session")
+        self._status_controller.on_chat_reset()
 
     # --------------------------------------------------------------------------
 
     def _set_primary_status_message(self, label: str) -> None:
-        self._primary_status_label = label
-        self._status_message_ticket += 1
-        self.status_line_label.setText(label)
+        self._status_controller.set_primary_status_message(label)
 
     def _show_transient_status_message(self, label: str, timeout_ms: int = 1800) -> None:
-        self._status_message_ticket += 1
-        ticket = self._status_message_ticket
-        self.status_line_label.setText(label)
-
-        def _restore() -> None:
-            if ticket != self._status_message_ticket:
-                return
-            self.status_line_label.setText(self._primary_status_label)
-
-        QTimer.singleShot(timeout_ms + 30, _restore)
+        self._status_controller.show_transient_status_message(label, timeout_ms=timeout_ms)
 
     def _set_status_visual(self, label: str, *, busy: bool = False, success: bool = False, error: bool = False) -> None:
-        color = ACCENT_BLUE if busy else SUCCESS_GREEN if success else ERROR_RED if error else ACCENT_BLUE
-        icon_name = "fa5s.spinner" if busy else "fa5s.check-circle" if success else "fa5s.times-circle" if error else "fa5s.circle"
-        self.status_text.setText(label)
-        self.status_icon.setPixmap(_fa_icon(icon_name, color=color, size=14).pixmap(14, 14))
-        self.top_status_chip.setText(label)
-        self.top_status_chip.setProperty("statusState", "busy" if busy else "success" if success else "error" if error else "idle")
-        style = self.top_status_chip.style()
-        if style is not None:
-            style.unpolish(self.top_status_chip)
-            style.polish(self.top_status_chip)
-        self._set_primary_status_message(label)
+        self._status_controller.set_status_visual(label, busy=busy, success=success, error=error)
 
     def _toggle_info_popup(self) -> None:
         self._set_inspector_collapsed(not self.inspector_collapsed)
@@ -1040,32 +860,11 @@ class MainWindow(QMainWindow):
             self._clear_approval_request()
 
     def _handle_busy_changed(self, busy: bool) -> None:
-        self.is_busy = busy
-
-        if not busy:
-            self._realtime_timer.stop()
-        elif self.current_turn is not None and not self._realtime_timer.isActive():
-            # Возобновляем таймер, если снова заняты (например, после подтверждения юзером)
-            self._realtime_timer.start(100)
-            
-        # Swap send/stop affordances depending on whether a run is active.
-        self.send_button.setVisible(not busy)
-        self.stop_action_button.setVisible(busy)
-
-        if busy:
-            self._set_status_visual("Working…", busy=True)
-        else:
-            if not self.awaiting_approval and not self.awaiting_user_choice:
-                self._set_status_visual("Ready", success=True)
-                self.status_meta.setText("")
-        self._set_input_enabled(True)
+        self._status_controller.handle_busy_changed(busy)
         
     def _handle_event(self, event) -> None:
-        event_type = getattr(event, "type", "")
-        payload = getattr(event, "payload", {})
-        handler = self._event_handlers.get(event_type)
-        if handler:
-            handler(payload)
+        if self._event_router is not None:
+            self._event_router.dispatch(event)
 
     def _handle_approval_request(self, payload: dict) -> None:
         self.awaiting_approval = True

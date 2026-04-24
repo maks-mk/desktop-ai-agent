@@ -515,6 +515,24 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertEqual(self.window.composer.toPlainText(), "Список:\nfirst.py\nsecond.py\n")
 
+    def test_composer_drop_local_file_url_does_not_append_raw_file_uri_text(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        file_path = self._make_test_file("dropped.txt")
+        self.window.composer.setPlainText("Открой ")
+        self.window.composer.moveCursor(QTextCursor.MoveOperation.End)
+
+        mime = QMimeData()
+        from PySide6.QtCore import QUrl
+
+        mime.setUrls([QUrl.fromLocalFile(file_path)])
+        mime.setText(f"{file_path}file:///{file_path.replace(':', ':/')}")
+        self.window.composer.insertFromMimeData(mime)
+
+        self.assertEqual(
+            self.window.composer.toPlainText(),
+            f"Открой {self.window.composer.format_file_reference(file_path)}",
+        )
+
     def test_copy_safe_plain_text_edit_copies_plain_text_without_hidden_paragraph_breaks(self):
         editor = CopySafePlainTextEdit()
         editor.setPlainText("alpha.py")
@@ -677,6 +695,33 @@ class GuiUxTests(unittest.TestCase):
         ]
         self.assertIn("docs/", items)
         self.assertIn("docs/readme.md", items)
+
+    def test_mention_popup_refresh_sees_files_created_after_startup(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        temp_root = Path.cwd() / ".tmp_tests" / f"composer-mention-{time.time_ns()}"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: temp_root.exists() and shutil.rmtree(temp_root, ignore_errors=True))
+
+        with mock.patch("ui.widgets.composer.Path.cwd", return_value=temp_root):
+            self.window.composer.setPlainText("@late")
+            self.window.composer.moveCursor(QTextCursor.MoveOperation.End)
+            self.window.composer._refresh_mention_popup()
+            self.assertFalse(self.window.composer._mention_popup.isVisible())
+
+            late_dir = temp_root / "late-dir"
+            late_dir.mkdir()
+            late_file = late_dir / "late-file.txt"
+            late_file.write_text("demo", encoding="utf-8")
+
+            self.window.composer._refresh_mention_popup()
+
+        self.assertTrue(self.window.composer._mention_popup.isVisible())
+        items = [
+            self.window.composer._mention_popup.list_widget.item(index).text()
+            for index in range(self.window.composer._mention_popup.list_widget.count())
+        ]
+        self.assertIn("late-dir/", items)
+        self.assertIn("late-dir/late-file.txt", items)
 
     def test_mention_popup_closes_on_escape_no_matches_and_cursor_change(self):
         self.window._handle_initialized(self._snapshot_payload())

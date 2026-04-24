@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 # --- Claude.ai Neutral-Warm Dark Theme ---
 ACCENT_BLUE = "#A8A49E"          # Нейтральный тёплый серый акцент
 ACCENT_BLUE_SOFT = "#2A2825"     # Очень слабый тёплый оттенок для hover
@@ -52,18 +54,39 @@ def blend_hex(start_hex: str, end_hex: str, factor: float) -> str:
     return "#{:02X}{:02X}{:02X}".format(*blended)
 
 
-def build_stylesheet() -> str:
+def _build_theme_palette() -> dict[str, str]:
     transcript_panel_bg = blend_hex(SURFACE_CARD, SURFACE_ALT, 0.18)
-    transcript_panel_border = blend_hex(BORDER, "#FFFFFF", 0.08)
-    transcript_panel_hover = blend_hex(SURFACE_CARD, SURFACE_ALT, 0.32)
     tool_panel_bg = blend_hex(SURFACE_CARD, "#FFFFFF", 0.04)
-    tool_panel_border = blend_hex(tool_panel_bg, "#FFFFFF", 0.04)
-    tool_panel_hover = blend_hex(tool_panel_bg, "#FFFFFF", 0.05)
-    tool_code_bg = blend_hex(SURFACE_CARD, "#FFFFFF", 0.07)
     tool_toggle_text = blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.26)
-    tool_toggle_hover_text = blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.52)
-    tool_call_idle = blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.18)
-    tool_call_hover = blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.42)
+    return {
+        "transcript_panel_bg": transcript_panel_bg,
+        "transcript_panel_border": blend_hex(BORDER, "#FFFFFF", 0.08),
+        "transcript_panel_hover": blend_hex(SURFACE_CARD, SURFACE_ALT, 0.32),
+        "tool_panel_bg": tool_panel_bg,
+        "tool_panel_border": blend_hex(tool_panel_bg, "#FFFFFF", 0.04),
+        "tool_panel_hover": blend_hex(tool_panel_bg, "#FFFFFF", 0.05),
+        "tool_code_bg": blend_hex(SURFACE_CARD, "#FFFFFF", 0.07),
+        "tool_toggle_text": tool_toggle_text,
+        "tool_toggle_hover_text": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.52),
+        "tool_call_idle": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.18),
+        "tool_call_hover": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.42),
+    }
+
+
+@lru_cache(maxsize=1)
+def build_stylesheet() -> str:
+    palette = _build_theme_palette()
+    transcript_panel_bg = palette["transcript_panel_bg"]
+    transcript_panel_border = palette["transcript_panel_border"]
+    transcript_panel_hover = palette["transcript_panel_hover"]
+    tool_panel_bg = palette["tool_panel_bg"]
+    tool_panel_border = palette["tool_panel_border"]
+    tool_panel_hover = palette["tool_panel_hover"]
+    tool_code_bg = palette["tool_code_bg"]
+    tool_toggle_text = palette["tool_toggle_text"]
+    tool_toggle_hover_text = palette["tool_toggle_hover_text"]
+    tool_call_idle = palette["tool_call_idle"]
+    tool_call_hover = palette["tool_call_hover"]
     return f"""
     QWidget {{
         background: {SURFACE_BG};

@@ -31,6 +31,7 @@ class ComposerTextEdit(QPlainTextEdit):
         self._history_nav_index = 0
         self._file_index: list[dict[str, Any]] = []
         self._file_index_root = ""
+        self._file_index_static = False
         self._mention_popup = _ComposerMentionPopup(self)
         self._mention_popup.file_selected.connect(self._insert_selected_mention)
         self.textChanged.connect(self._refresh_mention_popup)
@@ -92,6 +93,7 @@ class ComposerTextEdit(QPlainTextEdit):
     def set_file_index_for_testing(self, rel_paths: list[str]) -> None:
         root = Path.cwd()
         self._file_index_root = str(root)
+        self._file_index_static = True
         rows: dict[str, dict[str, Any]] = {}
         for value in rel_paths:
             relative_path = Path(value)
@@ -151,8 +153,10 @@ class ComposerTextEdit(QPlainTextEdit):
         if source.hasUrls():
             parts = []
             image_paths: list[str] = []
+            handled_local_urls = False
             for url in source.urls():
                 if url.isLocalFile():
+                    handled_local_urls = True
                     local_path = url.toLocalFile()
                     if can_read_image_file(local_path):
                         image_paths.append(local_path)
@@ -162,8 +166,8 @@ class ComposerTextEdit(QPlainTextEdit):
                 self.image_files_pasted.emit(image_paths)
             if parts:
                 self.insertPlainText(" ".join(parts))
+            if handled_local_urls:
                 self._refresh_mention_popup()
-            if image_paths:
                 return
         if source.hasText():
             self.insertPlainText(self._normalize_pasted_text(source.text()))
@@ -273,10 +277,12 @@ class ComposerTextEdit(QPlainTextEdit):
             "query": match.group(1),
         }
 
-    def _ensure_file_index(self) -> None:
+    def _ensure_file_index(self, *, force_refresh: bool = False) -> None:
+        if self._file_index_static:
+            return
         root = Path.cwd()
         root_str = str(root)
-        if self._file_index_root == root_str:
+        if not force_refresh and self._file_index_root == root_str:
             return
 
         rows: dict[str, dict[str, Any]] = {}
@@ -318,7 +324,7 @@ class ComposerTextEdit(QPlainTextEdit):
         }
 
     def _filter_mention_candidates(self, query_lower: str) -> list[dict[str, Any]]:
-        self._ensure_file_index()
+        self._ensure_file_index(force_refresh=True)
         if not self._file_index:
             return []
 
