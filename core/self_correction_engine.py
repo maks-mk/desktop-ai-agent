@@ -118,6 +118,9 @@ def _choose_context_refresh_tool(
     if any(field in _PATH_LIKE_FIELDS for field in missing_fields):
         return "find_file"
 
+    if tool_name == "write_file" and "content" in missing_fields:
+        return "write_file"
+
     if tool_name == "edit_file":
         path_known = bool(str(tool_args.get("path") or "").strip())
         return "read_file" if path_known else "find_file"
@@ -138,6 +141,12 @@ def _build_recoverable_validation_notes(
         tool_args,
         missing_fields=missing_fields,
     )
+    if tool_name == "write_file" and "content" in missing_fields and not _has_path_like_gap(missing_fields):
+        return (
+            suggested_tool,
+            "Draft the full file contents from repository and task context, then retry write_file with both "
+            "path and complete content in the same call.",
+        )
     if tool_name == "edit_file":
         if missing_fields:
             return (
@@ -400,6 +409,26 @@ def build_repair_plan(
             notes="Apply deterministic argument normalization before retry.",
             max_auto_repairs=max_auto_repairs,
             llm_guidance="Use the normalized arguments instead of the original malformed payload.",
+        )
+
+    if error_type == "VALIDATION" and tool_name == "write_file" and "content" in missing_fields and not _has_path_like_gap(missing_fields):
+        return _repair_plan(
+            strategy="llm_replan",
+            reason="validation_missing_write_content",
+            fingerprint=fingerprint,
+            tool_name=tool_name,
+            suggested_tool_name="write_file",
+            original_args=original_args,
+            patched_args=original_args,
+            notes=(
+                "The write target is known, but the file body is missing. "
+                "Compose the complete file contents first, then retry write_file once with the full payload."
+            ),
+            max_auto_repairs=max_auto_repairs,
+            llm_guidance=(
+                "Do not call write_file with path only. Use repository context to draft the full file body, "
+                "then emit one valid write_file call containing both path and complete content."
+            ),
         )
 
     if error_type == "VALIDATION" and missing_fields:

@@ -1,9 +1,16 @@
+import re
 from typing import Any
 
 from langchain_core.messages import ToolMessage
 
 
-ERROR_PREFIXES = ("error", "ошибка", "error[")
+_STRUCTURED_TOOL_ERROR_RE = re.compile(r"^\s*ERROR\[[A-Z_]+\]:", re.IGNORECASE)
+_LEGACY_INTERRUPTED_TOOL_ERROR_RE = re.compile(
+    r"^\s*Error:\s*Execution interrupted\b",
+    re.IGNORECASE,
+)
+_TOOL_MESSAGE_ERROR_STATUS = "error"
+_TOOL_MESSAGE_SUCCESS_STATUS = "success"
 
 
 def _stringify_content_item(item: Any) -> str:
@@ -36,13 +43,19 @@ def compact_text(text: str, limit: int) -> str:
 
 
 def is_error_text(text: Any) -> bool:
-    normalized = stringify_content(text).strip().lower()
-    return (
-        normalized.startswith(ERROR_PREFIXES)
-        or "error[" in normalized
-        or "traceback" in normalized
+    normalized = stringify_content(text).strip()
+    return bool(
+        _STRUCTURED_TOOL_ERROR_RE.match(normalized)
+        or _LEGACY_INTERRUPTED_TOOL_ERROR_RE.match(normalized)
     )
 
 
+def tool_message_status(message: ToolMessage) -> str:
+    status = str(getattr(message, "status", "") or "").strip().lower()
+    if status in {_TOOL_MESSAGE_SUCCESS_STATUS, _TOOL_MESSAGE_ERROR_STATUS}:
+        return status
+    return _TOOL_MESSAGE_ERROR_STATUS if is_error_text(message.content) else _TOOL_MESSAGE_SUCCESS_STATUS
+
+
 def is_tool_message_error(message: ToolMessage) -> bool:
-    return getattr(message, "status", "") == "error" or is_error_text(message.content)
+    return tool_message_status(message) == _TOOL_MESSAGE_ERROR_STATUS

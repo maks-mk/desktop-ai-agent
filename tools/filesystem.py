@@ -149,6 +149,39 @@ class EditFileInput(BaseModel):
         return data
 
 
+class WriteFileInput(BaseModel):
+    """Input for write_file with explicit guidance for full-file writes."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    path: str = Field(
+        description="Workspace-relative file path to create or overwrite.",
+    )
+    content: str = Field(
+        validation_alias=AliasChoices("content", "text", "body", "contents"),
+        description=(
+            "Complete final file contents to write. Provide the full body of the file, "
+            "not a summary, placeholder, or filename."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        data["path"] = _cleanup_edit_path(data.get("path"))
+        if data.get("content") is None:
+            for alias in ("text", "body", "contents"):
+                if data.get(alias) is not None:
+                    data["content"] = data[alias]
+                    break
+        if data.get("content") is not None:
+            data["content"] = str(data["content"]).replace("\r\n", "\n")
+        return data
+
+
 @tool("file_info")
 def file_info_tool(path: str) -> str:
     """File metadata: size, lines, suggested read_file chunk."""
@@ -161,9 +194,9 @@ def read_file_tool(path: str, offset: int = 0, limit: int = 2000, show_line_numb
     return fs_manager.read_file(path, offset, limit, show_line_numbers)
 
 
-@tool("write_file")
+@tool("write_file", args_schema=WriteFileInput)
 def write_file_tool(path: str, content: str) -> str:
-    """Write/overwrite a file."""
+    """Create or overwrite a file using the exact full content provided."""
     return fs_manager.write_file(path, content)
 
 

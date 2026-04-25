@@ -22,6 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
+from pydantic import ValidationError
 
 from core.state import AgentState
 from core.config import AgentConfig
@@ -294,18 +295,75 @@ class AgentNodes:
         return required
 
     def _missing_required_tool_fields(self, tool_name: str, tool_args: Dict[str, Any]) -> List[str]:
+        normalized_args = canonicalize_tool_args(tool_args)
+        tool = self.tools_map.get(tool_name)
+        if tool:
+            try:
+                schema = tool.get_input_schema()
+                validated = schema.model_validate(normalized_args)
+                payload = validated.model_dump() if hasattr(validated, "model_dump") else normalized_args
+                if isinstance(payload, dict):
+                    normalized_args = payload
+            except ValidationError as exc:
+                missing_from_schema: List[str] = []
+                for error in exc.errors():
+                    if str(error.get("type") or "").strip() != "missing":
+                        continue
+                    loc = error.get("loc") or ()
+                    if not loc:
+                        continue
+                    field_name = str(loc[-1]).strip()
+                    if field_name and field_name not in missing_from_schema:
+                        missing_from_schema.append(field_name)
+                if missing_from_schema:
+                    return missing_from_schema
+            except Exception:
+                pass
+
         required = self._required_tool_fields(tool_name)
         if not required:
             return []
         missing: List[str] = []
         for field_name in required:
-            value = tool_args.get(field_name)
+            value = normalized_args.get(field_name)
             if value is None:
                 missing.append(field_name)
                 continue
             if isinstance(value, str) and not value.strip():
                 missing.append(field_name)
         return missing
+
+    def _normalize_tool_args_for_preflight(
+        self,
+        tool_name: str,
+        raw_tool_args: Any,
+        *,
+        current_task: str = "",
+    ) -> Dict[str, Any]:
+        tool_args, _ = inspect_tool_args_payload(raw_tool_args)
+        normalized_args, _ = normalize_tool_args(
+            tool_name,
+            tool_args,
+            current_task=current_task,
+        )
+        return normalized_args
+
+    def _tool_call_requires_ready_approval(
+        self,
+        tool_name: str,
+        raw_tool_args: Any,
+        *,
+        current_task: str = "",
+    ) -> bool:
+        tool_args = self._normalize_tool_args_for_preflight(
+            tool_name,
+            raw_tool_args,
+            current_task=current_task,
+        )
+        return (
+            self._tool_requires_approval(tool_name, tool_args)
+            and not self._missing_required_tool_fields(tool_name, tool_args)
+        )
 
     def _tool_is_read_only(self, tool_name: str) -> bool:
         metadata = self._metadata_for_tool(tool_name)
@@ -368,9 +426,9 @@ class AgentNodes:
 
     def tool_calls_require_approval(self, tool_calls: List[Dict[str, Any]]) -> bool:
         return any(
-            self._tool_requires_approval(
+            self._tool_call_requires_ready_approval(
                 (tool_call.get("name") or "unknown_tool"),
-                canonicalize_tool_args(tool_call.get("args")),
+                tool_call.get("args"),
             )
             for tool_call in tool_calls
             if tool_call.get("name") != "request_user_input"
@@ -1120,11 +1178,20 @@ class AgentNodes:
             return {"pending_approval": None}
 
         protected_calls = []
+        current_task = str(state.get("current_task") or "")
         for tool_call in pending_ai_with_tools.tool_calls:
             tool_name = tool_call.get("name") or "unknown_tool"
-            tool_args = canonicalize_tool_args(tool_call.get("args"))
-            if not self._tool_requires_approval(tool_name, tool_args):
+            if not self._tool_call_requires_ready_approval(
+                tool_name,
+                tool_call.get("args"),
+                current_task=current_task,
+            ):
                 continue
+            tool_args = self._normalize_tool_args_for_preflight(
+                tool_name,
+                tool_call.get("args"),
+                current_task=current_task,
+            )
             metadata = self._effective_tool_metadata(tool_name, tool_args)
             protected_calls.append(
                 {
@@ -1494,6 +1561,8 @@ class AgentNodes:
         context = list(context)
         max_attempts = max(1, self.config.max_retries)
         retry_delay = max(0, self.config.retry_delay)
+        auto_tool_choice_fallback_used = False
+        auto_tool_choice_warning = "WARNING: Tools are disabled due to server configuration error."
         self._log_run_event(
             state,
             "llm_invoke_start",
@@ -1522,17 +1591,24 @@ class AgentNodes:
                 return response
             except Exception as e:
                 err_str = str(e)
-                if "auto" in err_str and "tool choice" in err_str and "requires" in err_str:
+                if (
+                    "auto" in err_str
+                    and "tool choice" in err_str
+                    and "requires" in err_str
+                    and not auto_tool_choice_fallback_used
+                ):
                     logger.warning(
                         "⚠ Server does not support 'auto' tool choice. Falling back to chat-only mode."
                     )
+                    auto_tool_choice_fallback_used = True
                     current_llm = self.llm
-                    # Безопасное копирование контекста
                     context = list(context)
-                    if isinstance(context[0], SystemMessage):
+                    if context and isinstance(context[0], SystemMessage):
+                        system_content = str(context[0].content)
+                        if auto_tool_choice_warning not in system_content:
+                            system_content = f"{system_content}\n\n{auto_tool_choice_warning}"
                         context[0] = SystemMessage(
-                            content=str(context[0].content)
-                            + "\n\nWARNING: Tools are disabled due to server configuration error."
+                            content=system_content
                         )
                     continue
 

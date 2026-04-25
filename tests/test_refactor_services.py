@@ -380,6 +380,52 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIsNone(outcome.issue)
         self.assertEqual(outcome.tool_message.status, "error")
 
+    def test_tool_executor_treats_plain_error_like_file_contents_as_success(self):
+        executor = ToolExecutor(
+            config=self._make_config(),
+            metadata_for_tool=lambda name: ToolMetadata(name=name, read_only=True),
+            log_run_event=lambda *_args, **_kwargs: None,
+            workspace_boundary_violated=lambda *_args, **_kwargs: False,
+        )
+
+        outcome = executor.handle_result(
+            state={"run_id": "run"},
+            current_turn_id=1,
+            tool_name="read_file",
+            tool_args={"path": "app.log"},
+            tool_call_id="call-plain-error-text",
+            content="Error: connection reset by peer\nTraceback follows below as part of the log",
+            apply_validation=False,
+        )
+
+        self.assertFalse(outcome.had_error)
+        self.assertIsNone(outcome.issue)
+        self.assertEqual(outcome.tool_message.status, "success")
+
+    def test_tool_executor_promotes_validation_failure_to_error_status(self):
+        executor = ToolExecutor(
+            config=self._make_config(),
+            metadata_for_tool=lambda name: ToolMetadata(name=name, mutating=True),
+            log_run_event=lambda *_args, **_kwargs: None,
+            workspace_boundary_violated=lambda *_args, **_kwargs: False,
+        )
+
+        with mock.patch("core.tool_executor.validate", return_value="ERROR[VALIDATION]: file was not updated"):
+            outcome = executor.handle_result(
+                state={"run_id": "run"},
+                current_turn_id=1,
+                tool_name="edit_file",
+                tool_args={"path": "demo.txt"},
+                tool_call_id="call-validation",
+                content="Success: File edited.",
+                apply_validation=True,
+            )
+
+        self.assertTrue(outcome.had_error)
+        self.assertEqual(outcome.tool_message.status, "error")
+        self.assertFalse(outcome.parsed_result.ok)
+        self.assertIn("Tool output:", outcome.content)
+
     def test_tool_executor_merges_multiple_issues(self):
         executor = ToolExecutor(
             config=self._make_config(),

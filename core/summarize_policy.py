@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Callable, List
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
 
 from core.message_utils import stringify_content
 
@@ -68,6 +69,34 @@ def choose_summary_boundary(messages: List[BaseMessage], *, keep_last: int) -> i
     return idx
 
 
+def _compact_for_summary(text: str, *, limit: int = 500) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "... [truncated]"
+
+
+def _format_tool_calls_for_summary(message: BaseMessage) -> str:
+    if not isinstance(message, (AIMessage, AIMessageChunk)):
+        return ""
+    raw_tool_calls = list(getattr(message, "tool_calls", []) or [])
+    if not raw_tool_calls:
+        return ""
+
+    parts: List[str] = []
+    for tool_call in raw_tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        tool_name = str(tool_call.get("name") or "tool").strip() or "tool"
+        tool_args = tool_call.get("args")
+        try:
+            rendered_args = json.dumps(tool_args, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            rendered_args = str(tool_args)
+        parts.append(f"{tool_name}({rendered_args})")
+    return _compact_for_summary("; ".join(parts), limit=320)
+
+
 def format_history_for_summary(
     messages: List[BaseMessage],
     *,
@@ -77,7 +106,20 @@ def format_history_for_summary(
     for message in messages:
         if isinstance(message, HumanMessage) and is_internal_retry(message):
             continue
-        rendered = stringify_content(message.content)
-        suffix = "... [truncated]" if len(rendered) > 500 else ""
-        parts.append(f"{message.type}: {rendered[:500]}{suffix}")
+        rendered = _compact_for_summary(stringify_content(message.content), limit=500)
+        tool_call_text = _format_tool_calls_for_summary(message)
+        if isinstance(message, ToolMessage):
+            tool_name = str(getattr(message, "name", "") or "tool").strip() or "tool"
+            header = f"{message.type}({tool_name})"
+        else:
+            header = message.type
+
+        segments: List[str] = []
+        if tool_call_text:
+            segments.append(f"tool_calls={tool_call_text}")
+        if rendered:
+            segments.append(f"content={rendered}")
+        if not segments:
+            segments.append("<empty>")
+        parts.append(f"{header}: {' | '.join(segments)}")
     return "\n".join(parts)

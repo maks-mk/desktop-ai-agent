@@ -185,6 +185,43 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertFalse(finished[0]["is_error"])
         self.assertIn("No process found listening on port 8000.", finished[0]["content"])
 
+    def test_stream_processor_treats_successful_read_file_error_like_contents_as_success(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        processor.tool_buffer["call-read-log"] = {"name": "read_file", "args": {"path": "server.log"}}
+
+        processor._handle_tool_result(
+            ToolMessage(
+                tool_call_id="call-read-log",
+                name="read_file",
+                content="Error: connection reset by peer\nTraceback follows below as part of the file",
+                status="success",
+            )
+        )
+
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertFalse(finished[0]["is_error"])
+        self.assertEqual(finished[0]["display"], "Reading file")
+
+    def test_stream_processor_treats_structured_error_without_status_as_error(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        processor.tool_buffer["call-legacy-error"] = {"name": "edit_file", "args": {"path": "demo.txt"}}
+
+        legacy_message = ToolMessage(
+            tool_call_id="call-legacy-error",
+            name="edit_file",
+            content="ERROR[VALIDATION]: Could not find a match for old_string.",
+        )
+        legacy_message = legacy_message.model_copy(update={"status": ""})
+
+        processor._handle_tool_result(legacy_message)
+
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0]["is_error"])
+
     def test_stream_processor_does_not_inject_preface_before_tool_when_model_text_is_empty(self):
         events = []
         processor = StreamProcessor(events.append)

@@ -43,6 +43,7 @@ class SessionRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_messages[0].tool_call_id, "tc-1")
         self.assertIn("Execution interrupted", str(tool_messages[0].content))
         self.assertEqual(tool_messages[0].additional_kwargs["tool_args"], {"command": "echo 1"})
+        self.assertEqual(tool_messages[0].status, "error")
 
     async def test_repair_logs_structured_event_for_inserted_tool_message(self):
         app = _FakeAgentApp(

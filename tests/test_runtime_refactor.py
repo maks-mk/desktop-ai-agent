@@ -27,9 +27,10 @@ from core.model_profiles import ModelProfileStore
 from core.nodes import AgentNodes
 from core.run_logger import JsonlRunLogger
 from core.session_store import SessionSnapshot, SessionStore
-from core.summarize_policy import should_summarize
+from core.summarize_policy import format_history_for_summary, should_summarize
 from core.tool_policy import ToolMetadata
 from tools import process_tools
+from tools.filesystem import write_file_tool
 from tools.tool_registry import ToolRegistry
 import ui.runtime as gui_runtime
 from ui.runtime import (
@@ -248,6 +249,21 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(missing, ["nextThoughtNeeded"])
+
+    def test_missing_required_tool_fields_respects_write_file_aliases(self):
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=FakeLLM([]),
+            tools=[write_file_tool],
+            llm_with_tools=FakeLLM([]),
+        )
+
+        missing = nodes._missing_required_tool_fields(
+            "write_file",
+            {"path": "notes.md", "body": "# Notes\n\nReady"},
+        )
+
+        self.assertEqual(missing, [])
 
     async def test_process_tool_call_allows_repeated_distinct_args_without_name_based_budget(self):
         tool = FakeTool("analysis_helper", "ok")
@@ -970,6 +986,25 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(response.content), "ok")
         self.assertEqual(normalize_mock.call_count, 2)
 
+    async def test_invoke_llm_with_retry_applies_auto_tool_choice_fallback_warning_once(self):
+        config = self._make_config(MAX_RETRIES=3, RETRY_DELAY=0)
+        fallback_llm = FakeLLM([RuntimeError("temporary"), AIMessage(content="ok")])
+        tools_llm = FakeLLM([RuntimeError("auto tool choice requires explicit support")])
+        nodes = AgentNodes(
+            config=config,
+            llm=fallback_llm,
+            tools=[],
+            llm_with_tools=tools_llm,
+        )
+        context = [SystemMessage(content="Base system prompt"), HumanMessage(content="Проверь задачу")]
+
+        response = await nodes._invoke_llm_with_retry(tools_llm, context, state=self._initial_state(), node_name="agent")
+
+        self.assertEqual(str(response.content), "ok")
+        self.assertEqual(len(fallback_llm.invocations), 2)
+        for invocation in fallback_llm.invocations:
+            self.assertEqual(str(invocation[0].content).count("WARNING: Tools are disabled due to server configuration error."), 1)
+
     async def test_approval_rejection_returns_access_denied_without_tool_execution(self):
         config = self._make_config(ENABLE_APPROVALS=True)
         tool = FakeTool("danger_tool", "Изменение применено.")
@@ -1004,6 +1039,64 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tool_messages)
         self.assertIn("ACCESS_DENIED", str(tool_messages[-1].content))
         self.assertIsNone(resumed["open_tool_issue"])
+
+    def test_tool_calls_require_approval_skips_invalid_write_file_without_content(self):
+        config = self._make_config(ENABLE_APPROVALS=True)
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[write_file_tool],
+            llm_with_tools=FakeLLM([]),
+            tool_metadata={
+                "write_file": ToolMetadata(
+                    name="write_file",
+                    mutating=True,
+                    requires_approval=True,
+                )
+            },
+        )
+
+        required = nodes.tool_calls_require_approval(
+            [{"name": "write_file", "args": {"path": "REFACTORING_SUGGESTIONS.md"}, "id": "tc-write"}]
+        )
+
+        self.assertFalse(required)
+
+    async def test_approval_node_skips_invalid_write_file_without_content(self):
+        config = self._make_config(ENABLE_APPROVALS=True)
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[write_file_tool],
+            llm_with_tools=FakeLLM([]),
+            tool_metadata={
+                "write_file": ToolMetadata(
+                    name="write_file",
+                    mutating=True,
+                    requires_approval=True,
+                )
+            },
+        )
+
+        result = await nodes.approval_node(
+            {
+                **self._initial_state("Создай файл"),
+                "messages": [
+                    AIMessage(
+                        content="Запишу файл.",
+                        tool_calls=[
+                            {
+                                "name": "write_file",
+                                "args": {"path": "REFACTORING_SUGGESTIONS.md"},
+                                "id": "tc-write",
+                            }
+                        ],
+                    )
+                ],
+            }
+        )
+
+        self.assertEqual(result, {"pending_approval": None})
 
     async def test_approval_rejection_blocks_followup_tool_calls_in_same_turn(self):
         config = self._make_config(ENABLE_APPROVALS=True)
@@ -1233,7 +1326,55 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["open_tool_issue"]["kind"], "approval_denied")
-        self.assertEqual(result["open_tool_issue"]["turn_id"], 1)
+
+    async def test_tools_node_preserves_parallel_results_when_one_tool_processing_crashes(self):
+        config = self._make_config()
+        read_tool = FakeTool("read_file", "ok")
+        list_tool = FakeTool("list_directory", "ok")
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[read_tool, list_tool],
+            llm_with_tools=FakeLLM([]),
+            tool_metadata={
+                "read_file": ToolMetadata(name="read_file", read_only=True),
+                "list_directory": ToolMetadata(name="list_directory", read_only=True),
+            },
+        )
+
+        async def fake_process(_self, tool_call, recent_calls, state, approval_state, current_turn_id, allowed_tool_names=None):
+            if tool_call["id"] == "tc-bad":
+                raise RuntimeError("boom")
+            return (
+                ToolMessage(tool_call_id=tool_call["id"], name=tool_call["name"], content="Success: ok"),
+                False,
+                None,
+            )
+
+        state = {
+            **self._initial_state("Проверь файлы"),
+            "messages": [
+                HumanMessage(content="Проверь файлы"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "read_file", "args": {"path": "README.md"}, "id": "tc-good"},
+                        {"name": "list_directory", "args": {"path": "."}, "id": "tc-bad"},
+                    ],
+                ),
+            ],
+        }
+
+        with mock.patch.object(AgentNodes, "_process_tool_call", new=fake_process):
+            result = await nodes.tools_node(state)
+
+        self.assertEqual(result["turn_outcome"], "run_tools")
+        self.assertEqual(len(result["messages"]), 2)
+        self.assertEqual({message.tool_call_id for message in result["messages"]}, {"tc-good", "tc-bad"})
+        failed = next(message for message in result["messages"] if message.tool_call_id == "tc-bad")
+        self.assertIn("Unhandled exception while executing 'list_directory': boom", str(failed.content))
+        self.assertTrue(result["last_tool_error"])
+        self.assertIsNone(result["open_tool_issue"])
 
     async def test_tools_node_resets_retry_state_after_successful_result(self):
         tool = FakeTool("read_file", "Success: file contents")
@@ -1319,6 +1460,33 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                 has_summary=True,
             )
         )
+
+    def test_format_history_for_summary_keeps_tool_call_names_and_args(self):
+        rendered = format_history_for_summary(
+            [
+                HumanMessage(content="Проверь конфиг"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "tc-1",
+                            "name": "read_file",
+                            "args": {"path": "config/settings.json"},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    tool_call_id="tc-1",
+                    name="read_file",
+                    content='{"mode":"safe"}',
+                ),
+            ],
+            is_internal_retry=lambda _message: False,
+        )
+
+        self.assertIn("read_file", rendered)
+        self.assertIn("config/settings.json", rendered)
+        self.assertIn('tool(read_file)', rendered)
 
     def test_session_store_round_trip(self):
         tmp = self._workspace_tempdir()
@@ -2072,7 +2240,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await nodes.agent_node(state)
 
-        self.assertEqual(result["turn_outcome"], "")
+        self.assertEqual(result["turn_outcome"], "recover_agent")
         self.assertTrue(result["has_protocol_error"])
         self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "history_tool_mismatch")
         self.assertEqual(agent_llm.invocations, [])

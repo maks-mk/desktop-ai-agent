@@ -113,6 +113,7 @@ async def repair_session_if_needed(
                         "kind": "repaired_interrupted_tool_call",
                     },
                 },
+                status="error",
             )
             for tool_call in missing_tool_calls
         ]

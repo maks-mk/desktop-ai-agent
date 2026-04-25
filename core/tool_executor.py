@@ -87,15 +87,17 @@ class ToolExecutor:
                 },
             )
             if validation_error:
-                content = f"{content}\n\n{validation_error}"
+                if str(content or "").strip():
+                    content = f"{validation_error}\n\nTool output:\n{content}"
+                else:
+                    content = validation_error
                 had_error = True
-
-        if is_error_text(content):
-            had_error = True
 
         limit = self.config.safety.max_tool_output
         content = truncate_output(content, limit, source=tool_name)
         parsed_result = parse_tool_execution_result(content)
+        if not parsed_result.ok:
+            had_error = True
         self._log_interrupted_tool_result_if_needed(
             state=state,
             tool_name=tool_name,

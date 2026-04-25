@@ -61,6 +61,22 @@ class SelfCorrectionEngineTests(unittest.TestCase):
         self.assertEqual(plan.reason, "validation_missing_fields")
         self.assertEqual(plan.suggested_tool_name, "find_file")
 
+    def test_build_repair_plan_write_file_missing_content_replans_write(self):
+        issue = {
+            "tool_names": ["write_file"],
+            "tool_args": {"path": "REFACTORING_SUGGESTIONS.md"},
+            "summary": "Missing required field(s): content.",
+            "error_type": "VALIDATION",
+            "details": {"missing_required_fields": ["content"]},
+        }
+        plan = build_repair_plan(issue, current_task="Создай файл с рекомендациями", max_auto_repairs=2)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertTrue(plan.retryable)
+        self.assertEqual(plan.reason, "validation_missing_write_content")
+        self.assertEqual(plan.suggested_tool_name, "write_file")
+        self.assertIn("full file body", plan.llm_guidance.lower())
+
     def test_build_repair_plan_edit_file_match_failure_is_retryable(self):
         issue = {
             "tool_names": ["edit_file"],

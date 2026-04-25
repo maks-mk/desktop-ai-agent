@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, RemoveMessage, SystemMessage, ToolMessage
+from langgraph.errors import GraphInterrupt
 
 from core.errors import ErrorType, format_error
 from core.message_utils import compact_text
@@ -88,6 +89,8 @@ class AgentTurnOrchestrator:
             history_issue = owner.context_builder.detect_tool_history_mismatch(messages)
             if history_issue:
                 validation_handoff_reason = "history_tool_mismatch"
+                pending_tool_calls = history_issue.get("pending_tool_calls") or []
+                first_pending_tool_call = pending_tool_calls[0] if pending_tool_calls else {}
                 protocol_issue = owner._build_protocol_open_tool_issue(
                     current_turn_id=current_turn_id,
                     summary=owner._summarize_history_tool_mismatch(history_issue),
@@ -95,14 +98,10 @@ class AgentTurnOrchestrator:
                     source="history",
                     tool_names=[
                         str(item.get("name") or "").strip()
-                        for item in (history_issue.get("pending_tool_calls") or [])
+                        for item in pending_tool_calls
                         if str(item.get("name") or "").strip()
                     ],
-                    tool_args=(
-                        canonicalize_tool_args((history_issue.get("pending_tool_calls") or [{}])[0].get("args"))
-                        if history_issue.get("pending_tool_calls")
-                        else {}
-                    ),
+                    tool_args=canonicalize_tool_args(first_pending_tool_call.get("args")) if first_pending_tool_call else {},
                     details=history_issue,
                 )
                 owner._log_run_event(
@@ -124,7 +123,7 @@ class AgentTurnOrchestrator:
                 return {
                     "current_task": current_task,
                     "turn_id": current_turn_id,
-                    "turn_outcome": "",
+                    "turn_outcome": "recover_agent",
                     "recovery_state": recovery_state,
                     "pending_approval": None,
                     "open_tool_issue": protocol_issue,
@@ -455,9 +454,21 @@ class ToolBatchCoordinator:
                             active_tool_names,
                         )
                         for tool_call in tool_calls
-                    )
+                    ),
+                    return_exceptions=True,
                 )
-                for tool_msg, had_error, issue in processed:
+                for tool_call, processed_item in zip(tool_calls, processed):
+                    if isinstance(processed_item, (asyncio.CancelledError, GraphInterrupt)):
+                        raise processed_item
+                    if isinstance(processed_item, Exception):
+                        tool_msg, had_error, issue = self._build_exception_result(
+                            tool_call=tool_call,
+                            exception=processed_item,
+                            state=state,
+                            current_turn_id=current_turn_id,
+                        )
+                    else:
+                        tool_msg, had_error, issue = processed_item
                     final_messages.append(tool_msg)
                     has_error = has_error or had_error
                     if issue:
@@ -541,6 +552,43 @@ class ToolBatchCoordinator:
                 parallel_mode=parallel_mode,
             )
             raise
+
+    def _build_exception_result(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        exception: Exception,
+        state,
+        current_turn_id: int,
+    ) -> tuple[ToolMessage, bool, dict[str, Any] | None]:
+        owner = self.owner
+        tool_name = str(tool_call.get("name") or "unknown_tool")
+        tool_args = canonicalize_tool_args(tool_call.get("args"))
+        tool_call_id = str(tool_call.get("id") or "").strip() or f"call_missing_{uuid.uuid4().hex[:8]}"
+        owner._log_run_event(
+            state,
+            "tool_call_parallel_exception_captured",
+            run_id=state.get("run_id", ""),
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            error_type=type(exception).__name__,
+            error=compact_text(str(exception), 400),
+        )
+        outcome = owner.tool_executor.handle_result(
+            state=state,
+            current_turn_id=current_turn_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+            content=format_error(
+                ErrorType.EXECUTION,
+                f"Unhandled exception while executing '{tool_name}': {exception}",
+            ),
+            issue_details={"parallel_batch_exception": type(exception).__name__},
+            apply_validation=False,
+            had_error=True,
+        )
+        return outcome.tool_message, outcome.had_error, outcome.issue
 
     async def process_tool_call(
         self,
