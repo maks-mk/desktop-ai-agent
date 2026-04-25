@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import deepcopy
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from core import constants
+from core.fast_copy import copy_jsonish
 from core.message_utils import compact_text, stringify_content
 from core.self_correction_engine import RepairPlan, build_repair_plan
 from core.tool_results import parse_tool_execution_result
@@ -108,12 +108,12 @@ class RecoveryManager:
             "reason": repair_plan.reason,
             "tool_name": repair_plan.tool_name,
             "suggested_tool_name": repair_plan.suggested_tool_name,
-            "patched_args": deepcopy(repair_plan.patched_args),
+            "patched_args": copy_jsonish(repair_plan.patched_args),
             "notes": repair_plan.notes,
             "llm_guidance": repair_plan.llm_guidance,
             "current_task": current_task,
             "issue_summary": str((open_tool_issue or {}).get("summary") or "").strip(),
-            "issue_details": deepcopy((open_tool_issue or {}).get("details") or {}),
+            "issue_details": copy_jsonish((open_tool_issue or {}).get("details") or {}),
             "progress_fingerprint": repair_plan.progress_fingerprint or repair_plan.fingerprint,
         }
 
@@ -265,7 +265,7 @@ class RecoveryManager:
             if str(item).strip()
         ]
         next_open_tool_issue = open_tool_issue
-        next_recovery_state = deepcopy(recovery_state)
+        next_recovery_state = copy_jsonish(recovery_state)
         completion_reason = "no_open_tool_issue"
         handoff_message = ""
         drop_trailing_tool_call = False

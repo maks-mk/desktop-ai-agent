@@ -17,4 +17,6 @@ class ToolMetadata:
 
 
 def default_tool_metadata(name: str, source: str = "local") -> ToolMetadata:
-    return ToolMetadata(name=name, read_only=True, networked=(source == "mcp"), source=source)
+    if source == "mcp":
+        return ToolMetadata(name=name, mutating=True, requires_approval=True, networked=True, source=source)
+    return ToolMetadata(name=name, read_only=True, source=source)

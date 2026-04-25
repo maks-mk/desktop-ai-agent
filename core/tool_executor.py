@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
@@ -8,6 +7,7 @@ from langchain_core.messages import ToolMessage
 
 from core.config import AgentConfig
 from core.errors import ErrorType, format_error
+from core.fast_copy import copy_jsonish
 from core.message_utils import compact_text, is_error_text
 from core.policy_engine import classify_shell_command
 from core.self_correction_engine import repair_fingerprint
@@ -83,7 +83,7 @@ class ToolExecutor:
                 content,
                 {
                     "tool_name": tool_name,
-                    "args": deepcopy(tool_args) if isinstance(tool_args, dict) else {},
+                    "args": copy_jsonish(tool_args) if isinstance(tool_args, dict) else {},
                 },
             )
             if validation_error:
@@ -333,7 +333,7 @@ class ToolExecutor:
     ) -> ToolMessage:
         parsed_result = parse_tool_execution_result(content)
         additional_kwargs: Dict[str, Any] = {
-            "tool_args": deepcopy(tool_args) if isinstance(tool_args, dict) else {}
+            "tool_args": copy_jsonish(tool_args) if isinstance(tool_args, dict) else {}
         }
         if tool_duration_seconds is not None:
             additional_kwargs["tool_duration_seconds"] = float(tool_duration_seconds)

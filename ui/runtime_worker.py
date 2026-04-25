@@ -439,6 +439,14 @@ class AgentRunWorker(QObject):
                     self._set_busy(False)
                     return
 
+                if result.failed:
+                    self._log_ui_run_event("run_failed", message=result.error_message)
+                    await self._repair_current_session_if_needed()
+                    self._active_run_elapsed_seconds = 0.0
+                    self._active_request_has_images = False
+                    self._set_busy(False)
+                    return
+
                 if result.interrupt is None:
                     self.store.save_active_session(self.current_session, touch=True, set_active=True)
                     await self._emit_session_payload(include_transcript=False)

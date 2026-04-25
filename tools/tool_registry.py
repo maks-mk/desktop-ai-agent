@@ -490,7 +490,9 @@ class ToolRegistry:
                 if state["read_only"]:
                     state["mutating"] = False
                     state["destructive"] = False
-            state["requires_approval"] = True
+                else:
+                    state["mutating"] = True
+            state["requires_approval"] = not bool(state["read_only"])
 
         return ToolMetadata(
             name=tool_name,

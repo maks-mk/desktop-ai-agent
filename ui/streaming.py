@@ -36,6 +36,8 @@ class StreamProcessResult:
     stats: Optional[str]
     interrupt: Optional[Dict[str, Any]] = None
     cancelled: bool = False
+    failed: bool = False
+    error_message: str = ""
     cancelled_tools: list[Dict[str, Any]] = field(default_factory=list)
     events: list[StreamEvent] = field(default_factory=list)
     elapsed_seconds: float = 0.0
@@ -119,6 +121,8 @@ class StreamProcessor:
             self._emit("run_failed", {"message": str(exc)})
             return StreamProcessResult(
                 stats=None,
+                failed=True,
+                error_message=str(exc),
                 events=list(self.events),
                 elapsed_seconds=self._elapsed_seconds(),
             )

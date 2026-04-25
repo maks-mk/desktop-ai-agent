@@ -10,7 +10,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     
     # Compressed memory
-    summary: str
+    summary: NotRequired[str]
     
     # Step counter
     steps: int
@@ -20,6 +20,9 @@ class AgentState(TypedDict):
 
     # Original user task for the current request
     current_task: NotRequired[str]
+    turn_mode: NotRequired[str]
+    requires_evidence: NotRequired[bool]
+    safety_mode: NotRequired[str]
 
     # Internal workflow state
     turn_outcome: NotRequired[str]

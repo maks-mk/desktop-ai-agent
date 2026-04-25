@@ -110,8 +110,8 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
     def test_mcp_metadata_requires_approval_without_explicit_policy(self):
         metadata = ToolRegistry._infer_mcp_metadata("filesystem:write_file")
 
-        self.assertTrue(metadata.read_only)
-        self.assertFalse(metadata.mutating)
+        self.assertFalse(metadata.read_only)
+        self.assertTrue(metadata.mutating)
         self.assertFalse(metadata.destructive)
         self.assertTrue(metadata.requires_approval)
         self.assertTrue(metadata.networked)
@@ -131,7 +131,7 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metadata.requires_approval)
         self.assertTrue(metadata.networked)
 
-    def test_mcp_metadata_without_policy_keeps_readonly_hint_but_still_requires_approval(self):
+    def test_mcp_metadata_without_policy_keeps_readonly_hint_without_approval(self):
         tool = SimpleNamespace(
             name="acme_search_docs",
             description="Search documentation pages",
@@ -143,7 +143,7 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metadata.read_only)
         self.assertFalse(metadata.mutating)
         self.assertFalse(metadata.destructive)
-        self.assertTrue(metadata.requires_approval)
+        self.assertFalse(metadata.requires_approval)
 
     def test_mcp_metadata_applies_server_read_only_policy(self):
         metadata = ToolRegistry._infer_mcp_metadata(

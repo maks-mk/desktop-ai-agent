@@ -426,6 +426,42 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertFalse(outcome.parsed_result.ok)
         self.assertIn("Tool output:", outcome.content)
 
+    def test_tool_executor_isolates_nested_tool_args_from_validation_and_message_state(self):
+        executor = ToolExecutor(
+            config=self._make_config(),
+            metadata_for_tool=lambda name: ToolMetadata(name=name, mutating=True),
+            log_run_event=lambda *_args, **_kwargs: None,
+            workspace_boundary_violated=lambda *_args, **_kwargs: False,
+        )
+        tool_args = {
+            "path": "demo.txt",
+            "options": {"mode": "append"},
+            "lines": ["first"],
+        }
+
+        def mutate_validation_payload(_content, context):
+            context["args"]["options"]["mode"] = "overwrite"
+            context["args"]["lines"].append("second")
+            return None
+
+        with mock.patch("core.tool_executor.validate", side_effect=mutate_validation_payload):
+            outcome = executor.handle_result(
+                state={"run_id": "run"},
+                current_turn_id=1,
+                tool_name="edit_file",
+                tool_args=tool_args,
+                tool_call_id="call-nested-copy",
+                content="Success: File edited.",
+                apply_validation=True,
+            )
+
+        self.assertEqual(tool_args["options"]["mode"], "append")
+        self.assertEqual(tool_args["lines"], ["first"])
+        self.assertEqual(
+            outcome.tool_message.additional_kwargs["tool_args"],
+            {"path": "demo.txt", "options": {"mode": "append"}, "lines": ["first"]},
+        )
+
     def test_tool_executor_merges_multiple_issues(self):
         executor = ToolExecutor(
             config=self._make_config(),
@@ -469,6 +505,29 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("edit_file", merged["tool_names"])
         self.assertTrue(merged["details"]["loop_detected"])
 
+    def test_build_tool_issue_copies_nested_payloads(self):
+        tool_args = {"path": "demo.txt", "options": {"mode": "append"}}
+        details = {"missing_required_fields": ["path"], "nested": {"retry": ["read_file"]}}
+
+        issue = build_tool_issue(
+            current_turn_id=2,
+            kind="tool_error",
+            summary="Missing path",
+            tool_names=["edit_file"],
+            tool_args=tool_args,
+            source="tools",
+            error_type="VALIDATION",
+            fingerprint="fp-1",
+            details=details,
+            progress_fingerprint="fp-1",
+        )
+
+        tool_args["options"]["mode"] = "overwrite"
+        details["nested"]["retry"].append("find_file")
+
+        self.assertEqual(issue["tool_args"]["options"]["mode"], "append")
+        self.assertEqual(issue["details"]["nested"]["retry"], ["read_file"])
+
     def test_recovery_manager_builds_compact_recovery_message(self):
         manager = RecoveryManager()
         message = manager.build_recovery_system_message(
@@ -492,6 +551,36 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("Prepared arguments:", text)
         self.assertNotIn("Structured issue details:", text)
         self.assertNotIn("Do not repeat the exact same failing call unchanged.", text)
+
+    def test_recovery_manager_build_recovery_strategy_copies_nested_payloads(self):
+        manager = RecoveryManager()
+        repair_plan = RepairPlan(
+            strategy="normalize_args",
+            reason="validation",
+            fingerprint="fp-1",
+            tool_name="edit_file",
+            suggested_tool_name="edit_file",
+            original_args={"path": "demo.txt"},
+            patched_args={"path": "demo.txt", "edits": [{"old": "a", "new": "b"}]},
+            notes="Retry with normalized arguments.",
+        )
+        open_tool_issue = {
+            "summary": "Need exact old text",
+            "details": {"candidates": [{"path": "demo.txt"}]},
+        }
+
+        strategy = manager.build_recovery_strategy(
+            repair_plan=repair_plan,
+            open_tool_issue=open_tool_issue,
+            current_task="Обнови файл",
+            strategy_id="strategy-1",
+        )
+
+        repair_plan.patched_args["edits"][0]["new"] = "c"
+        open_tool_issue["details"]["candidates"][0]["path"] = "changed.txt"
+
+        self.assertEqual(strategy["patched_args"]["edits"][0]["new"], "b")
+        self.assertEqual(strategy["issue_details"]["candidates"][0]["path"], "demo.txt")
 
     def test_recovery_manager_handoff_text_hides_internal_recovery_hints(self):
         manager = RecoveryManager()

@@ -52,6 +52,8 @@ def is_error_text(text: Any) -> bool:
 
 def tool_message_status(message: ToolMessage) -> str:
     status = str(getattr(message, "status", "") or "").strip().lower()
+    if _STRUCTURED_TOOL_ERROR_RE.match(stringify_content(message.content).strip()):
+        return _TOOL_MESSAGE_ERROR_STATUS
     if status in {_TOOL_MESSAGE_SUCCESS_STATUS, _TOOL_MESSAGE_ERROR_STATUS}:
         return status
     return _TOOL_MESSAGE_ERROR_STATUS if is_error_text(message.content) else _TOOL_MESSAGE_SUCCESS_STATUS

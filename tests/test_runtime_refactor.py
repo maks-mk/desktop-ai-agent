@@ -27,6 +27,7 @@ from core.model_profiles import ModelProfileStore
 from core.nodes import AgentNodes
 from core.run_logger import JsonlRunLogger
 from core.session_store import SessionSnapshot, SessionStore
+from core.state import AgentState
 from core.summarize_policy import format_history_for_summary, should_summarize
 from core.tool_policy import ToolMetadata
 from tools import process_tools
@@ -42,7 +43,7 @@ from ui.runtime import (
     generate_chat_title,
     short_project_label,
 )
-from ui.streaming import StreamProcessor
+from ui.streaming import StreamProcessResult, StreamProcessor
 
 
 class FakeLLM:
@@ -488,6 +489,13 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(message.content), 1)
         self.assertEqual(message.content[0]["type"], "image")
 
+    def test_build_initial_state_keys_are_declared_in_agent_state(self):
+        state = build_initial_state("Проверь задачу", session_id="session-1")
+        declared_keys = set(AgentState.__required_keys__) | set(AgentState.__optional_keys__)
+
+        self.assertTrue(set(state).issubset(declared_keys))
+        self.assertNotIn("summary", AgentState.__required_keys__)
+
     def test_build_transcript_payload_parses_json_string_tool_args(self):
         payload = build_transcript_payload(
             {
@@ -874,38 +882,45 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_regular_edit_requires_resume_before_execution(self):
         config = self._make_config(ENABLE_APPROVALS=True)
-        tool = FakeTool("edit_file", "Success: File edited.")
-        nodes = AgentNodes(
-            config=config,
-            llm=FakeLLM([AIMessage(content="STATUS: FINISHED\nREASON: done\nNEXT_STEP: NONE")]),
-            tools=[tool],
-            llm_with_tools=FakeLLM(
-                [
-                    AIMessage(content="", tool_calls=[{"name": "edit_file", "args": {"path": "demo.txt", "old_string": "a", "new_string": "b"}, "id": "tc-edit-plain"}]),
-                    AIMessage(content="Готово без дополнительного approval."),
-                ]
-            ),
-            tool_metadata={
-                "edit_file": ToolMetadata(
-                    name="edit_file",
-                    mutating=True,
-                    requires_approval=False,
-                )
-            },
-        )
-        app = create_agent_workflow(nodes, config, tools_enabled=True).compile(checkpointer=MemorySaver())
+        temp_dir = self._workspace_tempdir()
 
-        thread_config = {"configurable": {"thread_id": "plain-edit-approval"}, "recursion_limit": 36}
+        def _edit_result(args):
+            (temp_dir / args["path"]).write_text("b", encoding="utf-8")
+            return "Success: File edited."
 
-        interrupted = await app.ainvoke(
-            self._initial_state("Исправь файл"),
-            config=thread_config,
-        )
+        with mock.patch("tools.filesystem._WORKING_DIRECTORY", temp_dir):
+            tool = FakeTool("edit_file", _edit_result)
+            nodes = AgentNodes(
+                config=config,
+                llm=FakeLLM([AIMessage(content="STATUS: FINISHED\nREASON: done\nNEXT_STEP: NONE")]),
+                tools=[tool],
+                llm_with_tools=FakeLLM(
+                    [
+                        AIMessage(content="", tool_calls=[{"name": "edit_file", "args": {"path": "demo.txt", "old_string": "a", "new_string": "b"}, "id": "tc-edit-plain"}]),
+                        AIMessage(content="Готово без дополнительного approval."),
+                    ]
+                ),
+                tool_metadata={
+                    "edit_file": ToolMetadata(
+                        name="edit_file",
+                        mutating=True,
+                        requires_approval=False,
+                    )
+                },
+            )
+            app = create_agent_workflow(nodes, config, tools_enabled=True).compile(checkpointer=MemorySaver())
 
-        self.assertIn("__interrupt__", interrupted)
-        self.assertEqual(tool.calls, [])
+            thread_config = {"configurable": {"thread_id": "plain-edit-approval"}, "recursion_limit": 36}
 
-        resumed = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
+            interrupted = await app.ainvoke(
+                self._initial_state("Исправь файл"),
+                config=thread_config,
+            )
+
+            self.assertIn("__interrupt__", interrupted)
+            self.assertEqual(tool.calls, [])
+
+            resumed = await app.ainvoke(Command(resume={"approved": True}), config=thread_config)
 
         self.assertEqual(tool.calls, [{"path": "demo.txt", "old_string": "a", "new_string": "b"}])
         self.assertEqual(resumed["turn_outcome"], "finish_turn")
@@ -2989,6 +3004,49 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(event.type == "run_failed" for event in events))
         self.assertFalse(worker._active_request_has_images)
+
+    async def test_run_graph_payload_failed_stream_skips_success_finalization(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.agent_app = type(
+            "DummyApp",
+            (),
+            {"astream": lambda self, *_args, **_kwargs: object()},
+        )()
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config()
+        worker._set_busy(True)
+
+        with (
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    return_value=StreamProcessResult(
+                        stats=None,
+                        failed=True,
+                        error_message="graph exploded",
+                        elapsed_seconds=0.5,
+                    )
+                ),
+            ),
+            mock.patch.object(worker, "_repair_current_session_if_needed", new=mock.AsyncMock(return_value=[])) as repair_mock,
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock()) as emit_session_mock,
+        ):
+            await worker._run_graph_payload({"messages": []})
+
+        worker.store.save_active_session.assert_not_called()
+        emit_session_mock.assert_not_awaited()
+        repair_mock.assert_awaited_once()
+        self.assertFalse(worker._is_busy)
 
     def test_stop_background_process_denies_external_pid_by_default(self):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})

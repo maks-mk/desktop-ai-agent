@@ -52,12 +52,21 @@ class FilesystemBackend(Protocol):
 
 FilesystemManager = _FilesystemManager
 
+_WORKING_DIRECTORY: Path = Path.cwd().resolve()
+
 
 def create_filesystem_backend(*, virtual_mode: bool = True) -> FilesystemBackend:
-    return FilesystemManager(virtual_mode=virtual_mode)
+    return FilesystemManager(root_dir=_WORKING_DIRECTORY, virtual_mode=virtual_mode)
 
 
 fs_manager: FilesystemBackend = create_filesystem_backend(virtual_mode=True)
+
+
+def _sync_backend_working_directory() -> Path:
+    cwd = Path(_WORKING_DIRECTORY).resolve()
+    if fs_manager.cwd != cwd:
+        fs_manager.cwd = cwd
+    return cwd
 
 
 def set_safety_policy(policy: SafetyPolicy):
@@ -65,11 +74,14 @@ def set_safety_policy(policy: SafetyPolicy):
 
 
 def set_working_directory(cwd: str):
-    fs_manager.cwd = Path(cwd).resolve()
+    global _WORKING_DIRECTORY
+    _WORKING_DIRECTORY = Path(cwd).resolve()
+    fs_manager.cwd = _WORKING_DIRECTORY
 
 
 def resolve_workspace_path(path: str) -> Path:
     manager = cast(Any, fs_manager)
+    manager.cwd = _sync_backend_working_directory()
     return manager._resolve_path(path)
 
 

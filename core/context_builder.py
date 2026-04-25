@@ -101,6 +101,8 @@ class ContextBuilder:
         *,
         state: AgentState | None = None,
     ) -> List[BaseMessage]:
+        # Provider-specific normalization is applied only to the outbound model context.
+        # The persisted graph state keeps original message identities for execution/UI flows.
         sanitized: List[BaseMessage] = []
         tool_call_id_map: Dict[str, str] = {}
         used_tool_call_ids: set[str] = set()

@@ -1,8 +1,4 @@
-import sys
-
-import ui.main_window as _impl
-
-sys.modules[__name__] = _impl
+from ui.main_window import main
 
 if __name__ == "__main__":
-    raise SystemExit(_impl.main())
+    raise SystemExit(main())

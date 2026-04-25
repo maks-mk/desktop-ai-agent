@@ -268,6 +268,24 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("↓ 0", result.stats)
         self.assertNotIn("↓ ?", result.stats)
 
+    def test_stream_processor_marks_stream_exception_as_failed(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        async def _stream():
+            raise RuntimeError("graph exploded")
+            yield
+
+        result = asyncio.run(processor.process_stream(_stream()))
+
+        self.assertTrue(result.failed)
+        self.assertFalse(result.cancelled)
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.error_message, "graph exploded")
+        failed_events = [event for event in events if event.type == "run_failed"]
+        self.assertEqual(len(failed_events), 1)
+        self.assertEqual(failed_events[0].payload["message"], "graph exploded")
+
     def test_stream_processor_reads_token_usage_from_update_payload(self):
         processor = StreamProcessor()
         processor._handle_updates({"agent": {"token_usage": {"prompt_tokens": 321, "completion_tokens": 8}}})

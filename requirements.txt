@@ -3,13 +3,13 @@
 # ========================================
 
 # --- CORE FRAMEWORK ---
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-google-genai>=2.0.0
-langchain-openai>=0.2.0
-langgraph>=0.2.0
-langgraph-checkpoint-sqlite>=2.0.0
-pydantic-settings>=2.0.0
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.0,<0.4.0
+langchain-google-genai>=2.0.0,<3.0.0
+langchain-openai>=0.2.0,<0.4.0
+langgraph>=0.2.0,<0.7.0
+langgraph-checkpoint-sqlite>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
 
 # --- TOOLS & API ---
 tavily-python>=0.5.0
