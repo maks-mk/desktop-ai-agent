@@ -16,11 +16,14 @@ else:
 # --- PROMPTS ---
 
 SUMMARY_PROMPT_TEMPLATE = (
-    "Current memory context:\n<previous_context>\n{summary}\n</previous_context>\n\n"
+    "Current memory:\n<previous_context>\n{summary}\n</previous_context>\n\n"
     "New events:\n{history_text}\n\n"
-    "Update <previous_context>. This is a technical log of a software development session. "
-    "Keep only key facts, decisions, and results. "
-    "Remove chit-chat. Return only the updated context text."
+    "Update the memory. Rules:\n"
+    "- Merge new events, do not repeat existing facts.\n"
+    "- Keep: paths, commands, outcomes, errors, decisions, task status.\n"
+    "- Drop: greetings, filler, raw tool output already reflected in outcomes.\n"
+    "- Be concise. Bullet points preferred.\n"
+    "- Return only the updated memory text."
 )
 
 REFLECTION_PROMPT = (

@@ -35,11 +35,11 @@ class RuntimePromptPolicyBuilder:
     REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
     TOOL_INTENT_REQUIREMENT_TEXT = (
         "TOOL INTENT REQUIREMENT:\n"
-        "Before each tool call or tool-call batch, write exactly one short intent sentence in natural language.\n"
-        "This sentence must be in the same assistant message that contains tool_calls.\n"
-        "Never send an empty assistant message when tool_calls are present."
+        "The `content` field of every assistant message that contains `tool_calls` MUST be non-empty.\n"
+        "Write one plain sentence: what you are about to do and why.\n"
+        "Example: 'Reading config.py to find the database host setting.'\n"
+        "An empty `content` when `tool_calls` are present is a PROTOCOL ERROR."
     )
-
     def __init__(self, *, config: AgentConfig) -> None:
         self.config = config
 
@@ -70,7 +70,10 @@ class RuntimePromptPolicyBuilder:
                     )
                 )
             )
-
+        
+        if context.tools_available:
+            messages.append(SystemMessage(content=self.TOOL_INTENT_REQUIREMENT_TEXT))
+        
         return messages
 
     def _build_runtime_contract(self, context: RuntimePromptContext) -> str:
@@ -111,23 +114,20 @@ class RuntimePromptPolicyBuilder:
         if not names:
             return (
                 "TOOLS:\n"
-                "Tools are available in this runtime. Use tool calls when they help.\n"
-                f"{self.TOOL_INTENT_REQUIREMENT_TEXT}"
+                "Tools are available in this runtime. Use tool calls when they help."
             )
         if len(names) <= 4:
             return (
                 "TOOLS:\n"
                 "Available tools: "
                 + ", ".join(names)
-                + ". Do not invent unavailable tools.\n"
-                f"{self.TOOL_INTENT_REQUIREMENT_TEXT}"
+                + ". Do not invent unavailable tools."
             )
         return (
             "TOOLS:\n"
-            "Tools are available in this runtime for file, shell, web, or system access. Do not invent unavailable tools.\n"
-            f"{self.TOOL_INTENT_REQUIREMENT_TEXT}"
+            "Tools are available in this runtime for file, shell, web, or system access. Do not invent unavailable tools."
         )
-
+    
     def _build_request_user_input_policy(self, context: RuntimePromptContext) -> str:
         if self.REQUEST_USER_INPUT_TOOL_NAME not in self._normalized_tool_names(context.active_tool_names):
             return ""
