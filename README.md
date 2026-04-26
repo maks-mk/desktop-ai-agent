@@ -1,12 +1,12 @@
 # Portable Autonomous AI Agent (GUI)
 
-*“Created by a SysAdmin for developers. Focus on safety, portability, and zero-nonsense execution. No Docker, no heavy environments, just one binary.”*
+> *“Created by a SysAdmin for developers. Focus on safety, portability, and zero-nonsense execution. No Docker, no heavy environments, just one binary.”*
 
-	Десктопный AI-агент с runtime на `LangGraph` и графическим интерфейсом на `PySide6`.  
-	Работает с файлами, shell-командами, системой, MCP-серверами и веб-поиском.
+Десктопный AI-агент с runtime на `LangGraph` и графическим интерфейсом на `PySide6`.  
+Работает с файлами, shell-командами, системой, MCP-серверами и веб-поиском.
 
-	Запуск из исходников: `python main.py`.  
-	Сборка в portable `.exe` для Windows: `build.bat`.
+Запуск из исходников: `python main.py`.  
+Сборка в portable `.exe` для Windows: `build.bat`.
 
 ![Portable Autonomous AI Agent](./img/01.jpg)
 
