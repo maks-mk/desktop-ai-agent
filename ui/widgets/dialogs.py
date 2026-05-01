@@ -1407,11 +1407,11 @@ class ModelSettingsDialog(QDialog):
         current_model = self._get_current_model_value()
         if self._model_state == ModelLoadState.LOADED:
             self._apply_entry_image_support(current_model)
-        current_name = str(self.name_edit.text() or "").strip()
-        if (not self._name_manual_flags[row]) or not current_name:
-            self._loading_form = True
-            self.name_edit.setText(self._suggest_unique_id(current_model, row=row))
-            self._loading_form = False
+        self._loading_form = True
+        self.name_edit.setText(self._suggest_unique_id(current_model, row=row))
+        self._loading_form = False
+        if 0 <= row < len(self._name_manual_flags):
+            self._name_manual_flags[row] = False
         self._on_form_changed()
 
     def _on_form_changed(self) -> None:

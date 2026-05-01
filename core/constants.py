@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 # Agent version (single source of truth)
-AGENT_VERSION = "v0.66.99b"
+AGENT_VERSION = "v0.66.98b"
 
 # Determine the project root directory
 if getattr(sys, 'frozen', False):

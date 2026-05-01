@@ -420,7 +420,7 @@ class ModelProfileStore:
                 "key_error_timestamps": key_error_timestamps,
             }
 
-    def rotate_api_key(self, profile_id: str, failed_key: str, *, invalidate: bool = False, restore_interval: int | None = None) -> dict[str, Any]:
+    def rotate_api_key(self, profile_id: str, failed_key: str) -> dict[str, Any]:
         with self._path_lock():
             payload = self.load()
             target_id = _clean_text(profile_id)
@@ -466,9 +466,3 @@ class ModelProfileStore:
                 payload = self.normalize(payload)
             return self.get_api_key_state(target_id)
             
-    def restore_invalid_keys(self, profile_id: str, *, restore_interval: int | None = None) -> dict[str, Any]:
-        """
-        Manually restore invalid keys that have exceeded the restore interval.
-        (Now a no-op since keys are no longer marked invalid)
-        """
-        return self.get_api_key_state(profile_id)

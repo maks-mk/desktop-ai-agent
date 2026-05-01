@@ -90,7 +90,7 @@ class ToolGroupWidget(QFrame):
             self._collapsed = True
             self.container.hide()
             self.header_btn.setChecked(False)
-        elif self._completed and self._collapsed:
+        elif self._completed:
             self._completion_announced = True
         self._sync_header()
 
