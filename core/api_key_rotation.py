@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from core.logging_config import SensitiveDataFilter
 from core.model_profiles import ModelProfileStore
 
 
@@ -59,6 +60,30 @@ def classify_api_key_error(error: Exception) -> str | None:
     return None
 
 
+def _setup_rotation_logger(config: Any) -> logging.Logger:
+    """Ensure the api_key_rotation logger writes to a dedicated log file."""
+    logger = logging.getLogger("agent.api_key_rotation")
+    # Avoid adding duplicate handlers on repeated instantiations
+    if any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+        return logger
+
+    log_file = getattr(config, "log_file", None)
+    if log_file is None:
+        return logger
+
+    rotation_log = Path(log_file).parent / "api_key_rotation.log"
+    try:
+        rotation_log.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(rotation_log), encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        handler.addFilter(SensitiveDataFilter())
+        logger.addHandler(handler)
+    except Exception:
+        pass
+    return logger
+
+
 def _mask_key(key: str, tail: int = 5) -> str:
     """Return key with only the first chars and last *tail* visible, middle replaced with ***.
     Short keys (<= tail+2) are returned as-is with *** appended."""
@@ -82,7 +107,7 @@ class RotatingChatModel:
         self._profile_store = ModelProfileStore(profile_store_path)
         self._llm_factory = llm_factory
         self._bound_tools = list(bound_tools or [])
-        self._logger = logging.getLogger("agent.api_key_rotation")
+        self._logger = _setup_rotation_logger(config)
         self._prototype_model = self._build_model(self._initial_api_key())
 
     def __getattr__(self, name: str) -> Any:
@@ -120,13 +145,8 @@ class RotatingChatModel:
 
             try:
                 result = await self._build_model(active_key).ainvoke(input, **kwargs)
-
-                # Успех. Если использовался не стартовый ключ — сохраняем
-                # новый индекс в store, чтобы следующий вызов начинался с него.
-                if offset != 0:
-                    self._profile_store.rotate_api_key(
-                        self._profile_id, api_keys[start_index]
-                    )
+                # Успех — индекс уже был сдвинут при предыдущих ошибках,
+                # следующий вызов начнёт с текущего рабочего ключа.
                 return result
 
             except Exception as exc:
@@ -162,8 +182,8 @@ class RotatingChatModel:
             f"[{tried_summary}]. Last error: {last_error}"
         )
         raise ApiKeyRotationExhaustedError(
-            f"All API keys for '{model_label}' have been used without success. "
-            "Please try again later or check your key limits and validity."
+            f"Все API-ключи для '{model_label}' исчерпаны за один полный цикл. "
+            "Проверьте лимиты и действительность ключей, либо повторите запрос позже."
         ) from last_error
 
     def _build_model(self, api_key: str) -> Any:

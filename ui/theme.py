@@ -267,20 +267,20 @@ def build_stylesheet() -> str:
     QLabel#ModelSettingsTitle {{
         color: {model_dialog_text};
         font-weight: 760;
-        font-size: 16pt;
+        font-size: 13pt;
         padding-left: 1px;
     }}
 
     QLabel#ModelSettingsSubtitle {{
         color: {model_dialog_muted};
-        font-size: 10.1pt;
+        font-size: 9pt;
         padding-left: 1px;
-        padding-bottom: 2px;
+        padding-bottom: 1px;
     }}
 
     QLabel#ModelSettingsMeta {{
         color: {model_dialog_muted};
-        font-size: 9.2pt;
+        font-size: 8.5pt;
         padding-left: 1px;
         background: transparent;
     }}
@@ -289,16 +289,16 @@ def build_stylesheet() -> str:
         color: {model_dialog_text};
         background: {model_dialog_chip_bg};
         border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 6}px;
-        padding: 5px 11px;
-        font-size: 8.8pt;
+        border-radius: {SOFT_RADIUS_MD + 4}px;
+        padding: 3px 8px;
+        font-size: 8pt;
         font-weight: 700;
     }}
 
     QFrame#ModelSettingsPane {{
         background: {model_dialog_card_alt};
         border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 6}px;
+        border-radius: {SOFT_RADIUS_MD + 4}px;
     }}
 
     QFrame#ModelSettingsFormCard,
@@ -306,20 +306,20 @@ def build_stylesheet() -> str:
     QFrame#ModelSettingsHelperCard {{
         background: {model_dialog_card};
         border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 4}px;
+        border-radius: {SOFT_RADIUS_MD + 2}px;
     }}
 
     QLabel#ModelSettingsSummaryLabel {{
         color: {model_dialog_muted};
         background: transparent;
-        font-size: 9pt;
+        font-size: 8.5pt;
         font-weight: 600;
     }}
 
     QLabel#ModelSettingsHelperTitle {{
         color: {model_dialog_text};
         background: transparent;
-        font-size: 9.6pt;
+        font-size: 9pt;
         font-weight: 700;
     }}
 
@@ -340,9 +340,9 @@ def build_stylesheet() -> str:
     QLineEdit#ModelSettingsSearchField {{
         background: {model_dialog_field_bg};
         border: 1px solid {model_dialog_field_border};
-        border-radius: {SOFT_RADIUS_MD + 4}px;
-        min-height: 36px;
-        padding: 4px 12px;
+        border-radius: {SOFT_RADIUS_MD + 2}px;
+        min-height: 28px;
+        padding: 3px 8px;
         color: {model_dialog_text};
         selection-background-color: {model_dialog_selected};
     }}
@@ -356,8 +356,8 @@ def build_stylesheet() -> str:
         border: none;
         background: transparent;
         border-radius: {SOFT_RADIUS_MD}px;
-        padding: 7px 4px;
-        margin: 3px 0px;
+        padding: 5px 3px;
+        margin: 2px 0px;
         color: {model_dialog_text};
     }}
 
@@ -369,7 +369,7 @@ def build_stylesheet() -> str:
     QWidget#ModelProfileRowCard {{
         background: {model_dialog_card};
         border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 6}px;
+        border-radius: {SOFT_RADIUS_MD + 4}px;
     }}
 
     QWidget#ModelProfileRowCard[selectedProfile="true"] {{
@@ -384,7 +384,7 @@ def build_stylesheet() -> str:
 
     QLabel#ModelProfileItemTitle {{
         color: {model_dialog_text};
-        font-size: 10.8pt;
+        font-size: 9.5pt;
         font-weight: 700;
         background: transparent;
         padding: 0px;
@@ -392,7 +392,7 @@ def build_stylesheet() -> str:
 
     QLabel#ModelProfileItemMeta {{
         color: {model_dialog_muted};
-        font-size: 9.2pt;
+        font-size: 8.5pt;
         background: transparent;
         padding: 0px;
     }}
@@ -401,9 +401,9 @@ def build_stylesheet() -> str:
         background: {model_dialog_soft};
         color: {model_dialog_muted};
         border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 6}px;
-        padding: 2px 8px;
-        font-size: 8.2pt;
+        border-radius: {SOFT_RADIUS_MD + 4}px;
+        padding: 1px 6px;
+        font-size: 7.8pt;
         font-weight: 700;
     }}
 
@@ -469,8 +469,8 @@ def build_stylesheet() -> str:
         background: {model_dialog_field_bg};
         border: 1px solid {model_dialog_field_border};
         border-radius: {SOFT_RADIUS_MD + 2}px;
-        min-height: 34px;
-        padding: 4px 10px;
+        min-height: 28px;
+        padding: 3px 8px;
         color: {model_dialog_text};
         selection-background-color: {model_dialog_selected};
     }}
@@ -570,18 +570,18 @@ def build_stylesheet() -> str:
         background: transparent;
         color: {model_dialog_text};
         border: none;
-        min-height: 22px;
-        padding: 0px 2px 2px 0px;
-        font-size: 9.8pt;
+        min-height: 18px;
+        padding: 0px;
+        font-size: 9pt;
         font-weight: 700;
     }}
 
     QPushButton#SettingsAddButton,
     QPushButton#SettingsDeleteButton {{
-        min-height: 38px;
-        font-size: 9.8pt;
+        min-height: 30px;
+        font-size: 9pt;
         font-weight: 700;
-        border-radius: {SOFT_RADIUS_MD + 4}px;
+        border-radius: {SOFT_RADIUS_MD + 2}px;
         border: 1px solid {model_dialog_field_border};
     }}
 
@@ -609,17 +609,17 @@ def build_stylesheet() -> str:
     }}
 
     QPushButton#ModelSettingsInlineButton {{
-        min-height: 34px;
-        padding: 4px 12px;
-        font-size: 9.4pt;
+        min-height: 28px;
+        padding: 3px 10px;
+        font-size: 9pt;
         font-weight: 600;
     }}
 
     QToolButton#ModelSettingsInlineToolButton {{
-        min-width: 32px;
-        max-width: 32px;
-        min-height: 32px;
-        max-height: 32px;
+        min-width: 26px;
+        max-width: 26px;
+        min-height: 26px;
+        max-height: 26px;
         padding: 0px;
     }}
 
@@ -642,7 +642,7 @@ def build_stylesheet() -> str:
     QLabel#ModelSettingsHintText {{
         color: {model_dialog_muted};
         background: transparent;
-        font-size: 8.8pt;
+        font-size: 8.2pt;
         padding-left: 2px;
     }}
 
@@ -666,7 +666,7 @@ def build_stylesheet() -> str:
     QDialog#ModelSettingsDialog QDialogButtonBox,
     QDialog#ApiKeyRotationDialog QDialogButtonBox {{
         border-top: 1px solid {model_dialog_border};
-        padding-top: 10px;
+        padding-top: 6px;
     }}
 
     QDialog#ModelSettingsDialog QPushButton#PrimaryButton,
@@ -676,7 +676,7 @@ def build_stylesheet() -> str:
         border: 1px solid {blend_hex("#5B8DEF", "#FFFFFF", 0.10)};
         border-radius: {SOFT_RADIUS_MD + 4}px;
         font-weight: 700;
-        padding: 4px 14px;
+        padding: 3px 10px;
     }}
 
     QDialog#ModelSettingsDialog QPushButton#PrimaryButton:hover,
@@ -747,6 +747,12 @@ def build_stylesheet() -> str:
         color: {TEXT_PRIMARY};
         font-weight: 600;
         font-size: 12pt;
+    }}
+
+    QLabel#ModelSettingsSectionTitle {{
+        color: {TEXT_PRIMARY};
+        font-weight: 600;
+        font-size: 10pt;
     }}
 
     QLabel#SidebarSectionTitle {{

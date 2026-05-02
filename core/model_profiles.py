@@ -425,7 +425,7 @@ class ModelProfileStore:
             payload = self.load()
             target_id = _clean_text(profile_id)
             failed_key = _clean_text(failed_key)
-            profiles =[dict(item) for item in payload.get("profiles", []) or[]]
+            profiles = [dict(item) for item in payload.get("profiles", []) or []]
             profile_index = next(
                 (
                     index
@@ -438,7 +438,7 @@ class ModelProfileStore:
                 return self.get_api_key_state(target_id)
 
             profile = dict(profiles[profile_index])
-            api_keys = list(profile.get("api_keys") or[])
+            api_keys = list(profile.get("api_keys") or [])
 
             current_index, current_key = _normalize_api_key_index(
                 profile.get("api_key_index"),

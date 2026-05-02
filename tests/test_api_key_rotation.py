@@ -214,7 +214,7 @@ class ApiKeyRotationTests(unittest.TestCase):
         with self.assertRaises(ApiKeyRotationExhaustedError) as ctx:
             asyncio.run(model.ainvoke("hello"))
 
-        self.assertIn("All API keys", str(ctx.exception))
+        self.assertIn("Все API-ключи", str(ctx.exception))
         self.assertEqual(calls, ["sk-1", "sk-2"])
 
 

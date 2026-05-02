@@ -228,8 +228,8 @@ class ModelSettingsDialog(QDialog):
         self.setObjectName("ModelSettingsDialog")
         self.setWindowTitle("Model Profiles")
         self.setModal(True)
-        self.resize(1050, 670)
-        self.setMinimumSize(760, 420)
+        self.resize(1020, 620)
+        self.setMinimumSize(900, 540)
 
         normalized = normalize_profiles_payload(payload or {})
         self._profiles: list[dict[str, Any]] = [dict(item) for item in normalized.get("profiles", [])]
@@ -252,18 +252,18 @@ class ModelSettingsDialog(QDialog):
         self._name_manual_flags = self._compute_initial_name_manual_flags()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
 
         hero_card = QFrame()
         hero_card.setObjectName("ModelSettingsHeroCard")
         hero_layout = QHBoxLayout(hero_card)
-        hero_layout.setContentsMargins(10, 8, 10, 8)
-        hero_layout.setSpacing(10)
+        hero_layout.setContentsMargins(18, 16, 18, 16)
+        hero_layout.setSpacing(16)
 
         hero_copy = QVBoxLayout()
         hero_copy.setContentsMargins(0, 0, 0, 0)
-        hero_copy.setSpacing(3)
+        hero_copy.setSpacing(6)
 
         header_title = QLabel("Model Profiles")
         header_title.setObjectName("ModelSettingsTitle")
@@ -285,7 +285,7 @@ class ModelSettingsDialog(QDialog):
 
         hero_stats = QVBoxLayout()
         hero_stats.setContentsMargins(0, 0, 0, 0)
-        hero_stats.setSpacing(4)
+        hero_stats.setSpacing(8)
 
         self.profile_count_chip = QLabel("")
         self.profile_count_chip.setObjectName("ModelSettingsChip")
@@ -305,14 +305,14 @@ class ModelSettingsDialog(QDialog):
         left_container = QFrame()
         left_container.setObjectName("ModelSettingsPane")
         left = QVBoxLayout(left_container)
-        left.setContentsMargins(8, 8, 8, 8)
-        left.setSpacing(6)
+        left.setContentsMargins(12, 12, 12, 12)
+        left.setSpacing(8)
 
         left_header = QHBoxLayout()
         left_header.setContentsMargins(0, 0, 0, 0)
-        left_header.setSpacing(4)
+        left_header.setSpacing(6)
         left_label = QLabel("Library")
-        left_label.setObjectName("ModelSettingsSectionTitle")
+        left_label.setObjectName("SectionTitle")
         left_header.addWidget(left_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
         left_header.addStretch(1)
         left.addLayout(left_header)
@@ -323,25 +323,25 @@ class ModelSettingsDialog(QDialog):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setAccessibleName("Profile search")
         self.search_edit.setAccessibleDescription("Filter profiles by name, provider, or model")
-        self.search_edit.addAction(_fa_icon("fa5s.search", color=TEXT_MUTED, size=10), QLineEdit.LeadingPosition)
+        self.search_edit.addAction(_fa_icon("fa5s.search", color=TEXT_MUTED, size=12), QLineEdit.LeadingPosition)
         left.addWidget(self.search_edit)
 
         self.profile_list = QListWidget()
         self.profile_list.setObjectName("ModelProfileList")
-        self.profile_list.setMinimumWidth(240)
+        self.profile_list.setMinimumWidth(280)
         self.profile_list.setAccessibleName("Profile list")
         self.profile_list.setAccessibleDescription("Select a model profile to edit")
         self.profile_list.currentRowChanged.connect(self._on_selection_changed)
         left.addWidget(self.profile_list, 1)
 
         left_buttons = QHBoxLayout()
-        left_buttons.setSpacing(4)
+        left_buttons.setSpacing(6)
         self.add_button = QPushButton("New Profile")
         self.add_button.setObjectName("SettingsAddButton")
-        self.add_button.setIcon(_fa_icon("fa5s.plus", color=TEXT_PRIMARY, size=10))
+        self.add_button.setIcon(_fa_icon("fa5s.plus", color=TEXT_PRIMARY, size=11))
         self.delete_button = QPushButton("Remove")
         self.delete_button.setObjectName("SettingsDeleteButton")
-        self.delete_button.setIcon(_fa_icon("fa5s.trash", color="#F08F8F", size=10))
+        self.delete_button.setIcon(_fa_icon("fa5s.trash", color="#F08F8F", size=11))
         left_buttons.addWidget(self.add_button)
         left_buttons.addWidget(self.delete_button)
         left.addLayout(left_buttons)
@@ -354,14 +354,14 @@ class ModelSettingsDialog(QDialog):
         right_container = QFrame()
         right_container.setObjectName("ModelSettingsPane")
         right = QVBoxLayout(right_container)
-        right.setContentsMargins(8, 8, 8, 8)
-        right.setSpacing(6)
+        right.setContentsMargins(12, 12, 12, 12)
+        right.setSpacing(10)
 
         right_header = QHBoxLayout()
         right_header.setContentsMargins(0, 0, 0, 0)
-        right_header.setSpacing(4)
+        right_header.setSpacing(6)
         right_label = QLabel("Editor")
-        right_label.setObjectName("ModelSettingsSectionTitle")
+        right_label.setObjectName("SectionTitle")
         right_header.addWidget(right_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
         self.profile_state_chip = QLabel("No profile selected")
@@ -371,7 +371,7 @@ class ModelSettingsDialog(QDialog):
 
         self.duplicate_button = QPushButton("Duplicate")
         self.duplicate_button.setObjectName("ModelSettingsInlineButton")
-        self.duplicate_button.setIcon(_fa_icon("fa5s.copy", color=TEXT_PRIMARY, size=10))
+        self.duplicate_button.setIcon(_fa_icon("fa5s.copy", color=TEXT_PRIMARY, size=11))
         self.duplicate_button.setEnabled(False)
         right_header.addWidget(self.duplicate_button, 0, Qt.AlignRight | Qt.AlignVCenter)
         right.addLayout(right_header)
@@ -390,8 +390,8 @@ class ModelSettingsDialog(QDialog):
         self.summary_card = QFrame()
         self.summary_card.setObjectName("ModelSettingsSummaryCard")
         summary_layout = QHBoxLayout(self.summary_card)
-        summary_layout.setContentsMargins(6, 4, 6, 4)
-        summary_layout.setSpacing(4)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setSpacing(8)
 
         self.summary_provider = QLabel("Provider: —")
         self.summary_provider.setObjectName("ModelSettingsSummaryLabel")
@@ -413,14 +413,14 @@ class ModelSettingsDialog(QDialog):
         editor_content.setObjectName("ModelSettingsEditorContent")
         editor_layout = QVBoxLayout(editor_content)
         editor_layout.setContentsMargins(0, 0, 0, 0)
-        editor_layout.setSpacing(6)
+        editor_layout.setSpacing(10)
 
         form_frame = QFrame()
         form_frame.setObjectName("ModelSettingsFormCard")
         form_layout = QFormLayout(form_frame)
-        form_layout.setContentsMargins(6, 6, 6, 6)
-        form_layout.setHorizontalSpacing(6)
-        form_layout.setVerticalSpacing(5)
+        form_layout.setContentsMargins(10, 10, 10, 10)
+        form_layout.setHorizontalSpacing(10)
+        form_layout.setVerticalSpacing(8)
         form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form_layout.setRowWrapPolicy(QFormLayout.DontWrapRows)
         form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -450,14 +450,14 @@ class ModelSettingsDialog(QDialog):
 
         self.model_reload_button = QToolButton()
         self.model_reload_button.setObjectName("ModelSettingsInlineToolButton")
-        self.model_reload_button.setIcon(_fa_icon("fa5s.redo-alt", color=TEXT_MUTED, size=10))
+        self.model_reload_button.setIcon(_fa_icon("fa5s.redo-alt", color=TEXT_MUTED, size=12))
         self.model_reload_button.setToolTip("Повторить загрузку")
         self.model_reload_button.setAccessibleName("Retry model loading")
         self.model_reload_button.setCursor(Qt.PointingHandCursor)
 
         self.model_popup_button = QToolButton()
         self.model_popup_button.setObjectName("ModelSettingsInlineToolButton")
-        self.model_popup_button.setIcon(_fa_icon("fa5s.caret-down", color=TEXT_MUTED, size=10))
+        self.model_popup_button.setIcon(_fa_icon("fa5s.caret-down", color=TEXT_MUTED, size=11))
         self.model_popup_button.setToolTip("Показать список моделей")
         self.model_popup_button.setAccessibleName("Show model list")
         self.model_popup_button.setCursor(Qt.PointingHandCursor)
@@ -473,19 +473,19 @@ class ModelSettingsDialog(QDialog):
 
         self.api_key_reveal_button = QToolButton()
         self.api_key_reveal_button.setObjectName("ModelSettingsInlineToolButton")
-        self.api_key_reveal_button.setIcon(_fa_icon("fa5s.eye", color=TEXT_MUTED, size=10))
+        self.api_key_reveal_button.setIcon(_fa_icon("fa5s.eye", color=TEXT_MUTED, size=12))
         self.api_key_reveal_button.setToolTip("Show or hide API key")
         self.api_key_reveal_button.setAccessibleName("Toggle API key visibility")
 
         self.api_key_copy_button = QToolButton()
         self.api_key_copy_button.setObjectName("ModelSettingsInlineToolButton")
-        self.api_key_copy_button.setIcon(_fa_icon("fa5s.copy", color=TEXT_MUTED, size=10))
+        self.api_key_copy_button.setIcon(_fa_icon("fa5s.copy", color=TEXT_MUTED, size=12))
         self.api_key_copy_button.setToolTip("Copy API key")
         self.api_key_copy_button.setAccessibleName("Copy API key")
 
         self.api_key_rotation_button = QToolButton()
         self.api_key_rotation_button.setObjectName("ModelSettingsInlineToolButton")
-        self.api_key_rotation_button.setIcon(_fa_icon("fa5s.sync-alt", color=TEXT_MUTED, size=10))
+        self.api_key_rotation_button.setIcon(_fa_icon("fa5s.sync-alt", color=TEXT_MUTED, size=12))
         self.api_key_rotation_button.setToolTip("Configure API key rotation")
         self.api_key_rotation_button.setAccessibleName("Configure API key rotation")
 
@@ -537,7 +537,7 @@ class ModelSettingsDialog(QDialog):
         images_layout.addWidget(self.supports_images_checkbox)
         images_layout.addWidget(self.images_hint_label)
 
-        label_width = 68
+        label_width = 84
         name_label = QLabel("&Name")
         provider_label = QLabel("&Provider")
         model_label = QLabel("&Model")
@@ -567,8 +567,8 @@ class ModelSettingsDialog(QDialog):
         helper_card = QFrame()
         helper_card.setObjectName("ModelSettingsHelperCard")
         helper_layout = QVBoxLayout(helper_card)
-        helper_layout.setContentsMargins(8, 6, 8, 6)
-        helper_layout.setSpacing(3)
+        helper_layout.setContentsMargins(12, 10, 12, 10)
+        helper_layout.setSpacing(4)
         helper_title = QLabel("Editing notes")
         helper_title.setObjectName("ModelSettingsHelperTitle")
         helper_body = QLabel(
@@ -584,11 +584,11 @@ class ModelSettingsDialog(QDialog):
         editor_scroll.setWidget(editor_content)
         right.addWidget(editor_scroll, 1)
 
-        left_container.setMinimumWidth(260)
-        right_container.setMinimumWidth(360)
+        left_container.setMinimumWidth(320)
+        right_container.setMinimumWidth(430)
         self.body_splitter.addWidget(left_container)
         self.body_splitter.addWidget(right_container)
-        self.body_splitter.setSizes([270, 500])
+        self.body_splitter.setSizes([330, 580])
         root.addWidget(self.body_splitter, 1)
 
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
@@ -597,10 +597,10 @@ class ModelSettingsDialog(QDialog):
         if self.save_button is not None:
             self.save_button.setObjectName("PrimaryButton")
             self.save_button.setIcon(_fa_icon("fa5s.save", color="#FFFFFF", size=11))
-            self.save_button.setMinimumHeight(24)
+            self.save_button.setMinimumHeight(30)
         self.close_button = actions.button(QDialogButtonBox.StandardButton.Close)
         if self.close_button is not None:
-            self.close_button.setMinimumHeight(24)
+            self.close_button.setMinimumHeight(30)
         root.addWidget(actions)
 
         self.add_button.clicked.connect(self._add_profile)
@@ -1407,11 +1407,11 @@ class ModelSettingsDialog(QDialog):
         current_model = self._get_current_model_value()
         if self._model_state == ModelLoadState.LOADED:
             self._apply_entry_image_support(current_model)
-        self._loading_form = True
-        self.name_edit.setText(self._suggest_unique_id(current_model, row=row))
-        self._loading_form = False
-        if 0 <= row < len(self._name_manual_flags):
-            self._name_manual_flags[row] = False
+        current_name = str(self.name_edit.text() or "").strip()
+        if (not self._name_manual_flags[row]) or not current_name:
+            self._loading_form = True
+            self.name_edit.setText(self._suggest_unique_id(current_model, row=row))
+            self._loading_form = False
         self._on_form_changed()
 
     def _on_form_changed(self) -> None:

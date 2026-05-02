@@ -11,7 +11,7 @@
     "type": "remote",
     "url": "https://mcp.context7.com/mcp",
     "transport": "http",
-    "enabled": false,
+    "enabled": true,
     "policy": {
       "read_only": true
     }
@@ -23,7 +23,7 @@
       "@modelcontextprotocol/server-sequential-thinking"
     ],
     "transport": "stdio",
-    "enabled": false,
+    "enabled": true,
     "policy": {
       "read_only": true
     }
