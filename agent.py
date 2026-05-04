@@ -67,6 +67,7 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             temperature=config.temperature,
             api_key=api_key,
             base_url=config.openai_base_url,
+            max_retries=0,
             stream_usage=True,
         )
     raise ValueError(f"Unknown provider: {config.provider}")

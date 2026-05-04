@@ -10,6 +10,7 @@ from typing import Iterable, List, Sequence
 from langchain_core.messages import SystemMessage
 
 from core.config import AgentConfig
+from core.message_utils import compact_text
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,9 @@ class RuntimePromptPolicyBuilder:
             f"Local timezone: {environment.timezone_name} ({environment.utc_offset})",
             f"Current date: {datetime.now().strftime('%Y-%m-%d')}",
         ]
+        current_task = compact_text(str(context.current_task or "").strip(), 240)
+        if current_task:
+            lines.append(f"Current task: {current_task}")
         return "\n".join(lines)
 
     def _build_execution_environment_line(self, environment: RuntimeExecutionEnvironment | None = None) -> str:

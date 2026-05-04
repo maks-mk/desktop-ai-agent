@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 # Agent version (single source of truth)
-AGENT_VERSION = "v0.66.992b"
+AGENT_VERSION = "v0.66.993b"
 
 # Determine the project root directory
 if getattr(sys, 'frozen', False):
@@ -17,9 +17,11 @@ else:
 
 SUMMARY_PROMPT_TEMPLATE = (
     "Current memory:\n<previous_context>\n{summary}\n</previous_context>\n\n"
+    "Operational state:\n{state_snapshot}\n\n"
     "New events:\n{history_text}\n\n"
     "Update the memory. Rules:\n"
     "- Merge new events, do not repeat existing facts.\n"
+    "- Preserve the active task, unresolved blockers, pending decisions, and recovery/tool state when present.\n"
     "- Keep: paths, commands, outcomes, errors, decisions, task status.\n"
     "- Drop: greetings, filler, raw tool output already reflected in outcomes.\n"
     "- Be concise. Bullet points preferred.\n"

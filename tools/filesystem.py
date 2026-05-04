@@ -28,7 +28,7 @@ class FilesystemBackend(Protocol):
 
     def set_policy(self, policy: SafetyPolicy) -> None: ...
     def file_info(self, path: str) -> str: ...
-    def read_file(self, path: str, offset: int = 0, limit: int = 2000, show_line_numbers: bool = True) -> str: ...
+    def read_file(self, path: str, offset: int = 0, limit: int = 2000, show_line_numbers: bool = False) -> str: ...
     def write_file(self, path: str, content: str) -> str: ...
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
     def list_files(self, path: str = ".", include_hidden: bool = False) -> str: ...
@@ -67,6 +67,11 @@ def _sync_backend_working_directory() -> Path:
     if fs_manager.cwd != cwd:
         fs_manager.cwd = cwd
     return cwd
+
+
+def _get_synced_backend() -> FilesystemBackend:
+    _sync_backend_working_directory()
+    return fs_manager
 
 
 def set_safety_policy(policy: SafetyPolicy):
@@ -115,6 +120,16 @@ def _cleanup_edit_path(raw: Any) -> str | None:
     return text or None
 
 
+def _resolve_payload_path(data: dict[str, Any]) -> str | None:
+    for key in ("path", "file_path", "filepath", "dir_path", "directory_path"):
+        if key not in data:
+            continue
+        cleaned = _cleanup_edit_path(data.get(key))
+        if cleaned:
+            return cleaned
+    return None
+
+
 class EditFileInput(BaseModel):
     """Input for edit_file; aliases accepted for old/new text."""
 
@@ -122,6 +137,7 @@ class EditFileInput(BaseModel):
 
     path: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="File path.",
     )
     old_string: str | None = Field(
@@ -150,7 +166,7 @@ class EditFileInput(BaseModel):
                     data[field_name] = data[alias]
                     break
 
-        data["path"] = _cleanup_edit_path(data.get("path"))
+        data["path"] = _resolve_payload_path(data)
 
         for key in ("old_string", "new_string"):
             if data.get(key) is None:
@@ -166,7 +182,9 @@ class WriteFileInput(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    path: str = Field(
+    path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="Workspace-relative file path to create or overwrite.",
     )
     content: str = Field(
@@ -183,7 +201,7 @@ class WriteFileInput(BaseModel):
         if not isinstance(value, dict):
             return value
         data = dict(value)
-        data["path"] = _cleanup_edit_path(data.get("path"))
+        data["path"] = _resolve_payload_path(data)
         if data.get("content") is None:
             for alias in ("text", "body", "contents"):
                 if data.get(alias) is not None:
@@ -194,52 +212,97 @@ class WriteFileInput(BaseModel):
         return data
 
 
+class DeleteFileInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("path", "file_path", "filepath"),
+        description="Workspace-relative file path to delete.",
+    )
+
+
+class DeleteDirectoryInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("path", "dir_path", "directory_path"),
+        description="Workspace-relative directory path to delete.",
+    )
+    recursive: bool = Field(default=False, description="Delete non-empty directory recursively when true.")
+
+
 @tool("file_info")
 def file_info_tool(path: str) -> str:
     """File metadata: size, lines, suggested read_file chunk."""
-    return fs_manager.file_info(path)
+    return _get_synced_backend().file_info(path)
 
 
 @tool("read_file")
-def read_file_tool(path: str, offset: int = 0, limit: int = 2000, show_line_numbers: bool = True) -> str:
+def read_file_tool(path: str, offset: int = 0, limit: int = 2000, show_line_numbers: bool = False) -> str:
     """Read a file with pagination."""
-    return fs_manager.read_file(path, offset, limit, show_line_numbers)
+    return _get_synced_backend().read_file(path, offset, limit, show_line_numbers)
 
 
 @tool("write_file", args_schema=WriteFileInput)
-def write_file_tool(path: str, content: str) -> str:
+def write_file_tool(path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
     """Create or overwrite a file using the exact full content provided."""
-    return fs_manager.write_file(path, content)
+    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    if not resolved_path:
+        return format_error(ErrorType.VALIDATION, "Missing required field: path.")
+    if content is None:
+        for alias in ("text", "body", "contents"):
+            alias_value = kwargs.get(alias)
+            if alias_value is not None:
+                content = str(alias_value)
+                break
+    if content is None:
+        return format_error(ErrorType.VALIDATION, "Missing required field: content.")
+    return _get_synced_backend().write_file(resolved_path, str(content))
 
 
 @tool("edit_file", args_schema=EditFileInput)
-def edit_file_tool(path: str | None = None, old_string: str | None = None, new_string: str | None = None) -> str:
+def edit_file_tool(path: str | None = None, old_string: str | None = None, new_string: str | None = None, **kwargs: Any) -> str:
     """Replace text in a file."""
-    if not path:
+    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    if not resolved_path:
         return format_error(ErrorType.VALIDATION, "Missing required field: path.")
+    if old_string is None:
+        for alias in _EDIT_FILE_ALIAS_MAP["old_string"]:
+            alias_value = kwargs.get(alias)
+            if alias_value is not None:
+                old_string = str(alias_value)
+                break
     if old_string is None or not str(old_string).strip():
         return format_error(
             ErrorType.VALIDATION,
             "Missing required field: old_string. Accepted aliases: old_text, search_text, find_text.",
         )
     if new_string is None:
+        for alias in _EDIT_FILE_ALIAS_MAP["new_string"]:
+            alias_value = kwargs.get(alias)
+            if alias_value is not None:
+                new_string = str(alias_value)
+                break
+    if new_string is None:
         return format_error(
             ErrorType.VALIDATION,
             "Missing required field: new_string. Accepted aliases: new_text, replace_text, replacement.",
         )
-    return fs_manager.edit_file(path, old_string, new_string)
+    return _get_synced_backend().edit_file(resolved_path, old_string, new_string)
 
 
 @tool("list_directory")
 def list_directory_tool(path: str = ".", include_hidden: bool = False) -> str:
     """List files and directories."""
-    return fs_manager.list_files(path, include_hidden)
+    return _get_synced_backend().list_files(path, include_hidden)
 
 
 @tool("search_in_file")
 def search_in_file_tool(path: str, pattern: str, use_regex: bool = False, ignore_case: bool = False) -> str:
     """Search text or regex in one file."""
-    return fs_manager.search_in_file(path, pattern, use_regex, ignore_case)
+    return _get_synced_backend().search_in_file(path, pattern, use_regex, ignore_case)
 
 
 @tool("search_in_directory")
@@ -254,7 +317,7 @@ def search_in_directory_tool(
     max_depth: Optional[int] = None,
 ) -> str:
     """Search text or regex across a directory."""
-    return fs_manager.search_in_directory(
+    return _get_synced_backend().search_in_directory(
         path,
         pattern,
         use_regex,
@@ -269,19 +332,27 @@ def search_in_directory_tool(
 @tool("tail_file")
 def tail_file_tool(path: str, lines: int = 50, show_line_numbers: bool = True) -> str:
     """Read the last N lines of a file."""
-    return fs_manager.tail_file(path, lines, show_line_numbers)
+    return _get_synced_backend().tail_file(path, lines, show_line_numbers)
 
 
-@tool("safe_delete_file")
-async def safe_delete_file(file_path: str) -> str:
+@tool("safe_delete_file", args_schema=DeleteFileInput)
+async def safe_delete_file(path: str | None = None, **kwargs: Any) -> str:
     """Delete a workspace file."""
-    return await asyncio.to_thread(fs_manager.delete_file, file_path)
+    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    if not resolved_path:
+        return format_error(ErrorType.VALIDATION, "Missing required field: path.")
+    backend = _get_synced_backend()
+    return await asyncio.to_thread(backend.delete_file, resolved_path)
 
 
-@tool("safe_delete_directory")
-async def safe_delete_directory(dir_path: str, recursive: bool = False) -> str:
+@tool("safe_delete_directory", args_schema=DeleteDirectoryInput)
+async def safe_delete_directory(path: str | None = None, recursive: bool = False, **kwargs: Any) -> str:
     """Delete a workspace directory."""
-    return await asyncio.to_thread(fs_manager.delete_directory, dir_path, recursive)
+    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    if not resolved_path:
+        return format_error(ErrorType.VALIDATION, "Missing required field: path.")
+    backend = _get_synced_backend()
+    return await asyncio.to_thread(backend.delete_directory, resolved_path, recursive)
 
 
 _DOWNLOAD_HEADERS = {
@@ -383,7 +454,7 @@ async def download_file(url: str, filename: Optional[str] = None) -> str:
 @tool("find_file")
 def find_file_tool(name_pattern: str, path: str = ".", max_results: int = 200, max_depth: Optional[int] = None) -> str:
     """Find files by name pattern."""
-    return fs_manager.find_files(path, name_pattern, max_results, max_depth)
+    return _get_synced_backend().find_files(path, name_pattern, max_results, max_depth)
 
 
 __all__ = [

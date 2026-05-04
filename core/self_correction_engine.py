@@ -33,6 +33,21 @@ class RepairPlan:
 
 _PATH_LIKE_FIELDS = frozenset({"path", "file_path", "dir_path", "source", "destination", "cwd"})
 _EDIT_TARGET_FIELDS = frozenset({"old_string", "new_string"})
+_CANONICAL_PATH_TOOL_NAMES = frozenset(
+    {
+        "file_info",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_directory",
+        "search_in_file",
+        "search_in_directory",
+        "tail_file",
+        "find_file",
+        "safe_delete_file",
+        "safe_delete_directory",
+    }
+)
 
 
 def repair_fingerprint(tool_name: str, tool_args: Dict[str, Any], error_type: str = "") -> str:
@@ -210,6 +225,14 @@ def normalize_tool_args(tool_name: str, tool_args: Dict[str, Any], current_task:
     normalized = _normalize_args_dict(tool_args)
     changes: List[str] = []
     name = str(tool_name or "").strip()
+
+    if name in _CANONICAL_PATH_TOOL_NAMES and "path" not in normalized:
+        for alias in ("file_path", "filepath", "dir_path", "directory_path"):
+            candidate = normalized.get(alias)
+            if isinstance(candidate, str) and candidate.strip():
+                normalized["path"] = candidate
+                changes.append(f"{alias}->path")
+                break
 
     if name in {"find_process_by_port"}:
         port_value = normalized.get("port")

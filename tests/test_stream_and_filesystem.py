@@ -682,6 +682,20 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertEqual(result, "hello")
 
+    def test_read_file_tool_defaults_to_plain_content_without_line_numbers(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        target = tmp / "demo.txt"
+        target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+        result = filesystem.read_file_tool.invoke({"path": "demo.txt"})
+
+        self.assertTrue(result.startswith("alpha\nbeta"))
+        self.assertNotIn("     1  alpha", result)
+
     def test_search_in_file_matches_plain_literal_substrings(self):
         tmp = self._workspace_tempdir()
         manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
@@ -766,6 +780,61 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertIn("Success: File edited.", result)
         self.assertEqual(target.read_text(encoding="utf-8"), "hello new world")
+
+    def test_edit_file_accepts_file_path_alias(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        target = tmp / "alias.txt"
+        target.write_text("before", encoding="utf-8")
+
+        result = filesystem.edit_file_tool.invoke(
+            {
+                "file_path": "alias.txt",
+                "old_string": "before",
+                "new_string": "after",
+            }
+        )
+
+        self.assertIn("Success: File edited.", result)
+        self.assertEqual(target.read_text(encoding="utf-8"), "after")
+
+    def test_write_file_accepts_file_path_alias(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        result = filesystem.write_file_tool.invoke(
+            {
+                "file_path": "nested/out.txt",
+                "content": "hello",
+            }
+        )
+
+        self.assertIn("Success: File 'nested/out.txt' saved", result)
+        self.assertEqual((tmp / "nested" / "out.txt").read_text(encoding="utf-8"), "hello")
+
+    def test_safe_delete_tools_accept_canonical_path_aliases(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        file_target = tmp / "delete-me.txt"
+        file_target.write_text("bye", encoding="utf-8")
+        dir_target = tmp / "delete-dir"
+        dir_target.mkdir()
+
+        file_result = asyncio.run(filesystem.safe_delete_file.ainvoke({"path": "delete-me.txt"}))
+        dir_result = asyncio.run(filesystem.safe_delete_directory.ainvoke({"path": "delete-dir"}))
+
+        self.assertIn("Success", file_result)
+        self.assertIn("Success", dir_result)
+        self.assertFalse(file_target.exists())
+        self.assertFalse(dir_target.exists())
 
     def test_edit_file_missing_new_string_returns_friendly_validation_error(self):
         tmp = self._workspace_tempdir()

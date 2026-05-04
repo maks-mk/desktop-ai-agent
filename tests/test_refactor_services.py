@@ -84,6 +84,7 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertNotIn("Always respond in Russian.", joined)
         self.assertNotIn("Before using any tool or tool batch", joined)
         self.assertNotIn("After any system change", joined)
+        self.assertIn("Current task: Проверь задачу", joined)
         self.assertIn("TOOLS:", joined)
         self.assertIn("TOOL INTENT REQUIREMENT:", joined)
         self.assertIn("Never send an empty assistant message when tool_calls are present.", joined)

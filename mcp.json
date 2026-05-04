@@ -1,17 +1,9 @@
 {
-  "filesystem": {
-    "command": "mcp-server-filesystem",
-    "args": [
-      "."
-    ],
-    "transport": "stdio",
-    "enabled": false
-  },
   "context7": {
     "type": "remote",
     "url": "https://mcp.context7.com/mcp",
     "transport": "http",
-    "enabled": true,
+    "enabled": false,
     "policy": {
       "read_only": true
     }
@@ -23,7 +15,7 @@
       "@modelcontextprotocol/server-sequential-thinking"
     ],
     "transport": "stdio",
-    "enabled": true,
+    "enabled": false,
     "policy": {
       "read_only": true
     }

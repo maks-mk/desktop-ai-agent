@@ -7,7 +7,7 @@ from typing import Any, List
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 
-from core.api_key_rotation import ApiKeyRotationExhaustedError
+from core.api_key_rotation import ApiKeyRotationExhaustedError, classify_api_key_error
 from core.state import AgentState
 from core.node_errors import EmptyLLMResponseError
 from core.message_utils import compact_text, stringify_content
@@ -148,6 +148,11 @@ class LLMMixin:
     def _is_fatal_llm_error(self, error: Exception) -> bool:
         if isinstance(error, ApiKeyRotationExhaustedError):
             return True
+        error_kind = classify_api_key_error(error)
+        if error_kind in {"auth", "billing"}:
+            return True
+        if error_kind == "rate_limit":
+            return False
         err_str = " ".join(str(error).lower().split())
         fatal_markers = (
             "insufficient_balance",

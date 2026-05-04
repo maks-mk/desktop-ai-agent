@@ -20,32 +20,65 @@ def _normalized_error_text(error: Exception) -> str:
     return " ".join(str(error).lower().split())
 
 
+def _extract_status_code(error: Exception) -> int | None:
+    for candidate in (
+        getattr(error, "status_code", None),
+        getattr(getattr(error, "response", None), "status_code", None),
+    ):
+        if candidate is None:
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_provider_code_text(error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if callable(code):
+        try:
+            code = code()
+        except TypeError:
+            code = None
+    status = getattr(error, "status", None)
+    parts = [type(error).__name__, type(error).__module__, code, status]
+    return " ".join(str(part or "").strip().lower() for part in parts if str(part or "").strip())
+
+
 def classify_api_key_error(error: Exception) -> str | None:
-    status_code = getattr(error, "status_code", None)
+    status_code = _extract_status_code(error)
     if status_code in {401, 403}:
         return "auth"
+    if status_code == 402:
+        return "billing"
     if status_code == 429:
         return "rate_limit"
 
-    response = getattr(error, "response", None)
-    response_status = getattr(response, "status_code", None)
-    if response_status in {401, 403}:
-        return "auth"
-    if response_status == 429:
-        return "rate_limit"
-
     text = _normalized_error_text(error)
+    provider_code_text = _extract_provider_code_text(error)
+    combined = f"{provider_code_text} {text}".strip()
     auth_markers = (
+        "authenticationerror",
+        "permissiondenied",
+        "unauthenticated",
+        "forbidden",
         "invalid_api_key",
         "incorrect api key",
         "authentication failed",
         "unauthorized",
         "forbidden",
         "permission denied",
+        "permission_denied",
+        "invalid api key",
         "error code: 401",
         "error code: 403",
     )
     rate_limit_markers = (
+        "ratelimiterror",
+        "toomanyrequests",
+        "resourceexhausted",
+        "resource_exhausted",
         "429",
         "too many requests",
         "rate limit",
@@ -53,9 +86,19 @@ def classify_api_key_error(error: Exception) -> str | None:
         "insufficient_quota",
         "resource_exhausted",
     )
-    if any(marker in text for marker in auth_markers):
+    billing_markers = (
+        "402",
+        "payment required",
+        "insufficient_balance",
+        "insufficient balance",
+        "billing",
+        "credit balance",
+    )
+    if any(marker in combined for marker in auth_markers):
         return "auth"
-    if any(marker in text for marker in rate_limit_markers):
+    if any(marker in combined for marker in billing_markers):
+        return "billing"
+    if any(marker in combined for marker in rate_limit_markers):
         return "rate_limit"
     return None
 

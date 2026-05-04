@@ -141,10 +141,35 @@ class BaseMixin:
                     return content
         return ""
 
+    def _is_low_information_follow_up(self, content: str) -> bool:
+        normalized = " ".join(str(content or "").strip().lower().split()).strip(" .,!?:;…")
+        return normalized in {
+            "continue",
+            "continue please",
+            "go on",
+            "keep going",
+            "proceed",
+            "продолжай",
+            "продолжай пожалуйста",
+            "дальше",
+            "далее",
+            "продолжи",
+            "продолжи пожалуйста",
+        }
+
+    def _derive_specific_task(self, messages: List[BaseMessage]) -> str:
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage) and not self._is_internal_retry_message(message):
+                content = stringify_content(message.content).strip()
+                if content and content != REFLECTION_PROMPT and not self._is_low_information_follow_up(content):
+                    return content
+        return ""
+
     def _resolve_current_task(self, state: AgentState | None, messages: List[BaseMessage]) -> str:
         derived_task = self._derive_current_task(messages).strip()
+        specific_task = self._derive_specific_task(messages).strip()
         stored_task = str((state or {}).get("current_task") or "").strip()
-        if derived_task:
+        if derived_task and derived_task == specific_task:
             if stored_task and stored_task != derived_task:
                 self._log_run_event(
                     state,
@@ -154,6 +179,18 @@ class BaseMixin:
                     latest_user_message=compact_text(derived_task, 180),
                 )
             return derived_task
+        if stored_task:
+            if derived_task and derived_task != stored_task and self._is_low_information_follow_up(derived_task):
+                self._log_run_event(
+                    state,
+                    "current_task_preserved_from_state",
+                    run_id=None if state is None else state.get("run_id", ""),
+                    preserved_task=compact_text(stored_task, 180),
+                    latest_user_message=compact_text(derived_task, 180),
+                )
+            return stored_task
+        if specific_task:
+            return specific_task
         return stored_task
 
     def _active_tools_for_turn(

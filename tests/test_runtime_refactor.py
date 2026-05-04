@@ -557,6 +557,26 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["google_api_key"], "gm-test")
         self.assertNotIn("convert_system_message_to_human", captured)
 
+    def test_create_llm_for_openai_disables_sdk_retries(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-4o",
+                )
+            )
+
+        self.assertEqual(captured["model"], "gpt-4o")
+        self.assertEqual(captured["api_key"], "sk-test")
+        self.assertEqual(captured["max_retries"], 0)
+
     def test_build_initial_state_supports_text_and_image_attachments(self):
         state = build_initial_state(
             {
@@ -2213,6 +2233,35 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, HumanMessage)
         ]
         self.assertIn("проверь list_mistral_models.py", visible_humans)
+
+    async def test_continue_message_keeps_specific_current_task_in_context(self):
+        agent_llm = FakeLLM([AIMessage(content="Продолжаю работу по исходной задаче.")])
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[],
+            llm_with_tools=agent_llm,
+        )
+        state = {
+            **self._initial_state("исправь ротацию ключей"),
+            "messages": [
+                HumanMessage(content="исправь ротацию ключей"),
+                AIMessage(content="Понял, проверяю реализацию."),
+                HumanMessage(content="продолжай"),
+            ],
+            "current_task": "исправь ротацию ключей",
+            "turn_id": 2,
+        }
+
+        result = await nodes.agent_node(state)
+
+        self.assertEqual(result["current_task"], "исправь ротацию ключей")
+        system_texts = [
+            str(message.content)
+            for message in agent_llm.invocations[0]
+            if isinstance(message, SystemMessage)
+        ]
+        self.assertTrue(any("Current task: исправь ротацию ключей" in text for text in system_texts))
 
     async def test_agent_node_allows_prose_only_response_without_forced_recovery(self):
         agent_llm = FakeLLM([AIMessage(content="Сейчас исправлю файл и внесу правки.")])

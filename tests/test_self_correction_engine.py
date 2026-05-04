@@ -23,6 +23,21 @@ class SelfCorrectionEngineTests(unittest.TestCase):
         self.assertEqual(args["old_string"], "a")
         self.assertEqual(args["new_string"], "b")
 
+    def test_normalize_filesystem_path_aliases_to_canonical_path(self):
+        args, changes = normalize_tool_args(
+            "write_file",
+            {"file_path": "demo.txt", "content": "hello"},
+        )
+        self.assertIn("file_path->path", changes)
+        self.assertEqual(args["path"], "demo.txt")
+
+        delete_args, delete_changes = normalize_tool_args(
+            "safe_delete_directory",
+            {"dir_path": "build"},
+        )
+        self.assertIn("dir_path->path", delete_changes)
+        self.assertEqual(delete_args["path"], "build")
+
     def test_build_repair_plan_for_interactive_cli_exec(self):
         issue = {
             "tool_names": ["cli_exec"],
