@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 from uuid import uuid4
 
+from core.config import AgentConfig
 from core.session_store import SessionSnapshot, SessionStore
 from ui.runtime import AgentRunWorker
 
@@ -76,3 +77,32 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("snapshot", payload)
         self.assertIn("sessions", payload)
         self.assertEqual(payload["active_session_id"], worker.current_session.session_id)
+
+    async def test_build_config_for_active_profile_bootstraps_base_config_when_worker_config_missing(self):
+        worker = AgentRunWorker()
+        worker.base_config = None
+        worker.config = None
+        worker.profile_store = None
+        bootstrapped = AgentConfig(PROVIDER="openai", OPENAI_API_KEY="test-key", OPENAI_MODEL="gpt-4o")
+        model_profiles = {
+            "active_profile": "claude-via-openai-compatible",
+            "profiles": [
+                {
+                    "id": "claude-via-openai-compatible",
+                    "provider": "openai",
+                    "model": "claude-3-7-sonnet",
+                    "api_key": "sk-claude-proxy",
+                    "base_url": "http://127.0.0.1:3002/v1",
+                }
+            ],
+        }
+
+        with mock.patch("ui.runtime.setup_runtime", return_value=bootstrapped) as setup_mock:
+            result = worker._build_config_for_active_profile(model_profiles)
+
+        setup_mock.assert_called_once()
+        self.assertIs(worker.base_config, bootstrapped)
+        self.assertIs(worker.config, bootstrapped)
+        self.assertEqual(result.provider, "openai")
+        self.assertEqual(result.openai_model, "claude-3-7-sonnet")
+        self.assertEqual(result.openai_base_url, "http://127.0.0.1:3002/v1")

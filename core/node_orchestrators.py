@@ -282,8 +282,8 @@ class RecoveryTurnOrchestrator:
         step_count = int(state.get("steps", 0) or 0)
         recovery_state = owner._get_recovery_state(state, current_turn_id=current_turn_id)
         self_correction_limit = owner._hard_loop_ceiling()
-        hard_loop_ceiling = min(2, self_correction_limit) if self_correction_limit > 0 else 0
-        max_auto_repairs = min(1, self_correction_limit) if self_correction_limit > 0 else 0
+        hard_loop_ceiling = self_correction_limit if self_correction_limit > 0 else 0
+        max_auto_repairs = self_correction_limit if self_correction_limit > 0 else 0
 
         result = owner.recovery_manager.plan_recovery(
             state=state,

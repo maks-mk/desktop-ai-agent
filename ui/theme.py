@@ -219,8 +219,7 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD}px;
     }}
 
-    QDialog#ModelSettingsDialog,
-    QDialog#ApiKeyRotationDialog {{
+    QDialog#ModelSettingsDialog {{
         background: {model_dialog_bg};
         border: none;
     }}
@@ -230,29 +229,11 @@ def build_stylesheet() -> str:
         color: {model_dialog_text};
     }}
 
-    QDialog#ModelSettingsDialog QLabel,
-    QDialog#ApiKeyRotationDialog QLabel {{
+    QDialog#ModelSettingsDialog QLabel {{
         background: transparent;
     }}
 
-    QDialog#ApiKeyRotationDialog QFrame#ApiKeyRotationSurface {{
-        background: {model_dialog_bg};
-        border: none;
-    }}
-
-    QDialog#ApiKeyRotationDialog QFrame#ApiKeyRotationSurface QLabel,
-    QDialog#ApiKeyRotationDialog QFrame#ApiKeyRotationSurface QDialogButtonBox {{
-        background: transparent;
-        color: {model_dialog_text};
-    }}
-
-    QDialog#ApiKeyRotationDialog QFrame#ModelSettingsHeroCard {{
-        background: {model_dialog_card};
-        border: 1px solid {model_dialog_border};
-        border-radius: {SOFT_RADIUS_MD + 8}px;
-    }}
-
-    QDialog#ApiKeyRotationDialog QFrame#ModelSettingsPane {{
+    QFrame#ModelSettingsPane {{
         background: {model_dialog_card_alt};
         border: 1px solid {model_dialog_border};
         border-radius: {SOFT_RADIUS_MD + 6}px;
@@ -646,31 +627,16 @@ def build_stylesheet() -> str:
         padding-left: 2px;
     }}
 
-    QDialog#ApiKeyRotationDialog QPlainTextEdit#InlineCodeView {{
-        background: {model_dialog_field_bg};
-        border: 1px solid {model_dialog_field_border};
-        border-radius: {SOFT_RADIUS_MD + 4}px;
-        padding: 10px 12px;
-        color: {model_dialog_text};
-        selection-background-color: {model_dialog_selected};
-    }}
-
-    QDialog#ApiKeyRotationDialog QPlainTextEdit#InlineCodeView:focus {{
-        border: 1px solid {model_dialog_selected_border};
-    }}
-
     QSplitter::handle {{
         background: transparent;
     }}
 
-    QDialog#ModelSettingsDialog QDialogButtonBox,
-    QDialog#ApiKeyRotationDialog QDialogButtonBox {{
+    QDialog#ModelSettingsDialog QDialogButtonBox {{
         border-top: 1px solid {model_dialog_border};
         padding-top: 6px;
     }}
 
-    QDialog#ModelSettingsDialog QPushButton#PrimaryButton,
-    QDialog#ApiKeyRotationDialog QPushButton#PrimaryButton {{
+    QDialog#ModelSettingsDialog QPushButton#PrimaryButton {{
         background: {blend_hex("#5B8DEF", SURFACE_ALT, 0.12)};
         color: {TEXT_PRIMARY};
         border: 1px solid {blend_hex("#5B8DEF", "#FFFFFF", 0.10)};
@@ -679,13 +645,11 @@ def build_stylesheet() -> str:
         padding: 3px 10px;
     }}
 
-    QDialog#ModelSettingsDialog QPushButton#PrimaryButton:hover,
-    QDialog#ApiKeyRotationDialog QPushButton#PrimaryButton:hover {{
+    QDialog#ModelSettingsDialog QPushButton#PrimaryButton:hover {{
         background: {blend_hex("#5B8DEF", SURFACE_ALT, 0.20)};
     }}
 
-    QDialog#ModelSettingsDialog QPushButton,
-    QDialog#ApiKeyRotationDialog QPushButton {{
+    QDialog#ModelSettingsDialog QPushButton {{
         color: {model_dialog_text};
     }}
 
@@ -1648,19 +1612,6 @@ def build_stylesheet() -> str:
         font-family: "{MONO_FONT_FAMILY}";
         font-size: 9pt;
         padding: 8px 10px;
-    }}
-
-    QDialog#ApiKeyRotationDialog QPlainTextEdit#InlineCodeView {{
-        background: {model_dialog_field_bg};
-        color: {model_dialog_text};
-        border: 1px solid {model_dialog_field_border};
-        border-radius: {SOFT_RADIUS_MD + 4}px;
-        padding: 10px 12px;
-        selection-background-color: {model_dialog_selected};
-    }}
-
-    QDialog#ApiKeyRotationDialog QPlainTextEdit#InlineCodeView:focus {{
-        border: 1px solid {model_dialog_selected_border};
     }}
 
     QWidget#ToolsContainer,

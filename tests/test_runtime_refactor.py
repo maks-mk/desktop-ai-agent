@@ -570,12 +570,14 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     PROVIDER="openai",
                     OPENAI_API_KEY="sk-test",
                     OPENAI_MODEL="gpt-4o",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
                 )
             )
 
         self.assertEqual(captured["model"], "gpt-4o")
         self.assertEqual(captured["api_key"], "sk-test")
         self.assertEqual(captured["max_retries"], 0)
+        self.assertTrue(captured["stream_usage"])
 
     def test_build_initial_state_supports_text_and_image_attachments(self):
         state = build_initial_state(
@@ -1559,6 +1561,51 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["recovery_state"]["active_strategy"])
         self.assertEqual(result["recovery_state"]["llm_replan_attempted_for"], [])
         self.assertEqual(result["recovery_state"]["last_successful_evidence"], "Success: file contents")
+
+    async def test_recovery_node_does_not_stop_early_at_two_retries_when_budget_allows_more(self):
+        agent_llm = FakeLLM([])
+        read_tool = FakeTool("read_file", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(SELF_CORRECTION_RETRY_LIMIT=8),
+            llm=agent_llm,
+            tools=[read_tool],
+            llm_with_tools=agent_llm,
+            tool_metadata={"read_file": ToolMetadata(name="read_file", read_only=True)},
+        )
+
+        state = self._initial_state("Прочитай README.md")
+        state["self_correction_retry_count"] = 2
+        state["self_correction_fingerprint_history"] = ["fp-read"]
+        state["open_tool_issue"] = {
+            "turn_id": 1,
+            "kind": "protocol_error",
+            "summary": "Malformed tool payload.",
+            "tool_names": ["read_file"],
+            "tool_args": {"path": "README.md"},
+            "source": "agent",
+            "error_type": "VALIDATION",
+            "fingerprint": "fp-read",
+            "progress_fingerprint": "fp-read",
+            "details": {"protocol_reason": "tool_protocol_error"},
+        }
+        state["recovery_state"] = {
+            "turn_id": 1,
+            "active_issue": dict(state["open_tool_issue"]),
+            "active_strategy": {"strategy": "llm_replan", "progress_fingerprint": "fp-read"},
+            "strategy_queue": [],
+            "attempts_by_strategy": {"fp-read::llm_replan": 1},
+            "progress_markers": ["fp-read"],
+            "last_successful_evidence": "",
+            "external_blocker": None,
+            "llm_replan_attempted_for": ["fp-read"],
+        }
+
+        result = await nodes.recovery_node(state)
+
+        self.assertEqual(result["turn_outcome"], "recover_agent")
+        self.assertEqual(result["self_correction_retry_count"], 3)
+        self.assertIsNotNone(result["open_tool_issue"])
+        self.assertEqual(result["recovery_state"]["active_strategy"]["strategy"], "llm_replan")
 
     async def test_run_logger_writes_structured_tool_failure_event(self):
         tmp = self._workspace_tempdir()

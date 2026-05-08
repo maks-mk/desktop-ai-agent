@@ -68,8 +68,8 @@ START
 ```
 
 - `MAX_LOOPS` и per-tool loop guards предотвращают бесконечные циклы.
-- Recovery намеренно минимальный: `active_issue`, `active_strategy` и счётчики без очередей.
-- `SELF_CORRECTION_RETRY_LIMIT` задаёт жёсткий потолок попыток автоисправления.
+- Recovery использует stateful error tracking: `attempts_by_strategy`, `progress_markers`, `llm_replan_attempted_for` — адаптивные повторы с учётом уникальных fingerprints ошибок.
+- При смене проблемы (новый fingerprint) retry-бюджет сбрасывается; для одной и той же проблемы разрешены несколько `llm_replan` попыток в рамках `SELF_CORRECTION_RETRY_LIMIT`.
 
 ---
 

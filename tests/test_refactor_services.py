@@ -625,6 +625,104 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("loop", stagnation_notice.lower())
         self.assertIn("paused", fallback_notice.lower())
 
+    def test_recovery_manager_resets_retry_budget_when_issue_fingerprint_changes(self):
+        manager = RecoveryManager()
+        recovery_state = manager.get_recovery_state(
+            {
+                "turn_id": 1,
+                "progress_markers": ["fp-old"],
+                "attempts_by_strategy": {"fp-old::llm_replan": 2},
+                "llm_replan_attempted_for": ["fp-old"],
+            },
+            current_turn_id=1,
+        )
+        issue = {
+            "turn_id": 1,
+            "kind": "tool_error",
+            "summary": "Missing required field(s): path.",
+            "tool_names": ["edit_file"],
+            "tool_args": {"old_string": "a", "new_string": "b"},
+            "source": "tools",
+            "error_type": "VALIDATION",
+            "fingerprint": "fp-new",
+            "progress_fingerprint": "fp-new",
+            "details": {"missing_required_fields": ["path"]},
+        }
+
+        result = manager.plan_recovery(
+            state={
+                "self_correction_retry_count": 5,
+                "self_correction_fingerprint_history": ["fp-old"],
+            },
+            messages=[HumanMessage(content="Исправь файл")],
+            current_task="Исправь файл",
+            current_turn_id=1,
+            open_tool_issue=issue,
+            recovery_state=recovery_state,
+            last_ai=None,
+            last_message=None,
+            step_count=0,
+            max_loops=50,
+            hard_loop_ceiling=8,
+            max_auto_repairs=8,
+            successful_tool_stagnation_limit=3,
+        )
+
+        self.assertEqual(result["turn_outcome"], "recover_agent")
+        self.assertEqual(result["completion_reason"], "recover_refresh_context")
+        self.assertEqual(result["self_correction_retry_count"], 1)
+        self.assertEqual(result["recovery_state"]["progress_markers"][-1], "fp-new")
+        self.assertEqual(result["recovery_state"]["attempts_by_strategy"]["fp-new::refresh_context"], 1)
+
+    def test_recovery_manager_allows_multiple_llm_replans_for_same_issue(self):
+        manager = RecoveryManager()
+        recovery_state = manager.get_recovery_state(
+            {
+                "turn_id": 1,
+                "progress_markers": ["fp-protocol"],
+                "attempts_by_strategy": {"fp-protocol::llm_replan": 2},
+                "llm_replan_attempted_for": ["fp-protocol"],
+            },
+            current_turn_id=1,
+        )
+        issue = {
+            "turn_id": 1,
+            "kind": "protocol_error",
+            "summary": "Malformed tool payload.",
+            "tool_names": ["read_file"],
+            "tool_args": {"path": "README.md"},
+            "source": "agent",
+            "error_type": "VALIDATION",
+            "fingerprint": "fp-protocol",
+            "progress_fingerprint": "fp-protocol",
+            "details": {"protocol_reason": "tool_protocol_error"},
+        }
+
+        result = manager.plan_recovery(
+            state={
+                "self_correction_retry_count": 3,
+                "self_correction_fingerprint_history": ["fp-protocol"],
+            },
+            messages=[HumanMessage(content="Прочитай README.md")],
+            current_task="Прочитай README.md",
+            current_turn_id=1,
+            open_tool_issue=issue,
+            recovery_state=recovery_state,
+            last_ai=None,
+            last_message=None,
+            step_count=0,
+            max_loops=50,
+            hard_loop_ceiling=8,
+            max_auto_repairs=8,
+            successful_tool_stagnation_limit=3,
+        )
+
+        self.assertEqual(result["turn_outcome"], "recover_agent")
+        self.assertEqual(result["completion_reason"], "recover_llm_replan")
+        self.assertEqual(result["self_correction_retry_count"], 4)
+        self.assertEqual(result["recovery_state"]["active_strategy"]["strategy"], "llm_replan")
+        self.assertEqual(result["recovery_state"]["attempts_by_strategy"]["fp-protocol::llm_replan"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

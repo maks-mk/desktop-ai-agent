@@ -93,7 +93,7 @@
 - `tools.py` — ToolCardWidget, CliExecWidget: карточка инструмента, вывод CLI с ANSI-очисткой.
 - `tool_group.py` — ToolGroupWidget: группировка инструментов одного хода, сворачивание/разворачивание.
 - `attachments.py` — ImageAttachmentChipWidget, ImageAttachmentStripWidget: превью изображений, удаление.
-- `dialogs.py` — Диалоги: ModelSettingsDialog (профили моделей), ApiKeyRotationDialog, ModelFetchWorker.
+- `dialogs.py` — Диалоги: ModelSettingsDialog (профили моделей, inline-ротация ключей), ModelFetchWorker.
 - `panels.py` — Панели: OverviewPanelWidget (детали запуска), ToolsPanelWidget (список инструментов), InspectorPanelWidget, InfoPopupDialog.
 - `sidebar.py` — SessionSidebarWidget, SessionListModel, SessionItemDelegate: список сессий с группировкой по проектам.
 - `foundation.py` — (см. выше) Базовые компоненты.

@@ -106,120 +106,6 @@ class ModelFetchWorker(QThread):
         self.fetched.emit(self._request_id, result)
 
 
-class ApiKeyRotationDialog(QDialog):
-    def __init__(self, api_keys: list[str], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("ApiKeyRotationDialog")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setWindowTitle("Ротация API-ключей")
-        self.setModal(True)
-        self.resize(560, 420)
-        self.setMinimumSize(460, 340)
-        self._api_keys = list(api_keys or [])
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        surface = QFrame()
-        surface.setObjectName("ApiKeyRotationSurface")
-        surface.setAttribute(Qt.WA_StyledBackground, True)
-        layout.addWidget(surface)
-
-        surface_layout = QVBoxLayout(surface)
-        surface_layout.setContentsMargins(18, 18, 18, 18)
-        surface_layout.setSpacing(12)
-
-        hero_card = QFrame()
-        hero_card.setObjectName("ModelSettingsHeroCard")
-        hero_card.setAttribute(Qt.WA_StyledBackground, True)
-        hero_layout = QHBoxLayout(hero_card)
-        hero_layout.setContentsMargins(18, 16, 18, 16)
-        hero_layout.setSpacing(16)
-
-        hero_copy = QVBoxLayout()
-        hero_copy.setContentsMargins(0, 0, 0, 0)
-        hero_copy.setSpacing(6)
-
-        title = QLabel("Ротация API-ключей")
-        title.setObjectName("ModelSettingsTitle")
-        hero_copy.addWidget(title, 0, Qt.AlignLeft | Qt.AlignTop)
-
-        subtitle = QLabel("Добавьте по одному API-ключу на строку.")
-        subtitle.setObjectName("ModelSettingsSubtitle")
-        subtitle.setWordWrap(True)
-        hero_copy.addWidget(subtitle)
-
-        helper = QLabel("Пустые строки будут пропущены, пробелы по краям удалены, дубликаты объединены.")
-        helper.setObjectName("ModelSettingsHintText")
-        helper.setWordWrap(True)
-        hero_copy.addWidget(helper)
-        hero_layout.addLayout(hero_copy, 1)
-
-        hero_stats = QVBoxLayout()
-        hero_stats.setContentsMargins(0, 0, 0, 0)
-        hero_stats.setSpacing(8)
-        self.key_count_chip = QLabel("")
-        self.key_count_chip.setObjectName("ModelSettingsChip")
-        hero_stats.addWidget(self.key_count_chip, 0, Qt.AlignRight)
-        hero_stats.addStretch(1)
-        hero_layout.addLayout(hero_stats, 0)
-        surface_layout.addWidget(hero_card)
-
-        pane = QFrame()
-        pane.setObjectName("ModelSettingsPane")
-        pane.setAttribute(Qt.WA_StyledBackground, True)
-        pane_layout = QVBoxLayout(pane)
-        pane_layout.setContentsMargins(14, 14, 14, 14)
-        pane_layout.setSpacing(8)
-
-        editor_label = QLabel("Пул ключей")
-        editor_label.setObjectName("SectionTitle")
-        pane_layout.addWidget(editor_label)
-
-        self.editor = CopySafePlainTextEdit()
-        self.editor.setPlaceholderText("sk-key-1\nsk-key-2\ngm-key-3")
-        self.editor.setObjectName("InlineCodeView")
-        self.editor.setFont(_make_mono_font(10))
-        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.editor.setPlainText("\n".join(self._api_keys))
-        self.editor.textChanged.connect(self._update_key_count)
-        pane_layout.addWidget(self.editor, 1)
-
-        footer = QLabel("Сохранение в этом окне сразу применяет изменения к текущему профилю.")
-        footer.setObjectName("ModelSettingsMeta")
-        footer.setWordWrap(True)
-        pane_layout.addWidget(footer)
-        surface_layout.addWidget(pane, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.setObjectName("ModelSettingsActions")
-        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        if save_button is not None:
-            save_button.setObjectName("PrimaryButton")
-            save_button.setIcon(_fa_icon("fa5s.save", color="#FFFFFF", size=11))
-            save_button.setMinimumHeight(30)
-        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        if cancel_button is not None:
-            cancel_button.setObjectName("SecondaryButton")
-            cancel_button.setMinimumHeight(30)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        surface_layout.addWidget(buttons)
-        self._update_key_count()
-
-    def api_keys(self) -> list[str]:
-        return list(self._api_keys)
-
-    def _update_key_count(self) -> None:
-        key_count = len(normalize_api_key_list(self.editor.toPlainText()))
-        self.key_count_chip.setText(f"{key_count} key(s)")
-
-    def _accept(self) -> None:
-        self._api_keys = normalize_api_key_list(self.editor.toPlainText())
-        self.accept()
-
-
 class ModelSettingsDialog(QDialog):
     profiles_saved = Signal(object)
 
@@ -227,7 +113,9 @@ class ModelSettingsDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("ModelSettingsDialog")
         self.setWindowTitle("Model Profiles")
-        self.setModal(True)
+        self.setModal(False)
+        self.setWindowModality(Qt.NonModal)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.resize(1050, 670)
         self.setMinimumSize(760, 420)
 
@@ -328,7 +216,7 @@ class ModelSettingsDialog(QDialog):
 
         self.profile_list = QListWidget()
         self.profile_list.setObjectName("ModelProfileList")
-        self.profile_list.setMinimumWidth(240)
+        self.profile_list.setMinimumWidth(280)
         self.profile_list.setAccessibleName("Profile list")
         self.profile_list.setAccessibleDescription("Select a model profile to edit")
         self.profile_list.currentRowChanged.connect(self._on_selection_changed)
@@ -376,7 +264,7 @@ class ModelSettingsDialog(QDialog):
         right_header.addWidget(self.duplicate_button, 0, Qt.AlignRight | Qt.AlignVCenter)
         right.addLayout(right_header)
 
-        self.form_hint = QLabel("Select a profile to review credentials, model settings, and image support.")
+        self.form_hint = QLabel("Select a profile to review credentials, key rotation, model settings, and image support.")
         self.form_hint.setObjectName("ModelSettingsMeta")
         self.form_hint.setWordWrap(True)
         right.addWidget(self.form_hint)
@@ -564,11 +452,59 @@ class ModelSettingsDialog(QDialog):
         form_layout.addRow(images_label, images_row)
         editor_layout.addWidget(form_frame)
 
+        rotation_content = QWidget()
+        rotation_content_layout = QVBoxLayout(rotation_content)
+        rotation_content_layout.setContentsMargins(0, 0, 0, 0)
+        rotation_content_layout.setSpacing(6)
+
+        rotation_card = QFrame()
+        rotation_card.setObjectName("ModelSettingsFormCard")
+        rotation_card_layout = QVBoxLayout(rotation_card)
+        rotation_card_layout.setContentsMargins(8, 8, 8, 8)
+        rotation_card_layout.setSpacing(6)
+
+        rotation_meta_row = QHBoxLayout()
+        rotation_meta_row.setContentsMargins(0, 0, 0, 0)
+        rotation_meta_row.setSpacing(6)
+
+        rotation_helper = QLabel("Add one API key per line. The active key field stays in sync with this pool.")
+        rotation_helper.setObjectName("ModelSettingsHintText")
+        rotation_helper.setWordWrap(True)
+        rotation_meta_row.addWidget(rotation_helper, 1)
+
+        self.api_key_rotation_count_chip = QLabel("")
+        self.api_key_rotation_count_chip.setObjectName("ModelSettingsChip")
+        rotation_meta_row.addWidget(self.api_key_rotation_count_chip, 0, Qt.AlignRight | Qt.AlignTop)
+        rotation_card_layout.addLayout(rotation_meta_row)
+
+        self.api_key_rotation_editor = CopySafePlainTextEdit()
+        self.api_key_rotation_editor.setPlaceholderText("sk-key-1\nsk-key-2\ngm-key-3")
+        self.api_key_rotation_editor.setObjectName("InlineCodeView")
+        self.api_key_rotation_editor.setFont(_make_mono_font(10))
+        self.api_key_rotation_editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.api_key_rotation_editor.setMinimumHeight(120)
+        rotation_card_layout.addWidget(self.api_key_rotation_editor, 1)
+
+        self.api_key_rotation_status_label = QLabel("")
+        self.api_key_rotation_status_label.setObjectName("ModelSettingsMeta")
+        self.api_key_rotation_status_label.setWordWrap(True)
+        rotation_card_layout.addWidget(self.api_key_rotation_status_label)
+
+        rotation_content_layout.addWidget(rotation_card)
+        self.api_key_rotation_section = CollapsibleSection(
+            "API key rotation",
+            rotation_content,
+            expanded=True,
+            content_margins=(0, 0, 0, 0),
+        )
+        editor_layout.addWidget(self.api_key_rotation_section)
+
         helper_card = QFrame()
         helper_card.setObjectName("ModelSettingsHelperCard")
         helper_layout = QVBoxLayout(helper_card)
         helper_layout.setContentsMargins(8, 6, 8, 6)
         helper_layout.setSpacing(3)
+
         helper_title = QLabel("Editing notes")
         helper_title.setObjectName("ModelSettingsHelperTitle")
         helper_body = QLabel(
@@ -620,12 +556,14 @@ class ModelSettingsDialog(QDialog):
         self.api_key_reveal_button.clicked.connect(self._toggle_api_key_visibility)
         self.api_key_copy_button.clicked.connect(self._copy_api_key)
         self.api_key_rotation_button.clicked.connect(self._edit_api_key_rotation)
+        self.api_key_rotation_editor.textChanged.connect(self._on_api_key_rotation_text_changed)
         self.base_url_edit.textChanged.connect(self._on_base_url_changed)
         self.model_popup_button.clicked.connect(self._show_model_popup)
         self.model_reload_button.clicked.connect(self._reload_models)
         self.supports_images_checkbox.checkStateChanged.connect(self._on_form_changed)
 
         self._set_model_state(ModelLoadState.IDLE)
+        self._update_api_key_rotation_summary(api_keys=[])
         self._refresh_profile_list()
         if self.profile_list.count() > 0:
             self.profile_list.setCurrentRow(self._preferred_row_for_open())
@@ -635,6 +573,14 @@ class ModelSettingsDialog(QDialog):
 
     def result_payload(self) -> dict[str, Any]:
         return dict(self._result_payload)
+
+    def closeEvent(self, event) -> None:
+        self._fetch_debounce.stop()
+        self._fetch_request_id += 1
+        for worker in list(self._model_workers):
+            if worker.isRunning():
+                worker.wait(3000)
+        super().closeEvent(event)
 
     def _current_row(self) -> int:
         return self.profile_list.currentRow()
@@ -646,6 +592,8 @@ class ModelSettingsDialog(QDialog):
             self.provider_combo,
             self.api_key_edit,
             self.api_key_rotation_button,
+            self.api_key_rotation_editor,
+            self.api_key_rotation_section.toggle_button,
             self.base_url_edit,
             self.supports_images_checkbox,
         ):
@@ -754,6 +702,41 @@ class ModelSettingsDialog(QDialog):
         if worker in self._model_workers:
             self._model_workers.remove(worker)
         worker.deleteLater()
+
+    def _sync_api_key_field_from_rotation_editor(self) -> tuple[list[str], int, str]:
+        row = self._current_row()
+        api_keys = self._current_rotation_api_keys()
+        current_key = str(self.api_key_edit.text() or "").strip()
+        preferred_index = self._profile_api_key_index(row)
+        api_key_index, active_api_key = self._resolve_api_key_selection(
+            api_keys,
+            current_key=current_key,
+            preferred_index=preferred_index,
+        )
+        self._update_api_key_rotation_summary(api_keys=api_keys, active_key=active_api_key)
+        if self.api_key_edit.text() != active_api_key:
+            self._loading_form = True
+            self.api_key_edit.setText(active_api_key)
+            self._loading_form = False
+        return api_keys, api_key_index, active_api_key
+
+    def _sync_rotation_editor_from_active_key(self) -> list[str]:
+        row = self._current_row()
+        api_keys = self._current_rotation_api_keys()
+        current_key = str(self.api_key_edit.text() or "").strip()
+        preferred_index = self._profile_api_key_index(row)
+        if api_keys:
+            preferred_index = max(0, min(preferred_index, len(api_keys) - 1))
+        if current_key:
+            if api_keys:
+                api_keys[preferred_index] = current_key
+            else:
+                api_keys = [current_key]
+        elif api_keys:
+            api_keys.pop(preferred_index)
+        normalized_keys = normalize_api_key_list(api_keys)
+        self._set_api_key_rotation_editor_text(normalized_keys)
+        return normalized_keys
 
     def _append_gemini_model_items(self, entries: list[ModelEntry]) -> list[str]:
         ordered_ids: list[str] = []
@@ -883,6 +866,18 @@ class ModelSettingsDialog(QDialog):
     def _on_api_key_changed(self, _text: str) -> None:
         if self._loading_form:
             return
+        self._sync_rotation_editor_from_active_key()
+        self._invalidate_pending_fetches()
+        self._clear_model_options()
+        self._set_model_state(ModelLoadState.IDLE)
+        if self._current_fetch_inputs() is not None:
+            self._schedule_fetch(600)
+        self._on_form_changed()
+
+    def _on_api_key_rotation_text_changed(self) -> None:
+        if self._loading_form:
+            return
+        self._sync_api_key_field_from_rotation_editor()
         self._invalidate_pending_fetches()
         self._clear_model_options()
         self._set_model_state(ModelLoadState.IDLE)
@@ -900,6 +895,44 @@ class ModelSettingsDialog(QDialog):
             if self._current_fetch_inputs() is not None:
                 self._schedule_fetch(600)
         self._on_form_changed()
+
+    def _profile_api_key_index(self, row: int) -> int:
+        if row < 0 or row >= len(self._profiles):
+            return 0
+        api_keys = self._profile_api_keys(row)
+        if not api_keys:
+            return 0
+        try:
+            index = int(self._profiles[row].get("api_key_index") or 0)
+        except (TypeError, ValueError):
+            index = 0
+        return max(0, min(index, len(api_keys) - 1))
+
+    def _current_rotation_api_keys(self) -> list[str]:
+        return normalize_api_key_list(self.api_key_rotation_editor.toPlainText())
+
+    def _set_api_key_rotation_editor_text(self, api_keys: list[str]) -> None:
+        normalized_keys = normalize_api_key_list(api_keys)
+        text = "\n".join(normalized_keys)
+        if self.api_key_rotation_editor.toPlainText() == text:
+            self._update_api_key_rotation_summary(api_keys=normalized_keys)
+            return
+        self.api_key_rotation_editor.blockSignals(True)
+        self.api_key_rotation_editor.setPlainText(text)
+        self.api_key_rotation_editor.blockSignals(False)
+        self._update_api_key_rotation_summary(api_keys=normalized_keys)
+
+    def _update_api_key_rotation_summary(self, *, api_keys: list[str] | None = None, active_key: str | None = None) -> None:
+        keys = normalize_api_key_list(api_keys if api_keys is not None else self.api_key_rotation_editor.toPlainText())
+        active = str(self.api_key_edit.text() if active_key is None else active_key or "").strip()
+        self.api_key_rotation_count_chip.setText(f"{len(keys)} key(s)")
+        if not keys:
+            self.api_key_rotation_status_label.setText("If the pool is empty, the API key field is used on its own.")
+            return
+        if active and active in keys:
+            self.api_key_rotation_status_label.setText(f"Active key: entry {keys.index(active) + 1} of {len(keys)}.")
+            return
+        self.api_key_rotation_status_label.setText("Pool ready. The first valid key will be used.")
 
     def _set_save_state(self, message: str) -> None:
         text = str(message or "").strip()
@@ -1049,32 +1082,21 @@ class ModelSettingsDialog(QDialog):
         profile["key_error_timestamps"] = {}
         profile["api_key"] = active_api_key
         self._profiles[row] = profile
+        if row == self._current_row():
+            self._loading_form = True
+            self.api_key_edit.setText(active_api_key)
+            self._set_api_key_rotation_editor_text(cleaned_keys)
+            self._loading_form = False
+            self._update_api_key_rotation_summary(api_keys=cleaned_keys, active_key=active_api_key)
 
     def _edit_api_key_rotation(self) -> None:
         row = self._current_row()
         if row < 0 or row >= len(self._profiles):
             return
-        self._sync_current_profile_from_form(row)
-        dialog = ApiKeyRotationDialog(self._profile_api_keys(row), self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        self._apply_api_key_rotation_to_profile(row, dialog.api_keys())
-        self._loading_form = True
-        self.api_key_edit.setText(str(self._profiles[row].get("api_key") or ""))
-        self._loading_form = False
-        self._on_api_key_changed(self.api_key_edit.text())
-        key_count = len(self._profiles[row].get("api_keys") or [])
-        if self._persist_profiles(
-            f"Rotation pool saved ({key_count} key(s))."
-            if key_count
-            else "Rotation pool cleared and saved."
-        ):
-            return
-        self._set_save_state(
-            f"Rotation pool updated ({key_count} key(s)). Finish required fields and press Save to persist."
-            if key_count
-            else "Rotation pool cleared. Finish required fields and press Save to persist."
-        )
+        self.api_key_rotation_section.set_expanded(True)
+        self.api_key_rotation_editor.setFocus(Qt.OtherFocusReason)
+        self.api_key_rotation_editor.ensureCursorVisible()
+        self._set_save_state("Edit the rotation pool inline and press Save to persist.")
 
     def _build_profile_item_widget(self, profile: dict[str, Any], row: int) -> QWidget:
         container = QWidget()
@@ -1226,7 +1248,7 @@ class ModelSettingsDialog(QDialog):
             self._selected_row = -1
             self._set_form_enabled(False)
             self._set_model_state(ModelLoadState.IDLE)
-            self.form_hint.setText("Select a profile and edit fields on the right.")
+            self.form_hint.setText("Select a profile and edit keys, model settings, and image support on the right.")
             self.profile_state_chip.setText("No profile selected")
             self.summary_provider.setText("Provider: —")
             self.summary_model.setText("Model: —")
@@ -1246,9 +1268,14 @@ class ModelSettingsDialog(QDialog):
         self.provider_combo.setCurrentText(provider)
         self._set_current_model_widgets_text(str(profile.get("model", "")))
         self.api_key_edit.setText(str(profile.get("api_key", "")))
+        self._set_api_key_rotation_editor_text(self._profile_api_keys(row))
         self.base_url_edit.setText(str(profile.get("base_url", "")))
         self.supports_images_checkbox.setChecked(bool(profile.get("supports_image_input")))
         self._update_base_url_field_state(provider)
+        self._update_api_key_rotation_summary(
+            api_keys=self._profile_api_keys(row),
+            active_key=str(profile.get("api_key", "")),
+        )
         self._set_model_state(ModelLoadState.IDLE)
         self._loading_form = False
         self._selected_row = row
@@ -1280,27 +1307,19 @@ class ModelSettingsDialog(QDialog):
         base_url = str(self.base_url_edit.text() or "").strip() if provider == "openai" else ""
         existing_profile = dict(self._profiles[target_row])
         current_api_key = str(self.api_key_edit.text() or "").strip()
-        existing_api_keys = normalize_api_key_list(
-            existing_profile.get("api_keys"),
-            fallback=existing_profile.get("api_key"),
-        )
-        if existing_api_keys:
-            try:
-                existing_index = int(existing_profile.get("api_key_index") or 0)
-            except (TypeError, ValueError):
-                existing_index = 0
-            existing_index = max(0, min(existing_index, len(existing_api_keys) - 1))
-        else:
-            existing_index = 0
+        api_keys = self._current_rotation_api_keys()
+        existing_index = self._profile_api_key_index(target_row)
+        if api_keys:
+            existing_index = max(0, min(existing_index, len(api_keys) - 1))
         if current_api_key:
-            if existing_api_keys:
-                existing_api_keys[existing_index] = current_api_key
+            if api_keys:
+                api_keys[existing_index] = current_api_key
             else:
-                existing_api_keys = [current_api_key]
-        elif existing_api_keys:
-            existing_api_keys.pop(existing_index)
-            existing_index = min(existing_index, max(0, len(existing_api_keys) - 1))
-        api_keys = normalize_api_key_list(existing_api_keys)
+                api_keys = [current_api_key]
+        elif api_keys:
+            api_keys.pop(existing_index)
+            existing_index = min(existing_index, max(0, len(api_keys) - 1))
+        api_keys = normalize_api_key_list(api_keys)
         api_key_index, current_api_key = self._resolve_api_key_selection(
             api_keys,
             current_key=current_api_key,

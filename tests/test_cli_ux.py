@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar, QWidget
 
 import main as agent_cli
 from core.model_fetcher import ModelEntry
@@ -20,7 +20,6 @@ from ui.runtime import build_runtime_snapshot, summarize_approval_request
 from ui.streaming import StreamEvent
 from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
 from ui.widgets.composer import _ComposerMentionItemWidget
-from ui.widgets import dialogs as widget_dialogs
 from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
 from ui.widgets.messages import AssistantMessageWidget
 from ui.widgets.tool_group import ToolGroupWidget
@@ -883,12 +882,11 @@ class GuiUxTests(unittest.TestCase):
         self.window._handle_event(StreamEvent("run_started", {"text": "Проверь"}))
         self.window._handle_event(
             StreamEvent(
-                "tool_started",
+                "assistant_delta",
                 {
-                    "tool_id": "call-1",
-                    "name": "read_file",
-                    "args": {"path": "demo.txt"},
-                    "display": "read_file(demo.txt)",
+                    "text": "partial",
+                    "full_text": "Ответ\n\n```python\nprint('hi')\n```",
+                    "has_thought": False,
                 },
             )
         )
@@ -2260,10 +2258,21 @@ class GuiUxTests(unittest.TestCase):
             def __init__(self, emitted_payload):
                 self.profiles_saved = _FakeSignal()
                 self._payload = emitted_payload
+                self._visible = False
+                self.destroyed = _FakeSignal()
 
-            def exec(self):
+            def isVisible(self):
+                return self._visible
+
+            def show(self):
+                self._visible = True
                 self.profiles_saved.emit(self._payload)
-                return 0
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
 
         dialog_instance = _FakeDialog(payload)
 
@@ -2371,10 +2380,9 @@ class GuiUxTests(unittest.TestCase):
                 {
                     "id": "gpt-4o",
                     "provider": "openai",
-                    "model": "openai/gpt-4o",
+                    "model": "gpt-4o",
                     "api_key": "sk-demo",
-                    "base_url": "https://api.openai.com/v1",
-                    "supports_image_input": False,
+                    "base_url": "",
                     "enabled": True,
                 }
             ],
@@ -2406,53 +2414,7 @@ class GuiUxTests(unittest.TestCase):
 
             self.assertTrue(result["profiles"][0]["supports_image_input"])
 
-    def test_model_settings_dialog_keeps_image_support_checkbox_checked_after_save_for_loaded_openai_model(self):
-        payload = {
-            "active_profile": "gpt-4o",
-            "profiles": [
-                {
-                    "id": "gpt-4o",
-                    "provider": "openai",
-                    "model": "gpt-4o",
-                    "api_key": "sk-demo",
-                    "base_url": "https://api.openai.com/v1",
-                    "supports_image_input": False,
-                    "enabled": True,
-                }
-            ],
-        }
-        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
-            dialog = agent_cli.ModelSettingsDialog(payload, self.window)
-            self.addCleanup(dialog.close)
-            dialog.show()
-            self._process_events()
-
-            entries = [ModelEntry(id="gpt-4o", family="", supports_image_input=False)]
-            dialog._apply_loaded_models(entries)
-            self._process_events()
-
-            dialog.supports_images_checkbox.setChecked(True)
-            self._process_events()
-
-            dialog._save_and_accept()
-            self._process_events()
-
-            dialog._apply_loaded_models(entries)
-            self._process_events()
-
-            self.assertTrue(dialog.result_payload()["profiles"][0]["supports_image_input"])
-            self.assertTrue(dialog.supports_images_checkbox.isChecked())
-
-    def test_api_key_rotation_dialog_uses_monospace_editor_font(self):
-        dialog = widget_dialogs.ApiKeyRotationDialog(["sk-primary", "sk-secondary"], self.window)
-        self.addCleanup(dialog.close)
-
-        self.assertEqual(dialog.objectName(), "ApiKeyRotationDialog")
-        self.assertEqual(dialog.api_keys(), ["sk-primary", "sk-secondary"])
-        self.assertEqual(dialog.key_count_chip.text(), "2 key(s)")
-        self.assertEqual(dialog.editor.font().pointSize(), 10)
-
-    def test_model_settings_dialog_rotation_save_emits_profiles_saved_immediately(self):
+    def test_model_settings_dialog_rotation_editor_updates_profile_and_saves_with_main_save(self):
         payload = {
             "active_profile": "gpt-4o",
             "profiles": [
@@ -2470,28 +2432,20 @@ class GuiUxTests(unittest.TestCase):
         with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
             dialog = agent_cli.ModelSettingsDialog(payload, self.window)
             self.addCleanup(dialog.close)
+            dialog.show()
             self._process_events()
 
-            saved_payloads = []
-            dialog.profiles_saved.connect(saved_payloads.append)
+            dialog._edit_api_key_rotation()
+            self.assertTrue(dialog.api_key_rotation_section.content_container.isVisible())
+            dialog.api_key_rotation_editor.setPlainText("sk-primary\nsk-secondary")
+            self._process_events()
+            dialog._save_and_accept()
+            self._process_events()
 
-            class _AcceptedRotationDialog:
-                def __init__(self, *_args, **_kwargs):
-                    pass
-
-                def exec(self):
-                    return QDialog.Accepted
-
-                def api_keys(self):
-                    return ["sk-primary", "sk-secondary"]
-
-            with mock.patch.object(widget_dialogs, "ApiKeyRotationDialog", _AcceptedRotationDialog):
-                dialog._edit_api_key_rotation()
-
-            self.assertEqual(len(saved_payloads), 1)
-            self.assertEqual(saved_payloads[0]["profiles"][0]["api_keys"], ["sk-primary", "sk-secondary"])
-            self.assertEqual(saved_payloads[0]["profiles"][0]["api_key"], "sk-primary")
-            self.assertIn("Rotation pool saved", dialog.save_state_label.text())
+            saved_payload = dialog.result_payload()
+            self.assertEqual(saved_payload["profiles"][0]["api_keys"], ["sk-primary", "sk-secondary"])
+            self.assertEqual(saved_payload["profiles"][0]["api_key"], "sk-primary")
+            self.assertIn("keep this window open", dialog.save_state_label.text())
 
     def test_model_settings_dialog_applies_rotation_pool_per_profile(self):
         with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):

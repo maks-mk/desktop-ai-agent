@@ -47,6 +47,9 @@ class RecoveryManager:
             "turn_id": int(turn_id or 0),
             "active_issue": None,
             "active_strategy": None,
+            "strategy_queue": [],
+            "attempts_by_strategy": {},
+            "progress_markers": [],
             "last_successful_evidence": "",
             "external_blocker": None,
             "llm_replan_attempted_for": [],
@@ -62,6 +65,11 @@ class RecoveryManager:
         recovery["turn_id"] = current_turn_id
         if not isinstance(recovery.get("llm_replan_attempted_for"), list):
             recovery["llm_replan_attempted_for"] = []
+        if not isinstance(recovery.get("strategy_queue"), list):
+            recovery["strategy_queue"] = []
+        if not isinstance(recovery.get("progress_markers"), list):
+            recovery["progress_markers"] = []
+        recovery["attempts_by_strategy"] = self._normalize_attempts_map(recovery.get("attempts_by_strategy"))
         return recovery
 
     def reset_after_success(
@@ -238,6 +246,121 @@ class RecoveryManager:
             return "change_tool"
         return "stop" if normalized in {"external_block", "llm_replan"} else "fix_args"
 
+    @staticmethod
+    def _normalize_attempts_map(raw: Any) -> Dict[str, int]:
+        if not isinstance(raw, dict):
+            return {}
+        normalized: Dict[str, int] = {}
+        for key, value in raw.items():
+            name = str(key).strip()
+            if not name:
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            normalized[name] = max(0, count)
+        return normalized
+
+    @staticmethod
+    def _normalized_issue_fingerprint(issue_fingerprint: str) -> str:
+        normalized = str(issue_fingerprint or "").strip()
+        return normalized or "unknown_issue"
+
+    def _strategy_attempt_key(self, *, issue_fingerprint: str, strategy: str) -> str:
+        normalized_strategy = str(strategy or "").strip().lower() or "unknown_strategy"
+        return f"{self._normalized_issue_fingerprint(issue_fingerprint)}::{normalized_strategy}"
+
+    def _get_strategy_attempt_count(
+        self,
+        recovery_state: Dict[str, Any],
+        *,
+        issue_fingerprint: str,
+        strategy: str,
+    ) -> int:
+        attempts = self._normalize_attempts_map(recovery_state.get("attempts_by_strategy"))
+        return int(attempts.get(self._strategy_attempt_key(issue_fingerprint=issue_fingerprint, strategy=strategy), 0) or 0)
+
+    def _record_strategy_attempt(
+        self,
+        recovery_state: Dict[str, Any],
+        *,
+        issue_fingerprint: str,
+        strategy: str,
+    ) -> int:
+        attempts = self._normalize_attempts_map(recovery_state.get("attempts_by_strategy"))
+        key = self._strategy_attempt_key(issue_fingerprint=issue_fingerprint, strategy=strategy)
+        next_count = int(attempts.get(key, 0) or 0) + 1
+        attempts[key] = next_count
+        recovery_state["attempts_by_strategy"] = attempts
+        return next_count
+
+    def _append_progress_marker(self, recovery_state: Dict[str, Any], *, issue_fingerprint: str) -> bool:
+        marker = str(issue_fingerprint or "").strip()
+        if not marker:
+            return False
+        markers = [
+            str(item).strip()
+            for item in (recovery_state.get("progress_markers") or [])
+            if str(item).strip()
+        ]
+        if markers and markers[-1] == marker:
+            recovery_state["progress_markers"] = markers[-12:]
+            return False
+        markers.append(marker)
+        recovery_state["progress_markers"] = markers[-12:]
+        return True
+
+    @staticmethod
+    def _build_llm_replan(
+        repair_plan: RepairPlan,
+        *,
+        issue_fingerprint: str,
+        llm_replan_attempts: int,
+    ) -> RepairPlan:
+        reason = repair_plan.reason if repair_plan.strategy == "llm_replan" else f"{repair_plan.reason}_llm_replan"
+        notes = "Deterministic recovery did not clear the issue. Replan from repository state and recent tool output."
+        guidance = (
+            "Do not stop. Replan using repository state, recent tool failures, and alternative verification or edit "
+            "paths until you either succeed or hit a real external blocker."
+        )
+        if llm_replan_attempts >= 1:
+            notes = (
+                "The issue persisted after a prior replan. Change approach materially: refresh context, use a "
+                "different supporting tool, and verify incremental progress before retrying the blocked action."
+            )
+            guidance = (
+                "The previous replan did not clear the issue. Use a materially different approach: gather fresh "
+                "repository state, switch supporting tools if needed, and verify progress before rerunning the "
+                "blocked step."
+            )
+        if llm_replan_attempts >= 2:
+            notes = (
+                "Multiple replans did not clear the issue. Prefer a different tool path, gather fresh repository "
+                "state, and verify each step before retrying the blocked action."
+            )
+            guidance = (
+                "Avoid repeating the same failing tool pattern. Re-read the relevant state, choose an alternate tool "
+                "path, and only retry the blocked action after fresh evidence."
+            )
+        fingerprint = str(repair_plan.fingerprint or issue_fingerprint or "missing-plan").strip() or "missing-plan"
+        progress_fingerprint = str(repair_plan.progress_fingerprint or issue_fingerprint or fingerprint).strip() or fingerprint
+        return RepairPlan(
+            strategy="llm_replan",
+            reason=reason,
+            fingerprint=fingerprint,
+            tool_name=repair_plan.tool_name,
+            suggested_tool_name=repair_plan.suggested_tool_name,
+            original_args=repair_plan.original_args,
+            patched_args=repair_plan.patched_args,
+            notes=notes,
+            max_auto_repairs=repair_plan.max_auto_repairs,
+            needs_external_input=False,
+            safety_violation=repair_plan.safety_violation,
+            progress_fingerprint=progress_fingerprint,
+            llm_guidance=guidance,
+        )
+
     def plan_recovery(
         self,
         *,
@@ -285,6 +408,10 @@ class RecoveryManager:
             or (open_tool_issue or {}).get("fingerprint")
             or ""
         ).strip()
+        if not issue_fingerprint and repair_plan is not None:
+            issue_fingerprint = str(repair_plan.progress_fingerprint or repair_plan.fingerprint or "").strip()
+        if open_tool_issue and self._append_progress_marker(next_recovery_state, issue_fingerprint=issue_fingerprint):
+            next_retry_count = 0
 
         if loop_budget_reached and pending_tool_calls and not open_tool_issue:
             branch = {
@@ -447,8 +574,6 @@ class RecoveryManager:
     ) -> Dict[str, Any]:
         next_retry_count = int(current_retry_count or 0) + 1
         next_fingerprint_history = [str(item).strip() for item in (fingerprint_history or []) if str(item).strip()]
-        if issue_fingerprint and issue_fingerprint not in next_fingerprint_history:
-            next_fingerprint_history.append(issue_fingerprint)
 
         if not repair_plan:
             repair_plan = RepairPlan(
@@ -463,20 +588,40 @@ class RecoveryManager:
                 llm_guidance="Inspect the failure, gather more context, and continue with a different valid approach.",
             )
 
-        strategy_id = self.repair_plan_strategy_id(repair_plan)
+        effective_fingerprint = str(
+            issue_fingerprint or repair_plan.progress_fingerprint or repair_plan.fingerprint or ""
+        ).strip()
+        if effective_fingerprint and effective_fingerprint not in next_fingerprint_history:
+            next_fingerprint_history.append(effective_fingerprint)
+
         llm_replans = [
             str(item).strip()
             for item in (next_recovery_state.get("llm_replan_attempted_for") or [])
             if str(item).strip()
         ]
-        strategy_payload = self.build_recovery_strategy(
-            repair_plan=repair_plan,
-            open_tool_issue=open_tool_issue,
-            current_task=current_task,
-            strategy_id=strategy_id,
-        )
+        base_strategy = str(repair_plan.strategy or "").strip().lower()
+        if base_strategy != "llm_replan":
+            deterministic_attempts = self._get_strategy_attempt_count(
+                next_recovery_state,
+                issue_fingerprint=effective_fingerprint,
+                strategy=base_strategy,
+            )
+        else:
+            deterministic_attempts = 0
 
-        if int(current_retry_count or 0) == 0:
+        if base_strategy != "llm_replan" and deterministic_attempts == 0:
+            self._record_strategy_attempt(
+                next_recovery_state,
+                issue_fingerprint=effective_fingerprint,
+                strategy=base_strategy,
+            )
+            strategy_id = self.repair_plan_strategy_id(repair_plan)
+            strategy_payload = self.build_recovery_strategy(
+                repair_plan=repair_plan,
+                open_tool_issue=open_tool_issue,
+                current_task=current_task,
+                strategy_id=strategy_id,
+            )
             next_recovery_state["active_issue"] = open_tool_issue
             next_recovery_state["active_strategy"] = strategy_payload
             next_recovery_state["external_blocker"] = None
@@ -488,52 +633,37 @@ class RecoveryManager:
                 "next_fingerprint_history": list(next_fingerprint_history),
             }
 
-        if repair_plan.strategy != "llm_replan" and issue_fingerprint and issue_fingerprint not in llm_replans:
-            llm_replans.append(issue_fingerprint)
+        llm_replan_attempts = self._get_strategy_attempt_count(
+            next_recovery_state,
+            issue_fingerprint=effective_fingerprint,
+            strategy="llm_replan",
+        )
+        llm_replan = self._build_llm_replan(
+            repair_plan,
+            issue_fingerprint=effective_fingerprint,
+            llm_replan_attempts=llm_replan_attempts,
+        )
+        self._record_strategy_attempt(
+            next_recovery_state,
+            issue_fingerprint=effective_fingerprint,
+            strategy="llm_replan",
+        )
+        if effective_fingerprint and effective_fingerprint not in llm_replans:
+            llm_replans.append(effective_fingerprint)
             next_recovery_state["llm_replan_attempted_for"] = llm_replans
-            llm_replan = RepairPlan(
-                strategy="llm_replan",
-                reason=f"{repair_plan.reason}_llm_replan",
-                fingerprint=repair_plan.fingerprint,
-                tool_name=repair_plan.tool_name,
-                suggested_tool_name=repair_plan.suggested_tool_name,
-                original_args=repair_plan.original_args,
-                patched_args=repair_plan.patched_args,
-                notes="Deterministic recovery did not clear the issue. Replan from repository state and recent tool output.",
-                llm_guidance="Do not stop. Replan using repository state, recent tool failures, and alternative verification or edit paths until you either succeed or hit a real external blocker.",
-                progress_fingerprint=repair_plan.progress_fingerprint,
-            )
-            llm_strategy_id = self.repair_plan_strategy_id(llm_replan)
-            next_recovery_state["active_issue"] = open_tool_issue
-            next_recovery_state["active_strategy"] = self.build_recovery_strategy(
-                repair_plan=llm_replan,
-                open_tool_issue=open_tool_issue,
-                current_task=current_task,
-                strategy_id=llm_strategy_id,
-            )
-            next_recovery_state["external_blocker"] = None
-            return {
-                "completion_reason": "recover_llm_replan",
-                "turn_outcome": "recover_agent",
-                "next_open_tool_issue": open_tool_issue,
-                "next_retry_count": next_retry_count,
-                "next_fingerprint_history": list(next_fingerprint_history),
-            }
-
+        llm_strategy_id = self.repair_plan_strategy_id(llm_replan)
         next_recovery_state["active_issue"] = open_tool_issue
-        next_recovery_state["active_strategy"] = None
-        next_recovery_state["external_blocker"] = {
-            "reason": "recovery_stagnated",
-            "issue_summary": str(open_tool_issue.get("summary", "")),
-        }
+        next_recovery_state["active_strategy"] = self.build_recovery_strategy(
+            repair_plan=llm_replan,
+            open_tool_issue=open_tool_issue,
+            current_task=current_task,
+            strategy_id=llm_strategy_id,
+        )
+        next_recovery_state["external_blocker"] = None
         return {
-            "completion_reason": "recovery_stagnated",
-            "turn_outcome": "finish_turn",
-            "next_open_tool_issue": None,
-            "handoff_message": self.build_tool_issue_handoff_text(
-                open_tool_issue,
-                repair_plan=repair_plan,
-            ),
+            "completion_reason": "recover_llm_replan",
+            "turn_outcome": "recover_agent",
+            "next_open_tool_issue": open_tool_issue,
             "next_retry_count": next_retry_count,
             "next_fingerprint_history": list(next_fingerprint_history),
         }

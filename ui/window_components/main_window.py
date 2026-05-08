@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.current_turn = None
         self.current_snapshot: dict | None = None
         self.active_session_id = ""
+        self._model_settings_window = None
         self.awaiting_approval = False
         self.awaiting_user_choice = False
         self.is_busy = False
@@ -522,10 +523,18 @@ class MainWindow(QMainWindow):
         if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
             QMessageBox.information(self, "Busy", "Wait for the current run to finish before changing settings.")
             return
+        if self._model_settings_window is not None and self._model_settings_window.isVisible():
+            self._model_settings_window.raise_()
+            self._model_settings_window.activateWindow()
+            return
         dialog_class = self._resolve_model_settings_dialog_class()
         dialog = dialog_class(self.model_profiles_payload, self)
+        self._model_settings_window = dialog
         dialog.profiles_saved.connect(self._save_model_profiles_from_dialog)
-        dialog.exec()
+        dialog.destroyed.connect(lambda *_args: setattr(self, "_model_settings_window", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _save_model_profiles_from_dialog(self, payload: dict | None) -> None:
         normalized = normalize_profiles_payload(payload or {})

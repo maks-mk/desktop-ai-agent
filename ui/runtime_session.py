@@ -263,8 +263,17 @@ class RuntimeSessionCoordinator:
             overrides["gemini_api_key"] = SecretStr(api_key) if api_key else None
         return overrides
 
+    def resolve_base_config(self):
+        base = getattr(self.worker, "base_config", None) or getattr(self.worker, "config", None)
+        if base is None:
+            base = _runtime_module().setup_runtime()
+            self.worker.base_config = base
+            if getattr(self.worker, "config", None) is None:
+                self.worker.config = base
+        return base
+
     def build_config_for_active_profile(self, model_profiles: dict[str, Any]):
-        base = self.worker.base_config or self.worker.config
+        base = self.resolve_base_config()
         base_values = base.model_dump(mode="python")
         active_profile = find_active_profile(model_profiles)
         if active_profile is None:
@@ -273,7 +282,7 @@ class RuntimeSessionCoordinator:
         if getattr(self.worker, "profile_store", None) is not None:
             overrides["model_profile_config_path"] = self.worker.profile_store.path
         base_values.update(overrides)
-        return self.worker.config.__class__(**base_values)
+        return base.__class__(**base_values)
 
     @staticmethod
     def selected_profile_id(model_profiles: dict[str, Any]) -> str:
