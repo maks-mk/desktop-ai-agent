@@ -17,7 +17,6 @@ PROVIDER=gemini
 # --- Google Gemini ---
 GEMINI_API_KEY=AIzaSyREPLACE_WITH_YOUR_KEY
 GEMINI_MODEL=gemini-1.5-flash
-# GEMINI_MODEL=gemini-2.0-flash-thinking-exp-1219
 
 # --- OpenAI / Compatible (OpenRouter, LocalLLM, etc.) ---
 # OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
@@ -26,13 +25,6 @@ GEMINI_MODEL=gemini-1.5-flash
 # Для OpenRouter:
 # OPENAI_BASE_URL=https://openrouter.ai/api/v1
 # OPENAI_MODEL=deepseek/deepseek-r1
-
-# --- Альтернативная (упрощенная) конфигурация через generic-переменные ---
-# MODEL=gemini-1.5-flash
-# API_KEY=AIzaSyREPLACE_WITH_YOUR_KEY
-# BASE_URL=
-# Эти переменные позволяют задать модель, ключ и базовый URL одной строкой,
-# без привязки к конкретному провайдеру (работает в паре с PROVIDER).
 
 # ID активного профиля модели (для ротации API ключей).
 # Не обязательна: при отсутствии приложение работает в legacy-режиме (один ключ из .env).
@@ -72,7 +64,9 @@ DEBUG=false
 # LOG_LEVEL=INFO
 # LOG_FILE=logs/agent.log
 # Строгий режим (LLM меньше фантазирует, но менее креативна)
-STRICT_MODE=false
+# STRICT_MODE=false
+# Legacy-флаг отображения reasoning. Runtime выставляет false автоматически.
+SHOW_MODEL_THOUGHTS=false
 
 # ===========================
 # 3) Подсистемы и Инструменты

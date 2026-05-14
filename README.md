@@ -388,14 +388,14 @@ START
 │       ├── dialogs.py     # ApprovalDialog, ModelSettingsDialog, InfoPopupDialog
 │       ├── panels.py      # OverviewPanelWidget, InspectorPanelWidget, ToolsPanelWidget
 │       └── sidebar.py     # SessionSidebarWidget, SessionListModel
-└── tests/                # 17 тестовых файлов (~370K байт)
+└── tests/                # 19 тестовых файлов (~370K байт)
 ```
 
 ---
 
 ## Тесты
 
-18 тестовых файлов:
+19 тестовых файлов:
 
 | Файл | Что покрывает |
 |---|---|
