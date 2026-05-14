@@ -125,6 +125,58 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("SAFETY POLICY: Any write, delete, move, or process-launch working directory must stay inside the active workspace.", joined)
         self.assertNotIn("Before every tool call", joined)
 
+    def test_context_builder_requests_reasoning_summary_by_default(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Проверь задачу",
+            tools_available=False,
+            active_tool_names=[],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        joined = "\n".join(str(message.content) for message in context if isinstance(message, SystemMessage))
+        self.assertNotIn("THOUGHT VISIBILITY POLICY:", joined)
+        self.assertNotIn("<think>", joined)
+        self.assertNotIn("舞台上边...dr", joined)
+
+    def test_context_builder_requests_reasoning_summary_even_when_legacy_toggle_is_false(self):
+        builder = ContextBuilder(
+            config=self._make_config(SHOW_MODEL_THOUGHTS=False),
+            prompt_loader=lambda: "Editable prompt only",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = builder.build(
+            [],
+            None,
+            summary="",
+            current_task="Проверь задачу",
+            tools_available=False,
+            active_tool_names=[],
+            open_tool_issue=None,
+            recovery_state=None,
+        )
+
+        joined = "\n".join(str(message.content) for message in context if isinstance(message, SystemMessage))
+        self.assertNotIn("THOUGHT VISIBILITY POLICY:", joined)
+        self.assertNotIn("<think>", joined)
+        self.assertNotIn("舞台上边...dr", joined)
+
     def test_runtime_prompt_policy_maps_supported_operating_systems(self):
         builder = RuntimePromptPolicyBuilder(config=self._make_config())
 

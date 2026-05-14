@@ -138,6 +138,6 @@ async def repair_session_if_needed(
 
         _notify("History repaired. The restored session is ready for a new request.")
     except Exception as exc:
-        logger.debug("Session repair skipped due to error: %s", exc)
+        logger.warning("Session repair skipped due to error: %s", exc)
 
     return notices

@@ -93,6 +93,7 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
                     "model": "claude-3-7-sonnet",
                     "api_key": "sk-claude-proxy",
                     "base_url": "http://127.0.0.1:3002/v1",
+                    "show_model_thoughts": True,
                 }
             ],
         }
@@ -106,3 +107,4 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.provider, "openai")
         self.assertEqual(result.openai_model, "claude-3-7-sonnet")
         self.assertEqual(result.openai_base_url, "http://127.0.0.1:3002/v1")
+        self.assertFalse(result.show_model_thoughts)

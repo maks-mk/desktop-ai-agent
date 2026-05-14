@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
-from core.text_utils import split_markdown_segments
+from core.text_utils import build_tool_ui_labels, split_markdown_segments
 from ui.theme import ACCENT_BLUE, AMBER_WARNING, ERROR_RED, SUCCESS_GREEN, TEXT_MUTED
 from .attachments import ImageAttachmentStripWidget
 from .foundation import (
@@ -14,11 +13,11 @@ from .foundation import (
     CodeBlockWidget,
     CollapsibleSection,
     CopySafePlainTextEdit,
+    _sync_plain_text_height,
     _collapsed_user_message_text,
     _fa_icon,
-    _make_mono_font,
+    format_approval_detail_text,
 )
-
 
 class NoticeWidget(QFrame):
     def __init__(self, message: str, level: str = "info", parent: QWidget | None = None) -> None:
@@ -228,11 +227,11 @@ class AssistantMessageWidget(QFrame):
                 parts.append(("markdown", segment.text, ""))
         return parts
 
-    def set_markdown(self, markdown: str) -> None:
+    def set_content(self, markdown: str) -> None:
         self._markdown = markdown
         text = markdown.strip() or "*Thinking…*"
 
-        parts = self._split_markdown_parts(text)
+        parts = self._split_markdown_parts(text) if text else []
 
         while len(self.parts_widgets) < len(parts):
             idx = len(self.parts_widgets)
@@ -266,6 +265,9 @@ class AssistantMessageWidget(QFrame):
                     w.setVisible(True)
                 else:
                     w.setVisible(False)
+
+    def set_markdown(self, markdown: str) -> None:
+        self.set_content(markdown)
 
     def markdown(self) -> str:
         return self._markdown
@@ -384,7 +386,7 @@ class ApprovalRequestCardWidget(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(9)
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -416,7 +418,7 @@ class ApprovalRequestCardWidget(QFrame):
         self.tools_scroll.setWidgetResizable(True)
         self.tools_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tools_scroll.setMinimumHeight(0)
-        self.tools_scroll.setMaximumHeight(220)
+        self.tools_scroll.setMaximumHeight(280)
         self.tools_scroll.setVisible(False)
 
         self.tools_container = QWidget()
@@ -429,23 +431,25 @@ class ApprovalRequestCardWidget(QFrame):
 
         actions_row = QHBoxLayout()
         actions_row.setContentsMargins(0, 0, 0, 0)
-        actions_row.setSpacing(8)
+        actions_row.setSpacing(6)
+
+        actions_row.addStretch(1)
+
+        self.deny_button = QPushButton("Deny")
+        self.deny_button.setObjectName("DangerButton")
+        self.deny_button.clicked.connect(lambda: self.decision_made.emit(False, False))
+        actions_row.addWidget(self.deny_button)
+
+        self.always_button = QPushButton("Always allow")
+        self.always_button.setObjectName("SecondaryButton")
+        self.always_button.clicked.connect(lambda: self.decision_made.emit(True, True))
+        actions_row.addWidget(self.always_button)
 
         self.approve_button = QPushButton("Approve")
         self.approve_button.setObjectName("PrimaryButton")
         self.approve_button.clicked.connect(lambda: self.decision_made.emit(True, False))
         actions_row.addWidget(self.approve_button)
 
-        self.always_button = QPushButton("Always for this session")
-        self.always_button.setObjectName("SecondaryButton")
-        self.always_button.clicked.connect(lambda: self.decision_made.emit(True, True))
-        actions_row.addWidget(self.always_button)
-
-        self.deny_button = QPushButton("Deny")
-        self.deny_button.setObjectName("DangerButton")
-        self.deny_button.clicked.connect(lambda: self.decision_made.emit(False, False))
-        actions_row.addWidget(self.deny_button)
-        actions_row.addStretch(1)
         layout.addLayout(actions_row)
 
         self.setAccessibleName("Approval request")
@@ -460,7 +464,6 @@ class ApprovalRequestCardWidget(QFrame):
         risk_level = str(summary.get("risk_level", "unknown") or "unknown")
         impacts = [str(item).strip() for item in list(summary.get("impacts", []) or []) if str(item).strip()]
         tools = list(payload.get("tools", []) or [])
-        default_approve = bool(summary.get("default_approve"))
 
         self.risk_badge.setText(risk_level.title())
         self.risk_badge.setProperty("riskLevel", risk_level)
@@ -471,13 +474,10 @@ class ApprovalRequestCardWidget(QFrame):
         self.risk_badge.setVisible(True)
 
         tools_count = len(tools)
-        default_text = "approve" if default_approve else "deny"
-        self.summary_label.setText(
-            f"This action needs confirmation before the agent can continue. "
-            f"{tools_count} protected action(s) requested. Default policy: {default_text}."
-        )
+        noun = "action" if tools_count == 1 else "actions"
+        self.summary_label.setText(f"The agent is paused. Review {tools_count} protected {noun}.")
         if impacts:
-            self.impacts_label.setText(f"Impacts: {', '.join(impacts)}")
+            self.impacts_label.setText(f"Will affect: {', '.join(impacts)}")
             self.impacts_label.setVisible(True)
         else:
             self.impacts_label.clear()
@@ -495,20 +495,29 @@ class ApprovalRequestCardWidget(QFrame):
             card.setObjectName("ApprovalToolCard")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(10, 10, 10, 10)
-            card_layout.setSpacing(6)
+            card_layout.setSpacing(4)
 
-            name = str(tool.get("display") or tool.get("name") or "tool").strip() or "tool"
-            name_label = QLabel(name)
+            tool_name = str(tool.get("name") or tool.get("display") or "tool").strip() or "tool"
+            tool_args = dict(tool.get("args") or {})
+            labels = build_tool_ui_labels(tool_name, tool_args, phase="finished")
+
+            name_label = QLabel(labels.get("title") or str(tool.get("display") or tool_name))
             name_label.setObjectName("ApprovalToolTitle")
             card_layout.addWidget(name_label)
 
+            subtitle = str(labels.get("subtitle", "") or "").strip()
+            if subtitle:
+                subtitle_label = QLabel(subtitle)
+                subtitle_label.setObjectName("ApprovalToolSubtitle")
+                subtitle_label.setWordWrap(True)
+                card_layout.addWidget(subtitle_label)
+
             args_view = CopySafePlainTextEdit()
-            args_view.setObjectName("InlineCodeView")
+            args_view.setObjectName("ApprovalDetailView")
             args_view.setReadOnly(True)
-            args_view.setFont(_make_mono_font())
-            args_view.setPlainText(json.dumps(tool.get("args", {}), ensure_ascii=False, indent=2))
-            args_view.setMinimumHeight(84)
-            section = CollapsibleSection("Request details", args_view, expanded=False)
+            args_view.setPlainText(format_approval_detail_text(tool_args))
+            _sync_plain_text_height(args_view, min_lines=6, max_lines=12, extra_padding=18)
+            section = CollapsibleSection("Details", args_view, expanded=tools_count == 1)
             card_layout.addWidget(section)
             self._tool_sections.append(section)
             self.tools_layout.insertWidget(self.tools_layout.count() - 1, card)

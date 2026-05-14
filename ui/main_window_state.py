@@ -303,6 +303,9 @@ class RunStatusController:
 
         if not busy:
             self.window._realtime_timer.stop()
+            if self.window.current_turn is not None:
+                self.window.current_turn.clear_status()
+                self.window.transcript.notify_content_changed()
         elif self.window.current_turn is not None and not self.window._realtime_timer.isActive():
             self.window._realtime_timer.start(100)
 

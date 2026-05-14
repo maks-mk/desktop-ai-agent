@@ -6,7 +6,7 @@ from uuid import uuid4
 from unittest import mock
 
 import httpx
-from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, ToolMessage
 
 from core.text_utils import format_tool_output, prepare_markdown_for_render, split_markdown_segments
 from ui.streaming import StreamProcessor
@@ -268,6 +268,48 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("↓ 0", result.stats)
         self.assertNotIn("↓ ?", result.stats)
 
+    def test_stream_processor_accepts_tuple_mode_message_chunks(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        async def _stream():
+            yield (
+                "messages",
+                (AIMessage(content="Готово"), {"langgraph_node": "agent"}),
+            )
+
+        result = asyncio.run(processor.process_stream(_stream()))
+
+        self.assertFalse(result.failed)
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово")
+
+    def test_stream_processor_accepts_tuple_mode_update_chunks(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        async def _stream():
+            yield (
+                "updates",
+                {
+                    "__interrupt__": [
+                        {
+                            "kind": "user_choice",
+                            "question": "Выберите режим:",
+                            "options": ["A", "B"],
+                        }
+                    ]
+                },
+            )
+
+        result = asyncio.run(processor.process_stream(_stream()))
+
+        self.assertIsNotNone(result.interrupt)
+        assert result.interrupt is not None
+        self.assertEqual(result.interrupt["kind"], "user_choice")
+        self.assertEqual(result.interrupt["question"], "Выберите режим:")
+
     def test_stream_processor_marks_stream_exception_as_failed(self):
         events = []
         processor = StreamProcessor(events.append)
@@ -352,7 +394,10 @@ class StreamAndFilesystemTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(events, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].type, "summary_notice")
+        self.assertEqual(events[0].payload["kind"], "agent_internal_notice")
+        self.assertEqual(events[0].payload["message"], "Нужен новый запрос.")
         self.assertEqual(processor.full_text, "")
         self.assertEqual(processor.clean_full, "")
 
@@ -366,6 +411,15 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertTrue(statuses)
         self.assertEqual(statuses[-1]["node"], "recovery")
         self.assertEqual(statuses[-1]["label"], "Reviewing results")
+
+    def test_stream_processor_skips_unknown_node_status_instead_of_fallback_thinking(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages((AIMessage(content=""), {"langgraph_node": "unknown_node"}))
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertEqual(statuses, [])
 
     def test_stream_processor_does_not_parse_choice_requests_from_plain_text(self):
         events = []
@@ -387,6 +441,172 @@ class StreamAndFilesystemTests(unittest.TestCase):
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
         self.assertEqual(len(deltas), 1)
         self.assertIn("Как продолжаем?", deltas[0]["full_text"])
+
+    def test_stream_processor_does_not_parse_inline_think_tags(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(content="<think>Сначала проверю входные данные.</think>Готово")
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово")
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_ignores_structured_reasoning_from_provider_content(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content=[
+                    {"type": "reasoning", "text": "Сначала сверю формат входа."},
+                    {"type": "text", "text": "Готово"},
+                ]
+            )
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово")
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_does_not_parse_escaped_think_tags(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(content="&lt;think&gt;Проверяю ограничения.&lt;/think&gt;Итог готов")
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertIn("&lt;think&gt;Проверяю ограничения.&lt;/think&gt;Итог готов", deltas[0]["full_text"])
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_emits_cumulative_full_text_for_chunked_string_output(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessage(content="Понял"), source="messages")
+        processor._handle_agent_message(AIMessage(content=", продолжаю"), source="messages")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[0]["full_text"], "Понял")
+        self.assertEqual(deltas[1]["full_text"], "Понял, продолжаю")
+
+    def test_stream_processor_replaces_final_agent_update_without_duplication(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Понял"), source="messages")
+        processor._handle_agent_message(AIMessageChunk(content=", продолжаю"), source="messages")
+        processor._handle_updates(
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(content="Понял, продолжаю")
+                    ]
+                }
+            }
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[-1]["full_text"], "Понял, продолжаю")
+        self.assertEqual(processor.full_text, "Понял, продолжаю")
+
+    def test_stream_processor_ignores_reasoning_only_update_without_text_chunk(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(content=[{"type": "reasoning", "text": "Планирую следующие шаги."}])
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 0)
+
+    def test_stream_processor_ignores_gemini_thought_flagged_text_part(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content=[
+                    {"type": "text", "text": "Сначала проверю структуру проекта.", "thought": True},
+                    {"type": "text", "text": "Готово."},
+                ]
+            )
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово.")
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_ignores_openai_responses_reasoning_summary(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content=[
+                    {
+                        "type": "reasoning",
+                        "summary": [
+                            {
+                                "type": "summary_text",
+                                "text": "Сначала оценю ограничения задачи.",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Готово.",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово.")
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_ignores_langchain_content_blocks_reasoning(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        message = AIMessage(
+            content="",
+            additional_kwargs={
+                "content_blocks": [
+                    {"type": "reasoning", "reasoning": "Сверяю план действий."},
+                    {"type": "text", "text": "План готов."},
+                ]
+            },
+        )
+
+        processor._handle_agent_message(message)
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "План готов.")
+        self.assertNotIn("thought_markdown", deltas[0])
+        self.assertNotIn("has_thought", deltas[0])
 
     def test_stream_processor_returns_user_choice_interrupt_from_updates(self):
         events = []

@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 from typing import Any, Optional, Tuple
 
@@ -18,8 +19,70 @@ from tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger("agent")
 
+_GOOGLE_RETRY_CONTROL_KWARGS = frozenset(
+    {
+        "max_retries",
+        "wait_exponential_multiplier",
+        "wait_exponential_min",
+        "wait_exponential_max",
+    }
+)
+
 
 # --- Factories ---
+
+
+def _normalized_model_name(model_name: str | None) -> str:
+    return str(model_name or "").strip().lower()
+
+
+def _is_official_openai_base_url(base_url: str | None) -> bool:
+    normalized = str(base_url or "").strip().lower()
+    return not normalized or "api.openai.com" in normalized
+
+
+def _openai_model_supports_reasoning_controls(model_name: str | None) -> bool:
+    normalized = _normalized_model_name(model_name)
+    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def _patch_langchain_google_genai_retry_kwargs() -> None:
+    try:
+        chat_models = importlib.import_module("langchain_google_genai.chat_models")
+    except ImportError:
+        return
+
+    if bool(getattr(chat_models, "_agent_retry_patch_applied", False)):
+        return
+
+    original_chat_with_retry = getattr(chat_models, "_chat_with_retry", None)
+    original_achat_with_retry = getattr(chat_models, "_achat_with_retry", None)
+    if not callable(original_chat_with_retry) or not callable(original_achat_with_retry):
+        return
+
+    def _strip_retry_kwargs(call_kwargs: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in dict(call_kwargs).items()
+            if key not in _GOOGLE_RETRY_CONTROL_KWARGS
+        }
+
+    def _patched_chat_with_retry(generation_method, **kwargs):
+        def _wrapped_generation_method(**call_kwargs):
+            return generation_method(**_strip_retry_kwargs(call_kwargs))
+
+        return original_chat_with_retry(generation_method=_wrapped_generation_method, **kwargs)
+
+    async def _patched_achat_with_retry(generation_method, **kwargs):
+        async def _wrapped_generation_method(**call_kwargs):
+            return await generation_method(**_strip_retry_kwargs(call_kwargs))
+
+        return await original_achat_with_retry(generation_method=_wrapped_generation_method, **kwargs)
+
+    chat_models._chat_with_retry = _patched_chat_with_retry
+    chat_models._achat_with_retry = _patched_achat_with_retry
+    chat_models._agent_retry_patch_applied = True
+
 
 def prepare_llm_with_tools(
     llm: BaseChatModel,
@@ -38,9 +101,11 @@ def prepare_llm_with_tools(
     except Exception as exc:
         return llm, False, str(exc)
 
+
 def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> BaseChatModel:
     """Initializes LLM based on configuration."""
     if config.provider == "gemini":
+        _patch_langchain_google_genai_retry_kwargs()
         # Lazy import to avoid loading both providers on startup.
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -49,10 +114,13 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             api_key = config.gemini_api_key.get_secret_value() if config.gemini_api_key else None
         else:
             api_key = str(api_key_override or "")
+        gemini_kwargs: dict[str, Any] = {
+            "model": config.gemini_model,
+            "temperature": config.temperature,
+            "google_api_key": api_key,
+        }
         return ChatGoogleGenerativeAI(
-            model=config.gemini_model,
-            temperature=config.temperature,
-            google_api_key=api_key,
+            **gemini_kwargs,
         )
     if config.provider == "openai":
         # Lazy import to avoid loading both providers on startup.
@@ -62,14 +130,20 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             api_key = config.openai_api_key.get_secret_value() if config.openai_api_key else None
         else:
             api_key = str(api_key_override or "")
-        return ChatOpenAI(
-            model=config.openai_model,
-            temperature=config.temperature,
-            api_key=api_key,
-            base_url=config.openai_base_url,
-            max_retries=0,
-            stream_usage=True,
-        )
+        openai_kwargs: dict[str, Any] = {
+            "model": config.openai_model,
+            "temperature": config.temperature,
+            "api_key": api_key,
+            "base_url": config.openai_base_url,
+            "max_retries": 0,
+            "stream_usage": True,
+        }
+        if (
+            _is_official_openai_base_url(config.openai_base_url)
+            and _openai_model_supports_reasoning_controls(config.openai_model)
+        ):
+            openai_kwargs["reasoning"] = {"effort": "medium", "summary": "auto"}
+        return ChatOpenAI(**openai_kwargs)
     raise ValueError(f"Unknown provider: {config.provider}")
 
 
@@ -83,6 +157,21 @@ def create_runtime_llm(config: AgentConfig) -> BaseChatModel | RotatingChatModel
         profile_store_path=config.model_profile_config_path,
         llm_factory=create_llm,
     )
+
+
+def _register_llm_cleanup_callback(tool_registry: ToolRegistry, llm: Any) -> bool:
+    close_method = getattr(llm, "aclose", None) or getattr(llm, "close", None)
+    if callable(close_method):
+        tool_registry.register_cleanup_callback(close_method)
+        return True
+    for target in (getattr(llm, "async_client", None), getattr(llm, "client", None)):
+        if target is None:
+            continue
+        target_close = getattr(target, "aclose", None) or getattr(target, "close", None)
+        if callable(target_close):
+            tool_registry.register_cleanup_callback(target_close)
+            return True
+    return False
 
 
 # --- Builder ---
@@ -205,6 +294,14 @@ def build_compiled_agent(
             logger.error("Tool calling disabled for this runtime because tool binding failed: %s", bind_error)
     elif not config.model_supports_tools:
         logger.debug("⚠️ Tools disabled: Model does not support tool calling.")
+
+    registered_cleanup_ids: set[int] = set()
+    for cleanup_target in (llm, llm_with_tools):
+        marker = id(cleanup_target)
+        if marker in registered_cleanup_ids:
+            continue
+        if _register_llm_cleanup_callback(tool_registry, cleanup_target):
+            registered_cleanup_ids.add(marker)
 
     active_tools = tools if tool_calling_enabled else []
     active_tool_metadata = tool_registry.tool_metadata if tool_calling_enabled else {}

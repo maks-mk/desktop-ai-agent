@@ -13,6 +13,8 @@ from core.config import AgentConfig
 from core.multimodal import DEFAULT_MODEL_CAPABILITIES
 from core.validation import validate_tool_result
 from tools import process_tools
+from tools.process_tools import run_background_process
+from tools.search_tools import fetch_content
 from tools.tool_registry import ToolRegistry
 from tools.user_input_tool import request_user_input
 
@@ -95,6 +97,15 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(registry.mcp_clients, [fake_client])
         await registry.cleanup()
         fake_client.aclose.assert_awaited_once()
+
+    async def test_tool_registry_cleanup_awaits_registered_async_callbacks(self):
+        registry = ToolRegistry(self._make_config())
+        callback = mock.AsyncMock()
+        registry.register_cleanup_callback(callback)
+
+        await registry.cleanup()
+
+        callback.assert_awaited_once()
 
     def test_mcp_metadata_keeps_safe_tools_read_only(self):
         metadata = ToolRegistry._infer_mcp_metadata(
@@ -286,6 +297,34 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
                     "recommended": "missing",
                 }
             )
+
+    def test_fetch_content_schema_uses_array_urls_for_gemini_compatibility(self):
+        schema = fetch_content.get_input_schema().model_json_schema()
+        urls_schema = schema["properties"]["urls"]
+
+        self.assertEqual(urls_schema["type"], "array")
+        self.assertEqual(urls_schema["items"]["type"], "string")
+        self.assertNotIn("anyOf", urls_schema)
+
+    def test_fetch_content_schema_normalizes_single_string_url_into_list(self):
+        schema = fetch_content.get_input_schema()
+        validated = schema.model_validate({"urls": "https://example.com"})
+
+        self.assertEqual(validated.urls, ["https://example.com"])
+
+    def test_run_background_process_schema_uses_array_command_for_gemini_compatibility(self):
+        schema = run_background_process.get_input_schema().model_json_schema()
+        command_schema = schema["properties"]["command"]
+
+        self.assertEqual(command_schema["type"], "array")
+        self.assertEqual(command_schema["items"]["type"], "string")
+        self.assertNotIn("anyOf", command_schema)
+
+    def test_run_background_process_schema_normalizes_single_command_string_into_list(self):
+        schema = run_background_process.get_input_schema()
+        validated = schema.model_validate({"command": "python -V"})
+
+        self.assertEqual(validated.command, ["python -V"])
 
     def test_max_file_size_numeric_value_is_bytes(self):
         config = self._make_config(MAX_FILE_SIZE="4096")

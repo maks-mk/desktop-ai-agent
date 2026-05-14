@@ -5,16 +5,19 @@ import sqlite3
 import sys
 import unittest
 import base64
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 from pathlib import Path
 from uuid import uuid4
 
+import agent as agent_module
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel, RootModel
 
-from agent import create_agent_workflow, create_llm, prepare_llm_with_tools
+from agent import _register_llm_cleanup_callback, create_agent_workflow, create_llm, prepare_llm_with_tools
+from core.api_key_rotation import RotatingChatModel
 from core.checkpointing import create_checkpoint_runtime
 from core.config import AgentConfig
 from core.multimodal import (
@@ -557,6 +560,92 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["google_api_key"], "gm-test")
         self.assertNotIn("convert_system_message_to_human", captured)
 
+    def test_create_llm_for_gemini_does_not_force_native_thoughts_by_default(self):
+        captured = {}
+
+        class FakeChatGoogleGenerativeAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_google_genai": mock.Mock(ChatGoogleGenerativeAI=FakeChatGoogleGenerativeAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="gemini",
+                    GEMINI_API_KEY="gm-test",
+                    GEMINI_MODEL="gemini-2.5-flash",
+                )
+            )
+
+        self.assertNotIn("include_thoughts", captured)
+        self.assertNotIn("thinking_budget", captured)
+
+    def test_create_llm_for_gemini_keeps_thought_flags_absent_with_legacy_flag_off(self):
+        captured = {}
+
+        class FakeChatGoogleGenerativeAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_google_genai": mock.Mock(ChatGoogleGenerativeAI=FakeChatGoogleGenerativeAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="gemini",
+                    GEMINI_API_KEY="gm-test",
+                    GEMINI_MODEL="gemini-2.5-flash",
+                    SHOW_MODEL_THOUGHTS=False,
+                )
+            )
+
+        self.assertNotIn("include_thoughts", captured)
+        self.assertNotIn("thinking_budget", captured)
+
+    async def test_gemini_retry_patch_strips_retry_kwargs_before_async_generation_call(self):
+        forwarded_kwargs = {}
+
+        async def fake_generation_method(**kwargs):
+            forwarded_kwargs.update(kwargs)
+            return "ok"
+
+        def fake_chat_with_retry(*, generation_method, **kwargs):
+            return generation_method(**kwargs)
+
+        async def fake_achat_with_retry(*, generation_method, **kwargs):
+            return await generation_method(**kwargs)
+
+        fake_chat_models = ModuleType("langchain_google_genai.chat_models")
+        fake_chat_models._chat_with_retry = fake_chat_with_retry
+        fake_chat_models._achat_with_retry = fake_achat_with_retry
+
+        fake_package = ModuleType("langchain_google_genai")
+        fake_package.ChatGoogleGenerativeAI = object
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "langchain_google_genai": fake_package,
+                "langchain_google_genai.chat_models": fake_chat_models,
+            },
+        ):
+            agent_module._patch_langchain_google_genai_retry_kwargs()
+            await fake_chat_models._achat_with_retry(
+                generation_method=fake_generation_method,
+                request=SimpleNamespace(model="gemini-2.5-flash"),
+                timeout=30,
+                metadata=[("x-test", "1")],
+                max_retries=6,
+                wait_exponential_multiplier=2.0,
+                wait_exponential_min=1.0,
+                wait_exponential_max=60.0,
+            )
+
+        self.assertEqual(forwarded_kwargs["timeout"], 30)
+        self.assertEqual(forwarded_kwargs["metadata"], [("x-test", "1")])
+        self.assertEqual(forwarded_kwargs["request"].model, "gemini-2.5-flash")
+        self.assertNotIn("max_retries", forwarded_kwargs)
+        self.assertNotIn("wait_exponential_multiplier", forwarded_kwargs)
+        self.assertNotIn("wait_exponential_min", forwarded_kwargs)
+        self.assertNotIn("wait_exponential_max", forwarded_kwargs)
+
     def test_create_llm_for_openai_disables_sdk_retries(self):
         captured = {}
 
@@ -578,6 +667,90 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["api_key"], "sk-test")
         self.assertEqual(captured["max_retries"], 0)
         self.assertTrue(captured["stream_usage"])
+
+    async def test_register_llm_cleanup_callback_closes_async_client(self):
+        registry = ToolRegistry(self._make_config())
+        fake_client = mock.AsyncMock()
+        fake_llm = SimpleNamespace(async_client=fake_client)
+
+        self.assertTrue(_register_llm_cleanup_callback(registry, fake_llm))
+
+        await registry.cleanup()
+        fake_client.aclose.assert_awaited_once()
+
+    async def test_rotating_chat_model_reuses_cached_model_and_closes_clients(self):
+        tmp = Path.cwd() / ".tmp_tests" / uuid4().hex
+        tmp.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+
+        created_models = []
+
+        class FakeProviderModel:
+            def __init__(self):
+                self.async_client = mock.AsyncMock()
+
+            async def ainvoke(self, _context, **_kwargs):
+                return AIMessage(content="ok")
+
+        def _factory(_config, *, api_key_override=None):
+            self.assertEqual(api_key_override, "gm-test")
+            model = FakeProviderModel()
+            created_models.append(model)
+            return model
+
+        model = RotatingChatModel(
+            config=self._make_config(PROVIDER="gemini", GEMINI_API_KEY="gm-test", GEMINI_MODEL="gemini-2.5-flash"),
+            profile_id="gemini-profile",
+            profile_store_path=tmp / "profiles.json",
+            llm_factory=_factory,
+        )
+
+        await model.ainvoke([HumanMessage(content="one")])
+        await model.ainvoke([HumanMessage(content="two")])
+
+        self.assertEqual(len(created_models), 1)
+
+        await model.aclose()
+        created_models[0].async_client.aclose.assert_awaited_once()
+
+    def test_create_llm_for_openai_reasoning_models_requests_reasoning_summary_by_default(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-5-mini",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                )
+            )
+
+        self.assertEqual(captured["reasoning"], {"effort": "medium", "summary": "auto"})
+
+    def test_create_llm_for_openai_reasoning_models_keeps_reasoning_with_legacy_flag_off(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-5-mini",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                    SHOW_MODEL_THOUGHTS=False,
+                )
+            )
+
+        self.assertEqual(captured["reasoning"], {"effort": "medium", "summary": "auto"})
 
     def test_build_initial_state_supports_text_and_image_attachments(self):
         state = build_initial_state(
@@ -1876,7 +2049,23 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["turns"][0]["blocks"][0]["payload"]["name"], "edit_file")
         self.assertIn("Готово", payload["turns"][0]["blocks"][1]["markdown"])
 
-    def test_build_transcript_payload_hides_internal_handoff_completely(self):
+    def test_build_transcript_payload_does_not_restore_assistant_thought_markdown(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Сделай вывод"),
+                    AIMessage(content="<thought>Сначала проверю ограничения.</thought>Итог готов."),
+                ],
+            }
+        )
+
+        self.assertEqual(len(payload["turns"]), 1)
+        blocks = payload["turns"][0]["blocks"]
+        self.assertEqual([block["type"] for block in blocks], ["assistant"])
+        self.assertEqual(blocks[0]["markdown"], "Итог готов.")
+        self.assertNotIn("thought_markdown", blocks[0])
+
+    def test_build_transcript_payload_restores_internal_handoff_notice_without_assistant_text(self):
         payload = build_transcript_payload(
             {
                 "messages": [
@@ -1897,7 +2086,16 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(payload["turns"]), 1)
         self.assertEqual(payload["turns"][0]["user_text"], "Проверь завершение")
-        self.assertEqual(payload["turns"][0]["blocks"], [])
+        self.assertEqual(
+            payload["turns"][0]["blocks"],
+            [
+                {
+                    "type": "notice",
+                    "message": "Автопродолжение остановлено. Нужен новый запрос.",
+                    "level": "warning",
+                }
+            ],
+        )
 
     def test_build_transcript_payload_keeps_assistant_text_without_pending_choice_state(self):
         payload = build_transcript_payload(
@@ -3260,6 +3458,45 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         repair_mock.assert_awaited_once()
         self.assertFalse(worker._is_busy)
 
+    async def test_run_graph_payload_success_refreshes_transcript_payload(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.agent_app = type(
+            "DummyApp",
+            (),
+            {"astream": lambda self, *_args, **_kwargs: object()},
+        )()
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config()
+        worker._set_busy(True)
+
+        with (
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    return_value=StreamProcessResult(
+                        stats="0.5s   In: 10   Out: 2",
+                        elapsed_seconds=0.5,
+                    )
+                ),
+            ),
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock(return_value={})) as emit_session_mock,
+        ):
+            await worker._run_graph_payload({"messages": []})
+
+        worker.store.save_active_session.assert_called_once_with(worker.current_session, touch=True, set_active=True)
+        emit_session_mock.assert_awaited_once_with(include_transcript=True)
+        self.assertFalse(worker._is_busy)
+
     def test_stop_background_process_denies_external_pid_by_default(self):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})
         self.assertIn("ACCESS_DENIED", result)
@@ -3286,7 +3523,10 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(events, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].type, "summary_notice")
+        self.assertEqual(events[0].payload["kind"], "agent_internal_notice")
+        self.assertEqual(events[0].payload["message"], "Нужен новый запрос.")
         self.assertEqual(processor.full_text, "")
         self.assertEqual(processor.clean_full, "")
 

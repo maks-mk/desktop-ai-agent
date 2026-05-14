@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config import AgentConfig
 from core.errors import ErrorType, format_error
@@ -221,40 +222,27 @@ def _is_valid_http_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def _parse_urls_input(urls: Union[str, List[str]]) -> List[str]:
-    candidates: List[str] = []
-    if isinstance(urls, str):
-        raw = urls.strip()
-        parsed_obj: Any = None
-        if raw.startswith("[") and raw.endswith("]"):
-            try:
-                parsed_obj = json.loads(raw)
-            except json.JSONDecodeError:
-                try:
-                    parsed_obj = ast.literal_eval(raw)
-                except (ValueError, SyntaxError):
-                    parsed_obj = None
+class FetchContentInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
-        if isinstance(parsed_obj, list):
-            candidates = [str(x) for x in parsed_obj]
-        elif "," in raw:
-            candidates = [part.strip() for part in raw.split(",")]
-        else:
-            candidates = [raw]
-    elif isinstance(urls, list):
-        candidates = [str(x) for x in urls]
+    urls: List[str] = Field(...)
+    advanced: bool = False
+    content_format: str = "markdown"
+    query: Optional[str] = None
+    chunks_per_source: int = 3
 
-    clean_urls: List[str] = []
-    seen = set()
-    for item in candidates:
-        url = item.strip().strip('"\'')
-        if not url or not _is_valid_http_url(url) or url in seen:
-            continue
-        seen.add(url)
-        clean_urls.append(url)
-        if len(clean_urls) >= _TAVILY_MAX_EXTRACT_URLS:
-            break
-    return clean_urls
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        raw_urls = data.get("urls")
+        if isinstance(raw_urls, str):
+            data["urls"] = [raw_urls]
+        elif isinstance(raw_urls, tuple):
+            data["urls"] = list(raw_urls)
+        return data
 
 
 def _format_tavily_error(exc: Exception) -> str:
@@ -359,10 +347,10 @@ async def web_search(query: str, max_results: int = 5, search_depth: str = "basi
     return await _web_search_impl(query, max_results, search_depth, topic)
 
 
-@tool("fetch_content")
+@tool("fetch_content", args_schema=FetchContentInput)
 @_RUNTIME.with_cache(ttl=1800)
 async def fetch_content(
-    urls: Union[str, List[str]],
+    urls: List[str],
     advanced: bool = False,
     content_format: str = "markdown",
     query: Optional[str] = None,

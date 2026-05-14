@@ -216,6 +216,8 @@ START
 | `OPENAI_API_KEY` | — | Обязателен для OpenAI (если нет `OPENAI_BASE_URL`) |
 | `OPENAI_MODEL` | `gpt-4o` | Имя модели OpenAI |
 | `OPENAI_BASE_URL` | — | Для OpenAI-compatible бэкендов (Ollama и др.) |
+| `ACTIVE_MODEL_PROFILE_ID` | — | ID активного профиля модели (для ротации ключей) |
+| `SHOW_MODEL_THOUGHTS` | `false` | Legacy-флаг отображения reasoning (runtime выставляет false) |
 
 ### Управление runtime
 
@@ -240,6 +242,7 @@ START
 | `ENABLE_PROCESS_TOOLS` | Управление процессами |
 | `ENABLE_APPROVALS` | Approval-паузы перед рискованными действиями |
 | `ALLOW_EXTERNAL_PROCESS_CONTROL` | Разрешить управление внешними процессами |
+| `TAVILY_API_KEY` | Ключ Tavily для web search |
 
 ### Лимиты
 
@@ -310,7 +313,6 @@ START
 │   │   ├── approval.py   # ApprovalMixin — interrupt для мутирующих операций
 │   │   ├── tools.py      # ToolsMixin — dispatch tool execution, parallel batching
 │   │   └── recovery.py   # RecoveryMixin — bounded recovery, self-correction ceiling
-│   ├── agent.py          # Сборка и маршрутизация StateGraph
 │   ├── config.py         # Pydantic-settings конфигурация из .env
 │   ├── state.py          # TypedDict состояния графа
 │   ├── checkpointing.py  # SQLite / memory checkpoint store
@@ -441,3 +443,6 @@ venv\Scripts\python.exe -m pytest
 | `psutil` | Системные инструменты и процессы |
 | `httpx` | HTTP для MCP и fetch |
 | `aiofiles` | Async файловые операции |
+| `mcp` | Model Context Protocol |
+| `requests` | HTTP-клиент (Google API, Tavily) |
+| `sqlite-vec` | Vector-расширение для SQLite checkpoints |

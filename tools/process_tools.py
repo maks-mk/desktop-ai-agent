@@ -12,6 +12,7 @@ except ImportError:
     psutil = None
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.safety_policy import SafetyPolicy
 from core.errors import format_error, ErrorType
@@ -74,6 +75,8 @@ def _normalize_command(command: Union[str, List[str]]) -> List[str]:
         parts = [str(part).strip() for part in command if str(part).strip()]
         if not parts:
             raise ValueError("Command list cannot be empty.")
+        if len(parts) == 1:
+            return _normalize_command(parts[0])
         return parts
 
     raw_command = str(command or "").strip()
@@ -89,8 +92,28 @@ def _normalize_command(command: Union[str, List[str]]) -> List[str]:
         raise ValueError("Command cannot be empty.")
     return parts
 
-@tool("run_background_process")
-def run_background_process(command: Union[str, List[str]], cwd: str = ".") -> str:
+
+class RunBackgroundProcessInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    command: List[str] = Field(...)
+    cwd: str = "."
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_payload(cls, value):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        raw_command = data.get("command")
+        if isinstance(raw_command, str):
+            data["command"] = [raw_command]
+        elif isinstance(raw_command, tuple):
+            data["command"] = list(raw_command)
+        return data
+
+@tool("run_background_process", args_schema=RunBackgroundProcessInput)
+def run_background_process(command: List[str], cwd: str = ".") -> str:
     """Start a background process in a workspace cwd. Pass argv list or simple shell-free command string."""
     # Clean up dead processes first
     _cleanup_zombies()

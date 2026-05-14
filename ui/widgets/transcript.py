@@ -98,7 +98,10 @@ class ConversationTurnWidget(QWidget):
         return segment
 
     def set_assistant_markdown(self, markdown: str) -> None:
-        if markdown == self._assistant_markdown and self.assistant_segments:
+        if (
+            markdown == self._assistant_markdown
+            and self.assistant_segments
+        ):
             return
         if not markdown:
             if self._timeline and self._timeline[-1][0] == "assistant":
@@ -126,18 +129,18 @@ class ConversationTurnWidget(QWidget):
             if prefix_len > 0 and (exact_prefix or significant_prefix):
                 segment_text = markdown[prefix_len:].lstrip("\n")
                 if segment_text:
-                    segment.set_markdown(segment_text)
+                    segment.set_content(segment_text)
                 self._assistant_markdown = markdown
                 return
 
         if not self._assistant_markdown:
-            segment.set_markdown(markdown)
+            segment.set_content(markdown)
         elif markdown.startswith(self._assistant_markdown):
             segment_text = markdown[len(self._assistant_markdown):]
             if segment_text:
-                segment.set_markdown(segment.markdown() + segment_text)
+                segment.set_content(segment.markdown() + segment_text)
         else:
-            segment.set_markdown(markdown)
+            segment.set_content(markdown)
 
         self._assistant_markdown = markdown
 
@@ -148,7 +151,7 @@ class ConversationTurnWidget(QWidget):
         if self.tool_group is not None and (not self._timeline or self._timeline[-1][0] != "assistant"):
             self.tool_group.collapse()
         segment = AssistantMessageWidget(parent=self)
-        segment.set_markdown(markdown)
+        segment.set_content(markdown)
         self.assistant_segments.append(segment)
         self._append_block("assistant", segment)
         self._assistant_markdown = markdown

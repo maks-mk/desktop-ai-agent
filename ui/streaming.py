@@ -14,15 +14,31 @@ from core.text_utils import (
     classify_tool_args_state,
     format_tool_display,
     format_tool_output,
-    parse_thought,
     prepare_markdown_for_render,
 )
 from core.tool_args import canonicalize_tool_args
 from ui.tool_message_utils import extract_tool_args, extract_tool_duration
-from ui.visibility import is_hidden_internal_message
+from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
 
 DIFF_REGEX = re.compile(r"```diff\r?\n(.*?)```", re.DOTALL)
+_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)>.*?</\1>", re.IGNORECASE | re.DOTALL)
 logger = logging.getLogger("agent")
+
+
+def _clip_debug_text(value: Any, limit: int = 240) -> str:
+    text = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…(+{len(text) - limit} chars)"
+
+
+def _normalize_stream_chunk(chunk: Any) -> tuple[str, Any]:
+    if isinstance(chunk, dict):
+        return str(chunk["type"]), chunk["data"]
+    if isinstance(chunk, tuple) and len(chunk) == 2:
+        mode, payload = chunk
+        return str(mode), payload
+    raise TypeError(f"Unsupported stream chunk format: {type(chunk).__name__}")
 
 
 @dataclass(frozen=True)
@@ -49,7 +65,6 @@ class StreamProcessor:
         "tracker",
         "full_text",
         "clean_full",
-        "has_thought",
         "printed_tool_ids",
         "tool_buffer",
         "tool_start_times",
@@ -63,6 +78,7 @@ class StreamProcessor:
         "_tool_buffer_max",
         "_completed_tool_ids",
         "_base_elapsed_seconds",
+        "_last_internal_notice",
     )
 
     def __init__(
@@ -78,7 +94,6 @@ class StreamProcessor:
         self.tracker = TokenTracker()
         self.full_text = ""
         self.clean_full = ""
-        self.has_thought = False
         self.printed_tool_ids: Set[str] = set()
         self.tool_buffer: Dict[str, Dict[str, Any]] = {}
         self.tool_start_times: Dict[str, float] = {}
@@ -92,6 +107,7 @@ class StreamProcessor:
         self._tool_buffer_max = max(1, int(tool_buffer_max))
         self._completed_tool_ids: dict[str, None] = {}
         self._base_elapsed_seconds = max(0.0, float(base_elapsed_seconds or 0.0))
+        self._last_internal_notice = ""
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -100,9 +116,7 @@ class StreamProcessor:
         self._emit_status(force=True)
         try:
             async for chunk in stream:
-                # LangGraph v2 streaming yields dicts: {"type": ..., "data": ...}
-                mode = chunk["type"]
-                payload = chunk["data"]
+                mode, payload = _normalize_stream_chunk(chunk)
                 self._handle_stream_event(mode, payload)
                 if self.pending_interrupt is not None:
                     break
@@ -217,6 +231,8 @@ class StreamProcessor:
             for tool_call in last_message.tool_calls:
                 self._remember_tool_call(tool_call)
                 self._emit_tool_started(tool_call)
+        if isinstance(last_message, (AIMessage, AIMessageChunk)):
+            self._handle_agent_message(last_message, source="updates_agent")
 
         for node_name, node_payload in payload.items():
             if node_name in {"agent", "summarize", "__interrupt__"}:
@@ -231,7 +247,7 @@ class StreamProcessor:
                     continue
                 self.tracker.update_from_message(message)
                 if isinstance(message, (AIMessage, AIMessageChunk)):
-                    self._handle_agent_message(message)
+                    self._handle_agent_message(message, source=f"updates_{node_name}")
                 elif isinstance(message, ToolMessage):
                     self._handle_tool_result(message)
 
@@ -261,49 +277,145 @@ class StreamProcessor:
             self._emit_status()
 
         if node == "agent" and isinstance(message, (AIMessage, AIMessageChunk)):
-            self._handle_agent_message(message)
+            self._handle_agent_message(message, source="messages")
         elif node == "tools" and isinstance(message, ToolMessage):
             self._handle_tool_result(message)
 
-    def _handle_agent_message(self, message: AIMessage | AIMessageChunk) -> None:
+    def _handle_agent_message(self, message: AIMessage | AIMessageChunk, *, source: str = "messages") -> None:
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 self._remember_tool_call(tool_call)
                 self._emit_tool_started(tool_call)
 
         if is_hidden_internal_message(message):
+            notice = get_internal_ui_notice(message)
+            if notice and notice != self._last_internal_notice:
+                self._last_internal_notice = notice
+                self._emit(
+                    "summary_notice",
+                    {
+                        "message": notice,
+                        "kind": "agent_internal_notice",
+                        "level": "warning",
+                    },
+                )
             return
 
         chunk = self._extract_text_content(message.content)
         if not chunk:
+            chunk = self._extract_text_content(message)
+        if not chunk:
+            logger.debug(
+                "Stream empty assistant chunk content_type=%s additional_kwargs=%s response_metadata=%s content_preview=%s",
+                type(message.content).__name__,
+                sorted((getattr(message, "additional_kwargs", {}) or {}).keys()),
+                sorted((getattr(message, "response_metadata", {}) or {}).keys()),
+                _clip_debug_text(message.content),
+            )
             return
 
-        self.full_text += chunk
-        if "<th" in self.full_text:
-            _, self.clean_full, self.has_thought = parse_thought(self.full_text)
-        else:
-            self.clean_full = self.full_text
-            self.has_thought = False
+        merged_text = self._merge_assistant_text(chunk, source=source)
+        if merged_text is None:
+            return
+
+        self.full_text = merged_text
+        self.clean_full = self.full_text
+        logger.debug(
+            "Stream assistant chunk source=%s chunk_len=%s full_len=%s chunk_preview=%s",
+            source,
+            len(chunk),
+            len(self.full_text),
+            _clip_debug_text(chunk),
+        )
 
         self._trim_text_buffers()
 
         self._emit_status()
         rendered_markdown = prepare_markdown_for_render(self.clean_full) if self.clean_full else ""
+        logger.debug(
+            "Stream emit_assistant_delta rendered_len=%s rendered_preview=%s",
+            len(rendered_markdown),
+            _clip_debug_text(rendered_markdown),
+        )
         self._emit(
             "assistant_delta",
             {
                 "text": chunk,
                 "full_text": rendered_markdown,
-                "has_thought": self.has_thought,
             },
         )
+
+    def _merge_assistant_text(self, incoming_text: str, *, source: str) -> str | None:
+        text = str(incoming_text or "")
+        if not text:
+            return None
+
+        current = self.full_text
+        if not current:
+            return text
+
+        if text == current:
+            return None
+
+        if source == "messages":
+            if text.startswith(current):
+                return text
+            return current + text
+
+        if source == "updates_agent":
+            if current == text:
+                return None
+            return text
+
+        if text.startswith(current):
+            return text
+        return current + text
 
     @staticmethod
     def _extract_text_content(content: Any) -> str:
         if isinstance(content, str):
-            return content
+            return _INLINE_THOUGHT_BLOCK_RE.sub("", content)
+        if content is None:
+            return ""
         if isinstance(content, list):
-            return "".join(item.get("text", "") for item in content if isinstance(item, dict))
+            return "".join(StreamProcessor._extract_text_content(item) for item in content)
+        if isinstance(content, dict):
+            item_type = str(content.get("type") or "").strip().lower()
+            if bool(content.get("thought")) or item_type in {
+                "thinking",
+                "thought",
+                "reasoning",
+                "reasoning_content",
+                "reasoning_summary",
+                "summary_text",
+            }:
+                return ""
+            for key in ("text", "output_text", "content", "answer", "response", "final", "final_text"):
+                if key in content:
+                    text = StreamProcessor._extract_text_content(content.get(key))
+                    if text:
+                        return text
+            return "".join(
+                StreamProcessor._extract_text_content(content.get(key))
+                for key in ("parts", "items", "content_blocks", "message", "messages", "data")
+                if key in content
+            )
+        for key in ("content", "content_blocks", "text"):
+            try:
+                value = getattr(content, key)
+            except Exception:
+                continue
+            if callable(value) or value is None:
+                continue
+            text = StreamProcessor._extract_text_content(value)
+            if text:
+                return text
+        try:
+            additional_kwargs = getattr(content, "additional_kwargs")
+        except Exception:
+            additional_kwargs = None
+        if isinstance(additional_kwargs, dict):
+            return StreamProcessor._extract_text_content(additional_kwargs.get("content_blocks"))
         return ""
 
     def _remember_tool_call(self, tool_call: Dict[str, Any]) -> None:
@@ -493,7 +605,7 @@ class StreamProcessor:
             "summarize": "Compressing context",
             "approval": "Waiting for approval",
         }
-        return node_labels.get(self.active_node, "Thinking")
+        return node_labels.get(self.active_node, "")
 
     def _status_phase(self) -> str:
         phase_map = {
@@ -544,6 +656,8 @@ class StreamProcessor:
 
     def _emit_status(self, force: bool = False) -> None:
         label = self._status_label()
+        if not label:
+            return
         current = (self.active_node, label)
         if not force and current == self._last_status:
             return
@@ -556,6 +670,5 @@ class StreamProcessor:
                 "elapsed": self._elapsed_seconds(),
                 "elapsed_text": self._status_elapsed_text(),
                 "phase": self._status_phase(),
-                "has_thought": self.has_thought,
             },
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -20,6 +21,8 @@ from ui.window_components.menu_builder import MenuBuilder
 from ui.window_components.sidebar_controller import SidebarController
 from ui.window_components.status_bar_manager import StatusBarManager
 from ui.window_components.workspace_builder import WorkspaceBuilder
+
+logger = logging.getLogger("agent")
 
 
 def _configure_qt_logging() -> None:
@@ -284,7 +287,14 @@ class MainWindow(QMainWindow):
     def _on_assistant_delta(self, payload: dict) -> None:
         if self.current_turn is None:
             return
-        self.current_turn.set_assistant_markdown(payload.get("full_text", ""))
+        full_text = str(payload.get("full_text", "") or "")
+        logger.debug(
+            "Stream main_window_assistant_delta full_len=%s",
+            len(full_text),
+        )
+        self.current_turn.set_assistant_markdown(
+            full_text,
+        )
         self.transcript.notify_content_changed()
 
     def _on_tool_started(self, payload: dict) -> None:
@@ -308,8 +318,6 @@ class MainWindow(QMainWindow):
     def _on_summary_notice(self, payload: dict) -> None:
         kind = str(payload.get("kind", "") or "")
         level = str(payload.get("level", "info") or "info")
-        if kind == "agent_internal_notice":
-            return
         if kind == "auto_summary":
             self._summarize_in_progress = False
             if self.current_turn is not None:
@@ -589,6 +597,8 @@ class MainWindow(QMainWindow):
         self.awaiting_user_choice = False
         self._custom_choice_armed = False
         self._clear_user_choice_request()
+        if self.current_turn is not None:
+            self.current_turn.clear_status()
         self.approval_card.set_request(payload)
         self._set_input_enabled(False)
         self._set_status_visual("Waiting for approval", busy=False)
@@ -606,6 +616,8 @@ class MainWindow(QMainWindow):
     def _handle_user_choice_request(self, payload: dict) -> None:
         self.awaiting_user_choice = True
         self._custom_choice_armed = False
+        if self.current_turn is not None:
+            self.current_turn.clear_status()
         self._set_user_choice_request(payload)
         self._set_status_visual("Waiting for your choice", busy=False)
         self._set_input_enabled(True)

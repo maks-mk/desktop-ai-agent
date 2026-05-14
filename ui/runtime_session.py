@@ -243,6 +243,7 @@ class RuntimeSessionCoordinator:
             "OPENAI_BASE_URL": str(config.openai_base_url or ""),
             "GEMINI_MODEL": str(config.gemini_model or ""),
             "GEMINI_API_KEY": str(gemini_key or ""),
+            "SHOW_MODEL_THOUGHTS": "false",
         }
 
     @staticmethod
@@ -252,8 +253,11 @@ class RuntimeSessionCoordinator:
         api_key = str(profile.get("api_key") or "").strip()
         base_url = str(profile.get("base_url") or "").strip()
         profile_id = str(profile.get("id") or "").strip()
-
-        overrides: dict[str, Any] = {"provider": provider, "active_model_profile_id": profile_id or None}
+        overrides: dict[str, Any] = {
+            "provider": provider,
+            "active_model_profile_id": profile_id or None,
+            "show_model_thoughts": False,
+        }
         if provider == "openai":
             overrides["openai_model"] = model_name
             overrides["openai_api_key"] = SecretStr(api_key) if api_key else None

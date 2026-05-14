@@ -1,11 +1,10 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
-_THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL)
 _CLEAN_MD_RE = re.compile(r"\n{3,}")
 _CRAWL_PAGES_RE = re.compile(r"(\d+) pages processed")
 _CRAWL_DEPTH_RE = re.compile(r"max_depth: (\d+)")
@@ -473,18 +472,10 @@ def clean_markdown_text(text: str) -> str:
     return _collapse_non_code_markdown(text)
 
 
-def parse_thought(text: str) -> Tuple[str, str, bool]:
-    clean_text = _THOUGHT_RE.sub("", text)
-
-    for tag in ("<thought>", "<think>"):
-        start_idx = clean_text.find(tag)
-        if start_idx != -1:
-            close_tag = tag.replace("<", "</")
-            if close_tag not in clean_text:
-                content_start = start_idx + len(tag)
-                return clean_text[content_start:].strip(), clean_text[:start_idx], True
-
-    return "", clean_text.strip(), False
+def _append_unique_text(parts: list[str], value: Any) -> None:
+    normalized = str(value or "").strip()
+    if normalized and normalized not in parts:
+        parts.append(normalized)
 
 
 def _code_signal_score(line: str) -> int:

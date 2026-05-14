@@ -142,7 +142,14 @@ def normalize_profiles_payload(payload: Any) -> dict[str, Any]:
         enabled = _normalize_bool(raw.get("enabled")) if "enabled" in raw else True
 
         # Deduplicate exact same profile payloads to keep env bootstrap/import idempotent.
-        profile_fingerprint = (provider, model_name, tuple(api_keys), base_url, supports_image_input, enabled)
+        profile_fingerprint = (
+            provider,
+            model_name,
+            tuple(api_keys),
+            base_url,
+            supports_image_input,
+            enabled,
+        )
         if profile_fingerprint in seen_profiles:
             continue
         seen_profiles.add(profile_fingerprint)

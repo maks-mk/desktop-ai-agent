@@ -39,6 +39,7 @@ class SessionSnapshot:
     project_path: str
     approval_mode: str = "prompt"
     title: str = DEFAULT_CHAT_TITLE
+    last_run_stats: str = ""
     is_persisted: bool = True
 
     def touch(self) -> None:

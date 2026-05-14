@@ -84,3 +84,115 @@ class RuntimePayloadTests(unittest.TestCase):
         tool_block = turn["blocks"][-1]["payload"]
         self.assertEqual(tool_block["args"]["path"], "app.py")
         self.assertEqual(tool_block["diff"], "-a\n+b")
+
+    def test_build_transcript_payload_does_not_parse_assistant_thought_markdown(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Сделай вывод"),
+                    AIMessage(content="<think>Проверяю ограничения.</think>Готово"),
+                ],
+            }
+        )
+
+        self.assertEqual(len(payload["turns"]), 1)
+        assistant_block = payload["turns"][0]["blocks"][0]
+        self.assertEqual(assistant_block["type"], "assistant")
+        self.assertEqual(assistant_block["markdown"], "Готово")
+        self.assertNotIn("thought_markdown", assistant_block)
+
+    def test_build_transcript_payload_ignores_structured_assistant_reasoning(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Проверь"),
+                    AIMessage(
+                        content=[
+                            {"type": "reasoning", "text": "Сначала сверю ограничения."},
+                            {"type": "text", "text": "Итог готов."},
+                        ]
+                    ),
+                ]
+            }
+        )
+
+        assistant_block = payload["turns"][0]["blocks"][0]
+        self.assertEqual(assistant_block["type"], "assistant")
+        self.assertEqual(assistant_block["markdown"], "Итог готов.")
+        self.assertNotIn("thought_markdown", assistant_block)
+
+    def test_build_transcript_payload_restores_hidden_internal_notice_as_notice_block(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Проверь завершение"),
+                    AIMessage(
+                        content="internal handoff",
+                        additional_kwargs={
+                            "agent_internal": {
+                                "kind": "tool_issue_handoff",
+                                "visible_in_ui": False,
+                                "ui_notice": "Нужен новый запрос.",
+                            }
+                        },
+                    ),
+                ]
+            }
+        )
+
+        turn = payload["turns"][0]
+        self.assertEqual(turn["user_text"], "Проверь завершение")
+        self.assertEqual(
+            turn["blocks"],
+            [{"type": "notice", "message": "Нужен новый запрос.", "level": "warning"}],
+        )
+
+    def test_build_transcript_payload_appends_last_run_stats_to_final_turn(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Подведи итог"),
+                    AIMessage(content="Готово."),
+                ],
+            },
+            last_run_stats="3.1s  ↓ 5328  ↑ 106",
+        )
+
+        turn = payload["turns"][0]
+        self.assertEqual([block["type"] for block in turn["blocks"]], ["assistant", "stats"])
+        self.assertEqual(turn["blocks"][-1]["stats"], "3.1s  ↓ 5328  ↑ 106")
+
+    def test_build_transcript_payload_does_not_attach_stats_to_empty_trailing_turn(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Первый запрос"),
+                    AIMessage(content="Первый ответ"),
+                    HumanMessage(content="Второй запрос"),
+                ],
+            },
+            last_run_stats="2.0s  ↓ 100  ↑ 20",
+        )
+
+        self.assertEqual([block["type"] for block in payload["turns"][0]["blocks"]], ["assistant"])
+        self.assertEqual(payload["turns"][1]["blocks"], [])
+
+    def test_build_user_choice_payload_includes_default_selection(self):
+        payload = build_user_choice_payload(
+            {
+                "kind": "user_choice",
+                "question": "Введите ключ API или выберите другой вариант:",
+                "options": [
+                    "Ввести ключ API",
+                    "Пропустить проверку и вернуть скрипт",
+                    "Завершить проверку",
+                ],
+                "recommended": "Ввести ключ API",
+            }
+        )
+
+        self.assertEqual(payload["kind"], "user_choice")
+        self.assertEqual(payload["recommended_key"], "Ввести ключ API")
+        recommended = [option for option in payload["options"] if option["recommended"]]
+        self.assertEqual(len(recommended), 1)
+        self.assertEqual(recommended[0]["submit_text"], "Ввести ключ API")

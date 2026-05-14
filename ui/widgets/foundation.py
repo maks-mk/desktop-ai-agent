@@ -57,10 +57,83 @@ def _normalize_copied_text(text: str) -> str:
     normalized = str(text or "")
     normalized = normalized.replace("\u2029", "\n").replace("\u2028", "\n")
     normalized = normalized.replace("\u00A0", " ")
-    stripped = normalized.strip("\r\n")
-    if stripped and "\n" not in stripped and "\r" not in stripped:
-        return stripped
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.strip("\n")
     return normalized
+
+
+def _humanize_approval_key(key: str) -> str:
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", " ", str(key or "")).replace("_", " ").replace("-", " ").strip()
+    if not normalized:
+        return "Value"
+    acronyms = {"id", "ids", "url", "urls", "uri", "cwd", "api", "pid", "mcp"}
+    parts = []
+    for part in normalized.split():
+        lowered = part.lower()
+        if lowered in acronyms:
+            parts.append(lowered.upper())
+        else:
+            parts.append(lowered[:1].upper() + lowered[1:])
+    return " ".join(parts)
+
+
+def _approval_scalar_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if value is None:
+        return "None"
+    if isinstance(value, float):
+        return f"{value:g}"
+    if isinstance(value, (int, str)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _append_approval_detail_lines(lines: list[str], label: str, value: Any, indent: int = 0) -> None:
+    prefix = "  " * indent
+    if isinstance(value, dict):
+        lines.append(f"{prefix}{label}:")
+        if not value:
+            lines.append(f"{prefix}  None")
+            return
+        for nested_key, nested_value in value.items():
+            _append_approval_detail_lines(lines, _humanize_approval_key(str(nested_key)), nested_value, indent + 1)
+        return
+
+    if isinstance(value, list):
+        lines.append(f"{prefix}{label}:")
+        if not value:
+            lines.append(f"{prefix}  None")
+            return
+        for index, item in enumerate(value, start=1):
+            item_prefix = f"{prefix}  "
+            if isinstance(item, dict):
+                lines.append(f"{item_prefix}{index}.")
+                for nested_key, nested_value in item.items():
+                    _append_approval_detail_lines(lines, _humanize_approval_key(str(nested_key)), nested_value, indent + 2)
+            elif isinstance(item, list):
+                lines.append(f"{item_prefix}{index}.")
+                _append_approval_detail_lines(lines, "Items", item, indent + 2)
+            else:
+                lines.append(f"{item_prefix}- {_approval_scalar_text(item)}")
+        return
+
+    text = _approval_scalar_text(value)
+    if "\n" in text:
+        lines.append(f"{prefix}{label}:")
+        for part in text.splitlines():
+            lines.append(f"{prefix}  {part}")
+        return
+    lines.append(f"{prefix}{label}: {text}")
+
+
+def format_approval_detail_text(tool_args: Any) -> str:
+    if not isinstance(tool_args, dict) or not tool_args:
+        return "No additional parameters."
+    lines: list[str] = []
+    for key, value in tool_args.items():
+        _append_approval_detail_lines(lines, _humanize_approval_key(str(key)), value)
+    return "\n".join(lines).strip() or "No additional parameters."
 
 
 class CopySafePlainTextEdit(QPlainTextEdit):
@@ -646,7 +719,8 @@ class CollapsibleSection(QFrame):
         self.toggle_button.toggled.connect(self.set_expanded)
 
     def _set_toggle_icon(self, expanded: bool) -> None:
-        icon_color = TEXT_PRIMARY if expanded else TEXT_MUTED
+        variant = str(self.property("variant") or "").strip().lower()
+        icon_color = TEXT_MUTED if variant == "thoughts" else (TEXT_PRIMARY if expanded else TEXT_MUTED)
         self.toggle_button.setIcon(
             _fa_icon("fa5s.caret-down" if expanded else "fa5s.caret-right", color=icon_color, size=10)
         )

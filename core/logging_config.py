@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Optional
 
@@ -159,6 +160,13 @@ def setup_logging(level: int | str | None = None, log_file: str | Path | None = 
     for handler in handlers:
         handler.addFilter(sensitive_filter)
         handler.addFilter(noise_filter)
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*MALFORMED_RESPONSE is not a valid FinishReason.*",
+        category=UserWarning,
+        module=r"google\.genai\._common",
+    )
 
     _suppress_library_logs(level)
 

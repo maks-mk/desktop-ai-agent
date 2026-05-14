@@ -50,8 +50,16 @@ from core.model_profiles import (
     normalize_profiles_payload,
     sanitize_profile_id,
 )
+from core.text_utils import build_tool_ui_labels
 from ui.theme import TEXT_MUTED, TEXT_PRIMARY
-from .foundation import CollapsibleSection, CopySafePlainTextEdit, _fa_icon, _make_mono_font
+from .foundation import (
+    CollapsibleSection,
+    CopySafePlainTextEdit,
+    _fa_icon,
+    _make_mono_font,
+    _sync_plain_text_height,
+    format_approval_detail_text,
+)
 
 
 class ModelLoadState(str, Enum):
@@ -88,7 +96,7 @@ class ModelFetchWorker(QThread):
         base_url: str = "",
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(None)
         self._request_id = int(request_id)
         self._fetcher = fetcher
         self._api_key = str(api_key or "").strip()
@@ -101,7 +109,7 @@ class ModelFetchWorker(QThread):
             self.failed.emit(self._request_id, _fetch_error_message(error))
             return
         except Exception:
-            self.failed.emit(self._request_id, "Не удалось загрузить модели.")
+            self.failed.emit(self._fetch_request_id, "Не удалось загрузить модели.")
             return
         self.fetched.emit(self._request_id, result)
 
@@ -580,6 +588,9 @@ class ModelSettingsDialog(QDialog):
         for worker in list(self._model_workers):
             if worker.isRunning():
                 worker.wait(3000)
+            if worker in self._model_workers:
+                self._model_workers.remove(worker)
+            worker.deleteLater()
         super().closeEvent(event)
 
     def _current_row(self) -> int:
@@ -822,7 +833,7 @@ class ModelSettingsDialog(QDialog):
         self._set_combo_placeholder("Загрузка моделей…")
         self._set_model_state(ModelLoadState.LOADING, message="Загрузка…")
 
-        worker = ModelFetchWorker(request_id, fetcher, api_key, base_url, parent=self)
+        worker = ModelFetchWorker(request_id, fetcher, api_key, base_url)
         self._model_workers.append(worker)
         worker.fetched.connect(self._on_models_fetched)
         worker.failed.connect(self._on_models_failed)
@@ -1577,8 +1588,8 @@ class ApprovalDialog(QDialog):
         self.setObjectName("ApprovalDialog")
         self.setWindowTitle("Approval required")
         self.setModal(True)
-        self.resize(680, 460)
-        self.setMinimumSize(560, 360)
+        self.resize(640, 420)
+        self.setMinimumSize(520, 340)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1588,7 +1599,6 @@ class ApprovalDialog(QDialog):
         risk_level = str(summary.get("risk_level", "unknown") or "unknown")
         impacts = [str(item).strip() for item in list(summary.get("impacts", []) or []) if str(item).strip()]
         tools = list(payload.get("tools", []) or [])
-        default_approve = bool(summary.get("default_approve"))
 
         hero_card = QFrame()
         hero_card.setObjectName("ApprovalRequestCard")
@@ -1615,17 +1625,16 @@ class ApprovalDialog(QDialog):
         title_row.addStretch(1)
         hero_layout.addLayout(title_row)
 
-        summary_label = QLabel(
-            f"Please confirm before the agent continues. {len(tools)} protected action(s) requested. "
-            f"Default policy: {'approve' if default_approve else 'deny'}."
-        )
+        noun = "action" if len(tools) == 1 else "actions"
+        summary_label = QLabel(f"The agent is paused. Review {len(tools)} protected {noun}.")
         summary_label.setObjectName("ApprovalCardSummary")
         summary_label.setWordWrap(True)
         hero_layout.addWidget(summary_label)
 
-        impacts_label = QLabel(f"Impacts: {', '.join(impacts)}" if impacts else "Impacts: local state")
+        impacts_label = QLabel(f"Will affect: {', '.join(impacts)}")
         impacts_label.setObjectName("ApprovalCardImpacts")
         impacts_label.setWordWrap(True)
+        impacts_label.setVisible(bool(impacts))
         hero_layout.addWidget(impacts_label)
         layout.addWidget(hero_card)
 
@@ -1636,55 +1645,53 @@ class ApprovalDialog(QDialog):
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setSpacing(10)
+        container_layout.setSpacing(8)
         for tool in tools:
             card = QFrame()
             card.setObjectName("ApprovalToolCard")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(12, 12, 12, 12)
-            card_layout.setSpacing(8)
-            display_name = str(tool.get("display") or tool.get("name") or "tool").strip() or "tool"
-            name_label = QLabel(display_name)
-            name_label.setObjectName("ApprovalDialogToolTitle")
+            card_layout.setSpacing(4)
+
+            tool_name = str(tool.get("name") or tool.get("display") or "tool").strip() or "tool"
+            tool_args = dict(tool.get("args") or {})
+            labels = build_tool_ui_labels(tool_name, tool_args, phase="finished")
+
+            name_label = QLabel(labels.get("title") or str(tool.get("display") or tool_name))
+            name_label.setObjectName("ApprovalToolTitle")
             card_layout.addWidget(name_label)
 
-            metadata = tool.get("policy", {}) if isinstance(tool.get("policy"), dict) else {}
-            tool_meta = []
-            if metadata.get("mutating"):
-                tool_meta.append("mutating")
-            if metadata.get("destructive"):
-                tool_meta.append("destructive")
-            if metadata.get("requires_approval"):
-                tool_meta.append("approval")
-            if tool_meta:
-                meta_label = QLabel(" · ".join(tool_meta))
-                meta_label.setObjectName("ApprovalCardImpacts")
-                card_layout.addWidget(meta_label)
+            subtitle = str(labels.get("subtitle", "") or "").strip()
+            if subtitle:
+                subtitle_label = QLabel(subtitle)
+                subtitle_label.setObjectName("ApprovalToolSubtitle")
+                subtitle_label.setWordWrap(True)
+                card_layout.addWidget(subtitle_label)
 
-            args_view = QPlainTextEdit()
-            args_view.setObjectName("ApprovalArgsView")
+            args_view = CopySafePlainTextEdit()
+            args_view.setObjectName("ApprovalDetailView")
             args_view.setReadOnly(True)
-            args_view.setFont(_make_mono_font())
-            args_view.setPlainText(json.dumps(tool.get("args", {}), ensure_ascii=False, indent=2))
-            args_view.setFixedHeight(108)
-            card_layout.addWidget(CollapsibleSection("Request details", args_view, expanded=False))
+            args_view.setPlainText(format_approval_detail_text(tool_args))
+            _sync_plain_text_height(args_view, min_lines=6, max_lines=12, extra_padding=18)
+            card_layout.addWidget(CollapsibleSection("Details", args_view, expanded=len(tools) == 1))
             container_layout.addWidget(card)
         container_layout.addStretch(1)
         scroll.setWidget(container)
         layout.addWidget(scroll, 1)
 
         buttons = QDialogButtonBox()
-        approve_button = QPushButton(_fa_icon("fa5s.check", color="white", size=12), "Approve")
+        approve_button = QPushButton("Approve")
         approve_button.setObjectName("PrimaryButton")
-        always_button = QPushButton("Always for this session")
+        always_button = QPushButton("Always allow")
         always_button.setObjectName("SecondaryButton")
-        deny_button = QPushButton(_fa_icon("fa5s.times", color="white", size=12), "Deny")
+        deny_button = QPushButton("Deny")
         deny_button.setObjectName("DangerButton")
         buttons.addButton(approve_button, QDialogButtonBox.AcceptRole)
         buttons.addButton(always_button, QDialogButtonBox.ActionRole)
         buttons.addButton(deny_button, QDialogButtonBox.RejectRole)
         layout.addWidget(buttons)
 
+        approve_button.setDefault(True)
         approve_button.clicked.connect(self._approve)
         always_button.clicked.connect(self._always)
         deny_button.clicked.connect(self._deny)

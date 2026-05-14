@@ -410,6 +410,8 @@ class AgentRunWorker(QObject):
         request_payload = normalize_request_payload(user_text)
         self._active_run_elapsed_seconds = 0.0
         self._active_request_has_images = bool(request_payload["attachments"])
+        if self.current_session is not None:
+            self.current_session.last_run_stats = ""
         repair_notices = await self._repair_current_session_if_needed()
         if repair_notices:
             self._log_ui_run_event("pre_run_session_repair", repaired_count=len(repair_notices))
@@ -460,8 +462,10 @@ class AgentRunWorker(QObject):
 
                 if result.interrupt is None:
                     self._refresh_model_profiles_from_store()
+                    if self.current_session is not None:
+                        self.current_session.last_run_stats = str(result.stats or "")
                     self.store.save_active_session(self.current_session, touch=True, set_active=True)
-                    await self._emit_session_payload(include_transcript=False)
+                    await self._emit_session_payload(include_transcript=True)
                     self._active_run_elapsed_seconds = 0.0
                     self._active_request_has_images = False
                     self._set_busy(False)

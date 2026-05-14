@@ -115,6 +115,28 @@ class ModelProfilesTests(unittest.TestCase):
         self.assertTrue(active["supports_image_input"])
         self.assertTrue(active["enabled"])
 
+    def test_normalization_ignores_legacy_show_model_thoughts_flag(self):
+        payload = normalize_profiles_payload(
+            {
+                "active_profile": "gemini-2-5-flash",
+                "profiles": [
+                    {
+                        "id": "gemini-2-5-flash",
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash",
+                        "api_key": "gm-demo",
+                        "base_url": "",
+                        "show_model_thoughts": False,
+                    }
+                ],
+            }
+        )
+
+        self.assertNotIn("show_model_thoughts", payload["profiles"][0])
+        active = find_active_profile(payload)
+        self.assertIsNotNone(active)
+        self.assertNotIn("show_model_thoughts", active)
+
     def test_normalization_migrates_legacy_api_key_to_rotation_pool(self):
         payload = normalize_profiles_payload(
             {

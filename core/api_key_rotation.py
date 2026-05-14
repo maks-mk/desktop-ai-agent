@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -135,6 +136,20 @@ def _mask_key(key: str, tail: int = 5) -> str:
     return key[: -tail].rstrip() + "***" + key[-tail:]
 
 
+async def _close_model_clients(model: Any) -> None:
+    if model is None:
+        return
+    for target in (getattr(model, "async_client", None), getattr(model, "client", None)):
+        if target is None:
+            continue
+        close_method = getattr(target, "aclose", None) or getattr(target, "close", None)
+        if not callable(close_method):
+            continue
+        result = close_method()
+        if inspect.isawaitable(result):
+            await result
+
+
 class RotatingChatModel:
     def __init__(
         self,
@@ -151,6 +166,7 @@ class RotatingChatModel:
         self._llm_factory = llm_factory
         self._bound_tools = list(bound_tools or [])
         self._logger = _setup_rotation_logger(config)
+        self._model_cache: dict[str, Any] = {}
         self._prototype_model = self._build_model(self._initial_api_key())
 
     def __getattr__(self, name: str) -> Any:
@@ -230,10 +246,25 @@ class RotatingChatModel:
         ) from last_error
 
     def _build_model(self, api_key: str) -> Any:
+        cache_key = str(api_key or "")
+        cached_model = self._model_cache.get(cache_key)
+        if cached_model is not None:
+            return cached_model
         model = self._llm_factory(self._config, api_key_override=api_key)
         if self._bound_tools:
             model = model.bind_tools(self._bound_tools)
+        self._model_cache[cache_key] = model
         return model
+
+    async def aclose(self) -> None:
+        seen: set[int] = set()
+        for model in list(self._model_cache.values()):
+            marker = id(model)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            await _close_model_clients(model)
+        self._model_cache.clear()
 
     def _initial_api_key(self) -> str:
         if getattr(self._config, "provider", "") == "gemini":

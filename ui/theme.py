@@ -869,10 +869,16 @@ def build_stylesheet() -> str:
         background: transparent;
     }}
 
+    QLabel#ApprovalToolSubtitle {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.26)};
+        font-size: 8.9pt;
+        background: transparent;
+    }}
+
     QFrame#ApprovalRequestCard QPushButton#PrimaryButton,
     QDialog#ApprovalDialog QPushButton#PrimaryButton {{
-        min-height: 34px;
-        padding: 4px 14px;
+        min-height: 28px;
+        padding: 3px 11px;
         border-radius: {SOFT_RADIUS_MD + 2}px;
         background: {blend_hex("#5B8DEF", SURFACE_ALT, 0.14)};
         color: {TEXT_PRIMARY};
@@ -887,8 +893,8 @@ def build_stylesheet() -> str:
 
     QFrame#ApprovalRequestCard QPushButton#SecondaryButton,
     QDialog#ApprovalDialog QPushButton#SecondaryButton {{
-        min-height: 34px;
-        padding: 4px 14px;
+        min-height: 28px;
+        padding: 3px 11px;
         border-radius: {SOFT_RADIUS_MD + 2}px;
         background: {approval_dialog_soft};
         color: {TEXT_PRIMARY};
@@ -898,13 +904,22 @@ def build_stylesheet() -> str:
 
     QFrame#ApprovalRequestCard QPushButton#DangerButton,
     QDialog#ApprovalDialog QPushButton#DangerButton {{
-        min-height: 34px;
-        padding: 4px 14px;
+        min-height: 28px;
+        padding: 3px 11px;
         border-radius: {SOFT_RADIUS_MD + 2}px;
         background: {blend_hex(ERROR_RED, SURFACE_ALT, 0.78)};
         color: {TEXT_PRIMARY};
         border: 1px solid {blend_hex(ERROR_RED, "#FFFFFF", 0.08)};
         font-weight: 700;
+    }}
+
+    QPlainTextEdit#ApprovalDetailView {{
+        background: {approval_dialog_code};
+        color: {TEXT_PRIMARY};
+        border: 1px solid {approval_dialog_border};
+        border-radius: {SOFT_RADIUS_MD + 2}px;
+        padding: 10px;
+        selection-background-color: {blend_hex("#5B8DEF", SURFACE_ALT, 0.20)};
     }}
 
     QPlainTextEdit#ApprovalArgsView,
@@ -946,6 +961,10 @@ def build_stylesheet() -> str:
 
     QFrame#InlineStatusRow[phase="waiting"] QLabel#TranscriptMeta {{
         color: {blend_hex(AMBER_WARNING, TEXT_PRIMARY, 0.24)};
+    }}
+
+    QFrame#InlineStatusRow QLabel#TranscriptMeta {{
+        color: {TEXT_MUTED};
     }}
 
     QToolButton#InlineStatusSpinner {{
@@ -1072,6 +1091,13 @@ def build_stylesheet() -> str:
         padding: 5px 8px;
     }}
 
+    QFrame#ToolExpandablePanel[variant="thoughts"] {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 0px;
+    }}
+
     QFrame#CliExecPanel {{
         background: {tool_panel_bg};
         border: none;
@@ -1183,6 +1209,11 @@ def build_stylesheet() -> str:
         border: none;
     }}
 
+    QWidget#ToolExpandableContent[variant="thoughts"] {{
+        background: transparent;
+        border: none;
+    }}
+
     QPushButton#ToolExpandableToggle {{
         background: transparent;
         border: none;
@@ -1203,6 +1234,24 @@ def build_stylesheet() -> str:
     QPushButton#ToolExpandableToggle:checked {{
         background: {tool_panel_hover};
         color: {TEXT_PRIMARY};
+    }}
+
+    QPushButton#ToolExpandableToggle[variant="thoughts"] {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 0px 0px 3px 0px;
+        min-height: 16px;
+        font-size: 8.8pt;
+        font-weight: 400;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.14)};
+        text-align: left;
+    }}
+
+    QPushButton#ToolExpandableToggle[variant="thoughts"]:hover,
+    QPushButton#ToolExpandableToggle[variant="thoughts"]:checked {{
+        background: transparent;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
     }}
 
     QToolButton#CodeCopyButton {{
@@ -1555,6 +1604,16 @@ def build_stylesheet() -> str:
         padding: 0px;
         font-family: "{APP_FONT_FAMILY}";
         font-size: 11.5pt;
+    }}
+
+    QLabel#TranscriptMeta {{
+        color: {TEXT_MUTED};
+        font-size: 10pt;
+        border-radius: {SOFT_RADIUS_SM}px;
+        padding: 0px;
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.06)};
+        font-size: 10.7pt;
+        font-weight: 500;
     }}
 
     QPushButton#ToolCallButton {{

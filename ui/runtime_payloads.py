@@ -18,14 +18,16 @@ from core.session_store import (
     SessionStore,
     normalize_project_path,
 )
-from core.text_utils import build_tool_ui_labels, format_tool_output, parse_thought, prepare_markdown_for_render
+from core.text_utils import build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
 from ui.tool_message_utils import extract_tool_args
-from ui.visibility import is_hidden_internal_message
+from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
 
 APPROVAL_MODE_PROMPT = "prompt"
 APPROVAL_MODE_ALWAYS = "always"
+APPROVAL_MODE_DENY = "deny"
+_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)>.*?</\1>", re.IGNORECASE | re.DOTALL)
 CHAT_TITLE_MAX_LENGTH = 50
 CHAT_TITLE_FALLBACK = DEFAULT_CHAT_TITLE
 TITLE_PREFIX_RE = re.compile(
@@ -239,7 +241,53 @@ def serialize_session_entries(entries: list[SessionListEntry]) -> list[dict[str,
 
 
 def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
-    return stringify_content(message.content)
+    def _extract_visible_text(content: Any) -> str:
+        if isinstance(content, str):
+            return _INLINE_THOUGHT_BLOCK_RE.sub("", content)
+        if content is None:
+            return ""
+        if isinstance(content, list):
+            return "".join(_extract_visible_text(item) for item in content)
+        if isinstance(content, dict):
+            item_type = str(content.get("type") or "").strip().lower()
+            if bool(content.get("thought")) or item_type in {
+                "thinking",
+                "thought",
+                "reasoning",
+                "reasoning_content",
+                "reasoning_summary",
+                "summary_text",
+            }:
+                return ""
+            for key in ("text", "output_text", "content", "answer", "response", "final", "final_text"):
+                if key in content:
+                    text = _extract_visible_text(content.get(key))
+                    if text:
+                        return text
+            return "".join(
+                _extract_visible_text(content.get(key))
+                for key in ("parts", "items", "content_blocks", "message", "messages", "data")
+                if key in content
+            )
+        for key in ("content", "content_blocks", "text"):
+            try:
+                value = getattr(content, key)
+            except Exception:
+                continue
+            if callable(value) or value is None:
+                continue
+            text = _extract_visible_text(value)
+            if text:
+                return text
+        try:
+            additional_kwargs = getattr(content, "additional_kwargs")
+        except Exception:
+            additional_kwargs = None
+        if isinstance(additional_kwargs, dict):
+            return _extract_visible_text(additional_kwargs.get("content_blocks"))
+        return stringify_content(content)
+
+    return _extract_visible_text(message.content)
 
 
 def _diff_from_tool_content(content: str) -> str:
@@ -247,9 +295,10 @@ def _diff_from_tool_content(content: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, Any]:
+def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_stats: str = "") -> dict[str, Any]:
     values = state_values or {}
     summary_text = str(values.get("summary") or "").strip()
+    normalized_last_run_stats = str(last_run_stats or "").strip()
     turns: list[dict[str, Any]] = []
     pending_tool_calls: dict[str, dict[str, Any]] = {}
     current_turn: dict[str, Any] | None = None
@@ -276,13 +325,26 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
                         "args": canonicalize_tool_args(tool_call.get("args")),
                     }
             if is_hidden_internal_message(message):
+                notice = get_internal_ui_notice(message)
+                if notice:
+                    current_turn["blocks"].append(
+                        {
+                            "type": "notice",
+                            "message": notice,
+                            "level": "warning",
+                        }
+                    )
                 continue
             text = _extract_ai_text(message)
             if text.strip():
-                _thought, clean_text, _has_thought = parse_thought(text)
-                markdown = prepare_markdown_for_render(clean_text.strip()) if clean_text.strip() else ""
+                markdown = prepare_markdown_for_render(text.strip())
                 if markdown:
-                    current_turn["blocks"].append({"type": "assistant", "markdown": markdown})
+                    current_turn["blocks"].append(
+                        {
+                            "type": "assistant",
+                            "markdown": markdown,
+                        }
+                    )
             continue
 
         if isinstance(message, ToolMessage):
@@ -317,6 +379,12 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
                 }
             )
 
+    if normalized_last_run_stats and turns:
+        last_turn = turns[-1]
+        blocks = last_turn.setdefault("blocks", [])
+        if blocks and not any(isinstance(block, dict) and block.get("type") == "stats" for block in blocks):
+            blocks.append({"type": "stats", "stats": normalized_last_run_stats})
+
     return {
         "summary_notice": (
             "Early messages were compressed automatically; the restored chat may be incomplete."
@@ -327,7 +395,7 @@ def build_transcript_payload(state_values: dict[str, Any] | None) -> dict[str, A
     }
 
 
-async def load_transcript_payload(agent_app, thread_id: str) -> dict[str, Any]:
+async def load_transcript_payload(agent_app, thread_id: str, snapshot: SessionSnapshot) -> dict[str, Any]:
     config = {"configurable": {"thread_id": thread_id}}
     async_get_state = getattr(agent_app, "aget_state", None)
     if callable(async_get_state):
@@ -335,7 +403,7 @@ async def load_transcript_payload(agent_app, thread_id: str) -> dict[str, Any]:
     else:
         state = agent_app.get_state(config)
     values = getattr(state, "values", {}) if state is not None else {}
-    return build_transcript_payload(values if isinstance(values, dict) else {})
+    return build_transcript_payload(values if isinstance(values, dict) else {}, last_run_stats=getattr(snapshot, "last_run_stats", ""))
 
 
 def summarize_approval_request(req_tools: list[dict]) -> ApprovalSummary:
@@ -470,7 +538,7 @@ async def build_ui_payload(
         "model_capabilities": effective_capabilities,
     }
     if include_transcript and agent_app is not None:
-        payload["transcript"] = await load_transcript_payload(agent_app, snapshot.thread_id)
+        payload["transcript"] = await load_transcript_payload(agent_app, snapshot.thread_id, snapshot)
     return payload
 
 

@@ -336,6 +336,19 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(widget.parts_widgets[1].editor.toPlainText(), "print('hi')")
         self.assertEqual(widget.parts_widgets[1].title_label.text(), "PYTHON")
 
+    def test_assistant_message_widget_has_no_thought_panel(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("Готово.")
+        widget.show()
+        self._process_events()
+
+        self.assertFalse(hasattr(widget, "thought_section"))
+        self.assertFalse(hasattr(widget, "thought_content"))
+        self.assertEqual(widget.markdown(), "Готово.")
+        self.assertIs(widget.content_layout.itemAt(0).widget(), widget.parts_widgets[0])
+
     def test_user_choice_card_renders_above_composer_and_resumes_selected_option(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Выбери режим"}))
@@ -928,7 +941,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertIn("compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
 
         self.window._handle_event(
-            StreamEvent("status_changed", {"label": "Thinking", "node": "agent"})
+            StreamEvent("status_changed", {"label": "Analyzing request", "node": "agent"})
         )
         self.assertIsNotNone(self.window.current_turn.summary_notice_widget)
         self.assertIn("context compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
@@ -1819,7 +1832,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(tool_card.cli_exec_widget.meta_label.property("severity"), "error")
         self.assertTrue(tool_card.cli_exec_widget.meta_label.text().lower().startswith("error"))
 
-    def test_hidden_internal_notice_event_is_ignored_in_ui(self):
+    def test_hidden_internal_notice_event_is_rendered_in_ui(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Проверь остановку"}))
         self.window._handle_event(
@@ -1833,7 +1846,7 @@ class GuiUxTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
 
     def test_tool_args_missing_diagnostic_is_not_shown_in_transcript(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1910,6 +1923,7 @@ class GuiUxTests(unittest.TestCase):
 
     def test_inline_approval_card_resumes_controller_with_selected_choice(self):
         self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Исправь файл"}))
         payload = {
             "tools": [{"name": "edit_file", "args": {"path": "demo.txt"}, "policy": {"mutating": True}}],
             "summary": {"risk_level": "medium", "impacts": ["files"], "default_approve": True},
@@ -1919,12 +1933,35 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         self.assertTrue(self.window.awaiting_approval)
+        self.assertIsNone(self.window.current_turn.status_widget)
         self.assertFalse(self.window.approval_card.isHidden())
-        self.assertIn("protected action", self.window.approval_card.summary_label.text().lower())
+        self.assertIn("agent is paused", self.window.approval_card.summary_label.text().lower())
         QTest.mouseClick(self.window.approval_card.always_button, Qt.LeftButton)
         self._process_events()
         self.assertEqual(self.controller.resume_calls, [(True, True)])
         self.assertTrue(self.window.approval_card.isHidden())
+
+    def test_user_choice_request_clears_inline_status(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Выбери режим"}))
+
+        self.window._handle_user_choice_request(
+            {
+                "question": "Какой режим выбираем?",
+                "recommended_key": "direct_api",
+                "options": [
+                    {
+                        "key": "direct_api",
+                        "label": "direct_api: убрать MCP и проверить только API",
+                        "submit_text": "direct_api",
+                        "recommended": True,
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNone(self.window.current_turn.status_widget)
+        self.assertFalse(self.window.user_choice_card.isHidden())
 
     def test_auto_approval_after_always_mode_does_not_repeat_notice(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -2116,7 +2153,7 @@ class GuiUxTests(unittest.TestCase):
     def test_approval_card_blocks_input_and_exposes_human_readable_fields(self):
         self.window._handle_initialized(self._snapshot_payload())
         payload = {
-            "tools": [{"name": "edit_file", "display": "edit_file", "args": {"path": "demo.txt"}, "policy": {"mutating": True}}],
+            "tools": [{"name": "edit_file", "display": "edit_file", "args": {"path": "demo.txt", "newText": "hello"}, "policy": {"mutating": True}}],
             "summary": {"risk_level": "medium", "impacts": ["files"], "default_approve": True},
         }
 
@@ -2125,10 +2162,15 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertFalse(self.window.composer.isEnabled())
         self.assertEqual(self.window.approval_card.risk_badge.text(), "Medium")
-        self.assertIn("Impacts: files", self.window.approval_card.impacts_label.text())
+        self.assertIn("Will affect: files", self.window.approval_card.impacts_label.text())
         self.assertEqual(self.window.approval_card.approve_button.text(), "Approve")
-        self.assertEqual(self.window.approval_card.always_button.text(), "Always for this session")
+        self.assertEqual(self.window.approval_card.always_button.text(), "Always allow")
         self.assertEqual(self.window.approval_card.deny_button.text(), "Deny")
+        detail_view = self.window.approval_card._tool_sections[0].content
+        self.assertIsInstance(detail_view, CopySafePlainTextEdit)
+        self.assertIn("Path: demo.txt", detail_view.toPlainText())
+        self.assertIn("New Text: hello", detail_view.toPlainText())
+        self.assertNotIn("{", detail_view.toPlainText())
 
     def test_transcript_sticky_autofollow_respects_manual_scroll(self):
         scrollbar = self.window.transcript.scroll.verticalScrollBar()
@@ -2413,6 +2455,49 @@ class GuiUxTests(unittest.TestCase):
             result = dialog.result_payload()
 
             self.assertTrue(result["profiles"][0]["supports_image_input"])
+
+    def test_model_settings_dialog_does_not_expose_thinking_toggle_or_save_legacy_field(self):
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog({"active_profile": None, "profiles": []}, self.window)
+            self.addCleanup(dialog.close)
+            dialog._add_profile()
+            self._process_events()
+
+            dialog.provider_combo.setCurrentText("gemini")
+            dialog.model_edit.setText("gemini-2.5-flash")
+            dialog.api_key_edit.setText("gm-demo")
+            self._process_events()
+
+            dialog._save_and_accept()
+            result = dialog.result_payload()
+
+            self.assertFalse(hasattr(dialog, "show_model_thoughts_checkbox"))
+            self.assertFalse(hasattr(dialog, "summary_thoughts"))
+            self.assertNotIn("show_model_thoughts", result["profiles"][0])
+
+    def test_model_settings_dialog_ignores_legacy_show_model_thoughts_from_profile(self):
+        payload = {
+            "active_profile": "gemini-2-5-flash",
+            "profiles": [
+                {
+                    "id": "gemini-2-5-flash",
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "gm-demo",
+                    "base_url": "",
+                    "show_model_thoughts": True,
+                    "enabled": True,
+                }
+            ],
+        }
+        dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        self._process_events()
+
+        self.assertFalse(hasattr(dialog, "show_model_thoughts_checkbox"))
+        self.assertFalse(hasattr(dialog, "summary_thoughts"))
+        dialog._save_and_accept()
+        self.assertNotIn("show_model_thoughts", dialog.result_payload()["profiles"][0])
 
     def test_model_settings_dialog_rotation_editor_updates_profile_and_saves_with_main_save(self):
         payload = {

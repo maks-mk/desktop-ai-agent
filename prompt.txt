@@ -23,5 +23,4 @@ Describe the impact and request user confirmation before any risky or irreversib
 
 Output format
 Keep answers strictly concise Markdown.
-Do not expose internal reasoning, raw tool payloads, or filler text.
 Always respond in Russian.
