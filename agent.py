@@ -11,7 +11,8 @@ from core.api_key_rotation import RotatingChatModel
 from core.checkpointing import create_checkpoint_runtime
 from core.config import AgentConfig
 from core.logging_config import setup_logging
-from core.multimodal import extract_model_capabilities
+from core.model_profiles import ModelProfileStore, find_active_profile, find_profile_by_id
+from core.multimodal import extract_model_capabilities, resolve_model_capabilities
 from core.nodes import AgentNodes
 from core.run_logger import JsonlRunLogger
 from core.state import AgentState
@@ -174,7 +175,19 @@ def _register_llm_cleanup_callback(tool_registry: ToolRegistry, llm: Any) -> boo
     return False
 
 
+def _resolve_effective_model_capabilities(config: AgentConfig, runtime_capabilities: dict[str, Any]) -> dict[str, Any]:
+    profiles_payload = ModelProfileStore(config.model_profile_config_path).load()
+    selected_profile_id = str(config.active_model_profile_id or "").strip()
+    active_profile = (
+        find_profile_by_id(profiles_payload, selected_profile_id)
+        if selected_profile_id
+        else find_active_profile(profiles_payload)
+    )
+    return resolve_model_capabilities(active_profile, runtime_capabilities)
+
+
 # --- Builder ---
+
 
 def create_agent_workflow(
     nodes: AgentNodes,
@@ -261,6 +274,7 @@ def create_agent_workflow(
 
     return workflow
 
+
 def build_compiled_agent(
     config: AgentConfig,
     tool_registry: ToolRegistry,
@@ -272,6 +286,10 @@ def build_compiled_agent(
     llm = create_runtime_llm(config)
     tool_registry.config = config
     tool_registry.model_capabilities = extract_model_capabilities(llm)
+    effective_model_capabilities = _resolve_effective_model_capabilities(
+        config,
+        tool_registry.model_capabilities,
+    )
     tool_registry.checkpoint_info = checkpoint_runtime.to_dict()
     tool_registry.checkpoint_runtime = checkpoint_runtime
 
@@ -311,10 +329,12 @@ def build_compiled_agent(
         tools=active_tools,
         llm_with_tools=llm_with_tools,
         tool_metadata=active_tool_metadata,
+        model_capabilities=effective_model_capabilities,
         run_logger=run_logger,
     )
     workflow = create_agent_workflow(nodes, config, tools_enabled=tool_calling_enabled)
     return workflow.compile(checkpointer=checkpoint_runtime.checkpointer), tool_registry
+
 
 async def build_agent_app(config: Optional[AgentConfig] = None) -> Tuple[Any, ToolRegistry]:
     """

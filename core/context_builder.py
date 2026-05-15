@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from langchain_core.messages import (
     AIMessage,
@@ -22,6 +22,8 @@ from core.message_utils import stringify_content
 from core.multimodal import (
     human_message_has_image_content,
     materialize_user_message_content_for_model,
+    normalize_model_capabilities,
+    strip_image_content_from_message_content,
 )
 from core.tool_args import canonicalize_tool_args
 from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
@@ -42,6 +44,7 @@ class ContextBuilder:
         self,
         *,
         config: AgentConfig,
+        model_capabilities: Any = None,
         prompt_loader: PromptLoader,
         is_internal_retry: IsInternalRetry,
         log_run_event: RunLogger,
@@ -49,6 +52,7 @@ class ContextBuilder:
         provider_safe_tool_call_id_re: re.Pattern[str],
     ) -> None:
         self.config = config
+        self._model_capabilities = normalize_model_capabilities(model_capabilities)
         self._prompt_loader = prompt_loader
         self._is_internal_retry = is_internal_retry
         self._log_run_event = log_run_event
@@ -111,6 +115,9 @@ class ContextBuilder:
         used_tool_call_ids: set[str] = set()
         remapped_count = 0
         normalized_content_count = 0
+        filtered_image_message_count = 0
+        filtered_image_block_count = 0
+        image_input_supported = bool(self._model_capabilities.get("image_input_supported"))
 
         for message in messages:
             normalized_message: BaseMessage = message
@@ -181,12 +188,21 @@ class ContextBuilder:
                         remapped_count += 1
 
             if isinstance(normalized_message, HumanMessage) and human_message_has_image_content(normalized_message.content):
-                materialized_content = materialize_user_message_content_for_model(
-                    normalized_message.content,
-                    provider=self.config.provider,
-                )
-                if materialized_content != normalized_message.content:
-                    normalized_message = normalized_message.model_copy(update={"content": materialized_content})
+                if not image_input_supported:
+                    sanitized_content, removed_blocks = strip_image_content_from_message_content(
+                        normalized_message.content
+                    )
+                    if removed_blocks:
+                        normalized_message = normalized_message.model_copy(update={"content": sanitized_content})
+                        filtered_image_message_count += 1
+                        filtered_image_block_count += removed_blocks
+                if human_message_has_image_content(normalized_message.content):
+                    materialized_content = materialize_user_message_content_for_model(
+                        normalized_message.content,
+                        provider=self.config.provider,
+                    )
+                    if materialized_content != normalized_message.content:
+                        normalized_message = normalized_message.model_copy(update={"content": materialized_content})
 
             if self.config.provider == "openai" and not (
                 isinstance(normalized_message, HumanMessage) and human_message_has_image_content(normalized_message.content)
@@ -218,6 +234,15 @@ class ContextBuilder:
                 run_id=None if state is None else state.get("run_id", ""),
                 provider=self.config.provider,
                 normalized_count=normalized_content_count,
+            )
+        if filtered_image_block_count:
+            self._log_run_event(
+                state,
+                "provider_unsupported_image_history_filtered",
+                run_id=None if state is None else state.get("run_id", ""),
+                provider=self.config.provider,
+                filtered_message_count=filtered_image_message_count,
+                filtered_image_block_count=filtered_image_block_count,
             )
         return sanitized
 

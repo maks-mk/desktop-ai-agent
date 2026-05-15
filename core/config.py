@@ -126,7 +126,7 @@ class AgentConfig(BaseSettings):
     openai_api_key: Optional[SecretStr] = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
     openai_base_url: Optional[str] = Field(default=None, alias="OPENAI_BASE_URL")
-    show_model_thoughts: bool = Field(default=True, alias="SHOW_MODEL_THOUGHTS")
+    show_model_thoughts: bool = Field(default=False, alias="SHOW_MODEL_THOUGHTS")
 
     # Common Logic
     temperature: float = Field(default=0.2, alias="TEMPERATURE")

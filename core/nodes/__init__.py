@@ -44,6 +44,7 @@ class AgentNodes(
         "tools_map",
         "_all_tool_names",
         "tool_metadata",
+        "model_capabilities",
         "run_logger",
         "_cached_base_prompt",
         "message_context",
@@ -100,6 +101,7 @@ class AgentNodes(
         tools: List[BaseTool],
         llm_with_tools: Optional[BaseChatModel] = None,
         tool_metadata: Optional[Dict[str, ToolMetadata]] = None,
+        model_capabilities: Optional[Dict[str, Any]] = None,
         run_logger: Optional[JsonlRunLogger] = None,
     ):
         self.config = config
@@ -111,6 +113,7 @@ class AgentNodes(
         self.tools_map = {t.name: t for t in tools}
         self._all_tool_names = tuple(self.tools_map.keys())
         self.tool_metadata = tool_metadata or {}
+        self.model_capabilities = dict(model_capabilities or {})
         self.run_logger = run_logger
 
         # Lazy initialization of helpers (mixins may define these)
@@ -128,6 +131,7 @@ class AgentNodes(
         self._cached_base_prompt: Optional[str] = None
         self.context_builder = ContextBuilder(
             config=self.config,
+            model_capabilities=self.model_capabilities,
             prompt_loader=self._get_base_prompt,
             is_internal_retry=self._is_internal_retry_message,
             log_run_event=self._log_run_event,

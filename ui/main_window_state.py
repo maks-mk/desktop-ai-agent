@@ -260,19 +260,9 @@ class RunStatusController:
     def set_primary_status_message(self, label: str) -> None:
         self.window._primary_status_label = label
         self.window._status_message_ticket += 1
-        self.window.status_line_label.setText(label)
 
     def show_transient_status_message(self, label: str, timeout_ms: int = 1800) -> None:
         self.window._status_message_ticket += 1
-        ticket = self.window._status_message_ticket
-        self.window.status_line_label.setText(label)
-
-        def _restore() -> None:
-            if ticket != self.window._status_message_ticket:
-                return
-            self.window.status_line_label.setText(self.window._primary_status_label)
-
-        QTimer.singleShot(timeout_ms + 30, _restore)
 
     def set_status_visual(self, label: str, *, busy: bool = False, success: bool = False, error: bool = False) -> None:
         color = ACCENT_BLUE if busy else SUCCESS_GREEN if success else ERROR_RED if error else ACCENT_BLUE

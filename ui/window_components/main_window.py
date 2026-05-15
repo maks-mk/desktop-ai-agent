@@ -45,9 +45,9 @@ class MainWindow(QMainWindow):
         self.awaiting_user_choice = False
         self.is_busy = False
         self.sidebar_collapsed = False
-        self._sidebar_width = 280
+        self._sidebar_width = 330
         self.inspector_collapsed = False
-        self._inspector_width = 340
+        self._inspector_width = 400
         self._custom_choice_armed = False
         self._tools_hash: int = 0
         self._summarize_in_progress = False
@@ -93,10 +93,8 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(_fa_icon("fa5s.robot", color=ACCENT_BLUE, size=16))
 
         status_refs = self._status_bar_manager.build()
-        self.status_line_label = status_refs.status_line_label
         self.runtime_meta_label = status_refs.runtime_meta_label
         self.setStatusBar(status_refs.status_bar)
-        self._set_primary_status_message("Initializing runtime…")
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -109,7 +107,8 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.setStyleSheet(build_stylesheet())
-        self._set_inspector_collapsed(True)
+        self.inspector_container.hide()
+        self.inspector_collapsed = True
         self._set_input_enabled(False)
 
     def _build_menu_bar(self) -> None:

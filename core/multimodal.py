@@ -10,9 +10,11 @@ from typing import Any
 from PySide6.QtGui import QImage, QImageReader
 
 from core.constants import BASE_DIR
-from core.message_utils import stringify_content
 
-
+IMAGE_CONTENT_BLOCK_TYPES = {"image", "image_url", "input_image"}
+IMAGE_CONTENT_OMITTED_PLACEHOLDER = (
+    "Previous image input omitted because the current model does not support image input."
+)
 IMAGE_INPUT_PROFILE_KEYS = ("image_input", "imageInputs", "image_inputs")
 DEFAULT_MODEL_CAPABILITIES = {"image_input_supported": False}
 
@@ -278,12 +280,63 @@ def human_message_has_image_content(content: Any) -> bool:
     for item in content if isinstance(content, list) else [content]:
         if isinstance(item, dict):
             item_type = str(item.get("type") or "").strip().lower()
-            if item_type in {"image", "image_url"}:
+            if item_type in IMAGE_CONTENT_BLOCK_TYPES or (not item_type and "image_url" in item):
                 return True
             nested_content = item.get("content")
             if nested_content is not None and human_message_has_image_content(nested_content):
                 return True
     return False
+
+
+def strip_image_content_from_message_content(content: Any) -> tuple[Any, int]:
+    if isinstance(content, str):
+        return content, 0
+
+    items = content if isinstance(content, list) else [content]
+    sanitized_items: list[Any] = []
+    removed_blocks = 0
+
+    for item in items:
+        if isinstance(item, str):
+            sanitized_items.append(item)
+            continue
+
+        if not isinstance(item, dict):
+            sanitized_items.append(item)
+            continue
+
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type in IMAGE_CONTENT_BLOCK_TYPES or (not item_type and "image_url" in item):
+            removed_blocks += 1
+            continue
+
+        nested_content = item.get("content")
+        if nested_content is None:
+            sanitized_items.append(item)
+            continue
+
+        sanitized_nested_content, nested_removed_blocks = strip_image_content_from_message_content(nested_content)
+        if nested_removed_blocks:
+            cloned_item = dict(item)
+            cloned_item["content"] = sanitized_nested_content
+            sanitized_items.append(cloned_item)
+            removed_blocks += nested_removed_blocks
+            continue
+
+        sanitized_items.append(item)
+
+    if removed_blocks == 0:
+        return content, 0
+
+    if not sanitized_items:
+        return IMAGE_CONTENT_OMITTED_PLACEHOLDER, removed_blocks
+
+    if isinstance(content, list):
+        return sanitized_items, removed_blocks
+
+    if len(sanitized_items) == 1:
+        return sanitized_items[0], removed_blocks
+    return sanitized_items, removed_blocks
 
 
 def _as_openai_image_url_block(base64_data: str, mime_type: str) -> dict[str, Any]:

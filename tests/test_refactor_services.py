@@ -386,12 +386,62 @@ class RefactorServicesTests(unittest.TestCase):
             active_tool_names=["read_file"],
             open_tool_issue=None,
             recovery_state=None,
-            user_choice_locked=True,
         )
 
         system_texts = [str(message.content) for message in context if isinstance(message, SystemMessage)]
         self.assertTrue(any("Do not call request_user_input again" in text for text in system_texts))
         self.assertTrue(any("latest request_user_input ToolMessage" in text for text in system_texts))
+
+    def test_context_builder_strips_historical_images_for_text_only_model_and_keeps_text(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            model_capabilities={"image_input_supported": False},
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        sanitized = builder.sanitize_messages(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "Опиши предыдущее изображение"},
+                        {"type": "image", "path": "C:/tmp/demo.png", "mime_type": "image/png"},
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(len(sanitized), 1)
+        self.assertIsInstance(sanitized[0], HumanMessage)
+        self.assertEqual(sanitized[0].content, "Опиши предыдущее изображение")
+
+    def test_context_builder_replaces_image_only_history_for_text_only_model_with_placeholder(self):
+        builder = ContextBuilder(
+            config=self._make_config(),
+            model_capabilities={"image_input_supported": False},
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        sanitized = builder.sanitize_messages(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "image", "path": "C:/tmp/demo.png", "mime_type": "image/png"},
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(len(sanitized), 1)
+        self.assertIsInstance(sanitized[0], HumanMessage)
+        self.assertIn("Previous image input omitted", sanitized[0].content)
 
     def test_context_builder_stringifies_openai_assistant_content_lists(self):
         builder = ContextBuilder(
