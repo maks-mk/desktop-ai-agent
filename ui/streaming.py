@@ -77,6 +77,11 @@ class StreamProcessor:
         "_events_max",
         "_tool_buffer_max",
         "_completed_tool_ids",
+        "_tool_id_aliases",
+        "_tool_index_to_id",
+        "_tool_id_to_index",
+        "_tool_chunk_accumulators",
+        "_synthetic_tool_counter",
         "_base_elapsed_seconds",
         "_last_internal_notice",
     )
@@ -106,6 +111,11 @@ class StreamProcessor:
         self._events_max = max(1, int(events_max))
         self._tool_buffer_max = max(1, int(tool_buffer_max))
         self._completed_tool_ids: dict[str, None] = {}
+        self._tool_id_aliases: Dict[str, str] = {}
+        self._tool_index_to_id: Dict[int, str] = {}
+        self._tool_id_to_index: Dict[str, int] = {}
+        self._tool_chunk_accumulators: Dict[str, Dict[int, AIMessageChunk]] = {}
+        self._synthetic_tool_counter = 0
         self._base_elapsed_seconds = max(0.0, float(base_elapsed_seconds or 0.0))
         self._last_internal_notice = ""
 
@@ -196,6 +206,13 @@ class StreamProcessor:
                 break
             self._completed_tool_ids.pop(oldest_id, None)
 
+        active_ids = set(self.tool_buffer) | set(self.tool_start_times)
+        for alias_id, target_id in list(self._tool_id_aliases.items()):
+            if alias_id in active_ids or target_id in active_ids:
+                continue
+            self._tool_id_aliases.pop(alias_id, None)
+            self._tool_id_to_index.pop(alias_id, None)
+
     def _handle_stream_event(self, mode: str, payload: Any) -> None:
         if mode == "updates":
             self._handle_updates(payload)
@@ -282,10 +299,7 @@ class StreamProcessor:
             self._handle_tool_result(message)
 
     def _handle_agent_message(self, message: AIMessage | AIMessageChunk, *, source: str = "messages") -> None:
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                self._remember_tool_call(tool_call)
-                self._emit_tool_started(tool_call)
+        self._handle_tool_calls_from_message(message, source=source)
 
         if is_hidden_internal_message(message):
             notice = get_internal_ui_notice(message)
@@ -418,8 +432,222 @@ class StreamProcessor:
             return StreamProcessor._extract_text_content(additional_kwargs.get("content_blocks"))
         return ""
 
+    def _handle_tool_calls_from_message(self, message: AIMessage | AIMessageChunk, *, source: str) -> None:
+        if isinstance(message, AIMessageChunk):
+            chunk_calls = list(getattr(message, "tool_call_chunks", []) or [])
+            if chunk_calls:
+                self._remember_tool_call_chunk_ids(chunk_calls)
+                accumulator_key = source or "messages"
+                accumulators = self._tool_chunk_accumulators.setdefault(accumulator_key, {})
+                processed_any = False
+                for chunk in chunk_calls:
+                    chunk_name = str(chunk.get("name") or "").strip() if isinstance(chunk, dict) else str(getattr(chunk, "name", "") or "").strip()
+                    raw_index = chunk.get("index") if isinstance(chunk, dict) else getattr(chunk, "index", None)
+                    try:
+                        index = int(raw_index)
+                    except (TypeError, ValueError):
+                        continue
+                    previous = accumulators.get(index)
+                    current_chunk = AIMessageChunk(content="", tool_call_chunks=[self._tool_call_chunk_payload(chunk)])
+                    if previous is None:
+                        gathered = current_chunk
+                    else:
+                        try:
+                            gathered = previous + current_chunk
+                        except Exception:
+                            gathered = current_chunk
+                    accumulators[index] = gathered
+                    tool_calls = list(getattr(gathered, "tool_calls", []) or [])
+                    if not tool_calls:
+                        continue
+                    processed_any = True
+                    self._process_tool_calls(
+                        [
+                            dict(tool_call, index=index, name=chunk_name or tool_call.get("name"))
+                            for tool_call in tool_calls
+                        ],
+                        index_order=None,
+                    )
+                if not processed_any:
+                    self._process_tool_calls(list(getattr(message, "tool_calls", []) or []), index_order=None)
+                if getattr(message, "chunk_position", None) == "last":
+                    self._tool_chunk_accumulators.pop(accumulator_key, None)
+                return
+
+        self._process_tool_calls(list(getattr(message, "tool_calls", []) or []), index_order=None)
+
+    @staticmethod
+    def _tool_call_chunk_payload(chunk: Any) -> Dict[str, Any]:
+        if isinstance(chunk, dict):
+            return {
+                "name": chunk.get("name"),
+                "args": chunk.get("args"),
+                "id": chunk.get("id"),
+                "index": chunk.get("index"),
+            }
+        return {
+            "name": getattr(chunk, "name", None),
+            "args": getattr(chunk, "args", None),
+            "id": getattr(chunk, "id", None),
+            "index": getattr(chunk, "index", None),
+        }
+
+    @staticmethod
+    def _tool_indices_from_chunks(chunks: list[Any]) -> list[int]:
+        indices: list[int] = []
+        seen: set[int] = set()
+        for chunk in chunks:
+            raw_index = chunk.get("index") if isinstance(chunk, dict) else getattr(chunk, "index", None)
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if index in seen:
+                continue
+            seen.add(index)
+            indices.append(index)
+        return indices
+
+    def _remember_tool_call_chunk_ids(self, chunks: list[Any]) -> None:
+        for chunk in chunks:
+            if isinstance(chunk, dict):
+                raw_index = chunk.get("index")
+                raw_id = chunk.get("id")
+                raw_name = chunk.get("name")
+            else:
+                raw_index = getattr(chunk, "index", None)
+                raw_id = getattr(chunk, "id", None)
+                raw_name = getattr(chunk, "name", None)
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            tool_id = str(raw_id or "").strip()
+            self._tool_id_for_index(index, tool_id, str(raw_name or "").strip())
+
+    def _process_tool_calls(self, tool_calls: list[Dict[str, Any]], *, index_order: list[int] | None) -> None:
+        for position, tool_call in enumerate(tool_calls):
+            normalized = dict(tool_call)
+            if index_order is not None and position < len(index_order):
+                normalized["index"] = index_order[position]
+            self._remember_tool_call(normalized)
+            self._emit_tool_started(normalized)
+
+    def _resolve_tool_id(self, tool_id: Any) -> str:
+        current = str(tool_id or "").strip()
+        seen: set[str] = set()
+        while current and current in self._tool_id_aliases and current not in seen:
+            seen.add(current)
+            current = str(self._tool_id_aliases.get(current) or "").strip()
+        return current
+
+    def _synthetic_tool_id(self, index: int) -> str:
+        self._synthetic_tool_counter += 1
+        return f"stream-tool-{index}-{self._synthetic_tool_counter}"
+
+    def _tool_id_for_index(self, index: int, incoming_id: str, tool_name: str = "") -> str:
+        incoming = self._resolve_tool_id(incoming_id)
+        existing = self._tool_index_to_id.get(index)
+        if existing and existing in self._completed_tool_ids:
+            self._tool_index_to_id.pop(index, None)
+            self._tool_id_to_index.pop(existing, None)
+            existing = ""
+        if existing:
+            if incoming and incoming != existing:
+                self._tool_id_aliases[incoming] = existing
+                self._tool_id_to_index[incoming] = index
+            return existing
+        tool_id = incoming or self._synthetic_tool_id(index)
+        self._tool_index_to_id[index] = tool_id
+        self._tool_id_to_index[tool_id] = index
+        return tool_id
+
+    def _normalize_tool_call_id(self, tool_call: Dict[str, Any]) -> str:
+        raw_id = str(tool_call.get("id") or "").strip()
+        raw_index = tool_call.get("index")
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            return self._resolve_tool_id(raw_id)
+        return self._tool_id_for_index(index, raw_id, str(tool_call.get("name") or "").strip())
+
+    def _mark_tool_completed(self, tool_id: str, raw_tool_id: str = "") -> None:
+        completed_indexes: set[int] = set()
+        for completed_id in {tool_id, raw_tool_id, self._resolve_tool_id(raw_tool_id)}:
+            if completed_id:
+                self._completed_tool_ids.pop(completed_id, None)
+                self._completed_tool_ids[completed_id] = None
+                index = self._tool_id_to_index.get(completed_id)
+                if index is not None:
+                    completed_indexes.add(index)
+        for completed_id in {tool_id, raw_tool_id}:
+            index = self._tool_id_to_index.pop(completed_id, None)
+            if index is not None and self._tool_index_to_id.get(index) == tool_id:
+                self._tool_index_to_id.pop(index, None)
+                completed_indexes.add(index)
+        for index in completed_indexes:
+            self._clear_tool_chunk_accumulators_for_index(index)
+
+    def _clear_tool_chunk_accumulators_for_index(self, index: int) -> None:
+        for accumulator_key, accumulators in list(self._tool_chunk_accumulators.items()):
+            accumulators.pop(index, None)
+            if not accumulators:
+                self._tool_chunk_accumulators.pop(accumulator_key, None)
+
+    def _is_active_tool_id(self, tool_id: str) -> bool:
+        return bool(tool_id) and (
+            tool_id in self.tool_buffer
+            or tool_id in self.tool_start_times
+            or tool_id in self.printed_tool_ids
+        )
+
+    @staticmethod
+    def _tool_args_compatible(candidate_args: Any, result_args: Any) -> bool:
+        candidate = canonicalize_tool_args(candidate_args)
+        result = canonicalize_tool_args(result_args)
+        if not candidate or not result:
+            return True
+        matched = False
+        for key, value in candidate.items():
+            if key not in result:
+                return False
+            matched = True
+            if result.get(key) != value:
+                return False
+        return matched
+
+    def _match_active_tool_result(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        normalized_name = str(tool_name or "").strip()
+        ordered_ids = list(dict.fromkeys([*self.tool_start_times.keys(), *self.tool_buffer.keys()]))
+        candidates: list[str] = []
+        for candidate_id in ordered_ids:
+            if candidate_id in self._completed_tool_ids:
+                continue
+            candidate = self.tool_buffer.get(candidate_id, {})
+            candidate_name = str(candidate.get("name") or "").strip()
+            if normalized_name and candidate_name and normalized_name != candidate_name:
+                continue
+            if not normalized_name and len(ordered_ids) != 1:
+                continue
+            if not self._tool_args_compatible(candidate.get("args", {}), tool_args):
+                continue
+            candidates.append(candidate_id)
+        return candidates[0] if candidates else ""
+
+    def _resolve_tool_result_id(self, raw_tool_id: str, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        tool_id = self._resolve_tool_id(raw_tool_id)
+        if self._is_active_tool_id(tool_id):
+            return tool_id
+        matched_id = self._match_active_tool_result(tool_name, tool_args)
+        if matched_id and raw_tool_id:
+            self._tool_id_aliases[raw_tool_id] = matched_id
+            index = self._tool_id_to_index.get(matched_id)
+            if index is not None:
+                self._tool_id_to_index[raw_tool_id] = index
+        return matched_id or tool_id
+
     def _remember_tool_call(self, tool_call: Dict[str, Any]) -> None:
-        tool_id = tool_call.get("id")
+        tool_id = self._normalize_tool_call_id(tool_call)
         if not tool_id:
             return
         if tool_id in self._completed_tool_ids:
@@ -476,7 +704,7 @@ class StreamProcessor:
         return merged
 
     def _emit_tool_started(self, tool_call: Dict[str, Any]) -> None:
-        tool_id = tool_call.get("id")
+        tool_id = self._normalize_tool_call_id(tool_call)
         if not tool_id or tool_id in self.printed_tool_ids or tool_id in self._completed_tool_ids:
             return
 
@@ -496,16 +724,20 @@ class StreamProcessor:
         self._emit("tool_started", self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="preparing"))
 
     def _handle_tool_result(self, message: ToolMessage) -> None:
-        tool_id = str(message.tool_call_id or "")
+        raw_tool_id = str(message.tool_call_id or "").strip()
+        message_args = extract_tool_args(message)
+        message_name = str(message.name or "").strip() or "unknown_tool"
+        tool_id = self._resolve_tool_result_id(raw_tool_id, message_name, message_args)
         if tool_id and tool_id in self._completed_tool_ids:
             return
+        if raw_tool_id and raw_tool_id in self._completed_tool_ids:
+            return
 
-        message_args = extract_tool_args(message)
         if tool_id and message_args:
             self._remember_tool_call(
                 {
                     "id": tool_id,
-                    "name": str(message.name or "").strip() or "unknown_tool",
+                    "name": message_name,
                     "args": message_args,
                 }
             )
@@ -515,7 +747,7 @@ class StreamProcessor:
         tool_info = self.tool_buffer.get(tool_id, {})
         tool_name = (
             str(tool_info.get("name") or "").strip()
-            or str(message.name or "").strip()
+            or message_name
             or "unknown_tool"
         )
         tool_args = self._merge_tool_args(tool_info.get("args", {}), message_args)
@@ -551,8 +783,7 @@ class StreamProcessor:
         self._emit("tool_finished", payload)
         if tool_id:
             self.tool_buffer.pop(tool_id, None)
-            self._completed_tool_ids.pop(tool_id, None)
-            self._completed_tool_ids[tool_id] = None
+            self._mark_tool_completed(tool_id, raw_tool_id)
             self._trim_tool_buffers()
         if diff_blocks:
             self._emit("tool_diff", {"tool_id": tool_id, "diff": diff_blocks[0], "diff_blocks": diff_blocks})

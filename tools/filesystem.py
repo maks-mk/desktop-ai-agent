@@ -100,6 +100,9 @@ _EDIT_FILE_ALIAS_MAP = {
     "new_string": ("new_text", "replace_text", "replacement", "replace_with", "new", "after", "to"),
 }
 
+_PATH_ALIASES = ("file_path", "filepath")
+_WRITE_FILE_CONTENT_ALIASES = ("text", "body", "contents")
+
 
 def _cleanup_edit_path(raw: Any) -> str | None:
     if raw is None:
@@ -121,12 +124,23 @@ def _cleanup_edit_path(raw: Any) -> str | None:
 
 
 def _resolve_payload_path(data: dict[str, Any]) -> str | None:
-    for key in ("path", "file_path", "filepath", "dir_path", "directory_path"):
+    for key in ("path", *_PATH_ALIASES, "dir_path", "directory_path"):
         if key not in data:
             continue
         cleaned = _cleanup_edit_path(data.get(key))
         if cleaned:
             return cleaned
+    return None
+
+
+def _resolve_payload_value(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        return str(value)
     return None
 
 
@@ -137,19 +151,32 @@ class EditFileInput(BaseModel):
 
     path: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="File path.",
     )
+    file_path: str | None = Field(default=None, description="File path alias.")
+    filepath: str | None = Field(default=None, description="File path alias.")
     old_string: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("old_string", *_EDIT_FILE_ALIAS_MAP["old_string"]),
         description="Exact text to replace.",
     )
+    old_text: str | None = Field(default=None, description="Alias for old_string.")
+    search_text: str | None = Field(default=None, description="Alias for old_string.")
+    find_text: str | None = Field(default=None, description="Alias for old_string.")
+    target_text: str | None = Field(default=None, description="Alias for old_string.")
+    old: str | None = Field(default=None, description="Alias for old_string.")
+    before: str | None = Field(default=None, description="Alias for old_string.")
+    from_: str | None = Field(default=None, validation_alias=AliasChoices("from_", "from"), description="Alias for old_string.")
     new_string: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("new_string", *_EDIT_FILE_ALIAS_MAP["new_string"]),
         description="Replacement text.",
     )
+    new_text: str | None = Field(default=None, description="Alias for new_string.")
+    replace_text: str | None = Field(default=None, description="Alias for new_string.")
+    replacement: str | None = Field(default=None, description="Alias for new_string.")
+    replace_with: str | None = Field(default=None, description="Alias for new_string.")
+    new: str | None = Field(default=None, description="Alias for new_string.")
+    after: str | None = Field(default=None, description="Alias for new_string.")
+    to: str | None = Field(default=None, description="Alias for new_string.")
 
     @model_validator(mode="before")
     @classmethod
@@ -184,16 +211,20 @@ class WriteFileInput(BaseModel):
 
     path: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="Workspace-relative file path to create or overwrite.",
     )
+    file_path: str | None = Field(default=None, description="File path alias.")
+    filepath: str | None = Field(default=None, description="File path alias.")
     content: str = Field(
-        validation_alias=AliasChoices("content", "text", "body", "contents"),
+        default="",
         description=(
             "Complete final file contents to write. Provide the full body of the file, "
             "not a summary, placeholder, or filename."
         ),
     )
+    text: str | None = Field(default=None, description="Alias for content.")
+    body: str | None = Field(default=None, description="Alias for content.")
+    contents: str | None = Field(default=None, description="Alias for content.")
 
     @model_validator(mode="before")
     @classmethod
@@ -202,11 +233,10 @@ class WriteFileInput(BaseModel):
             return value
         data = dict(value)
         data["path"] = _resolve_payload_path(data)
-        if data.get("content") is None:
-            for alias in ("text", "body", "contents"):
-                if data.get(alias) is not None:
-                    data["content"] = data[alias]
-                    break
+        if data.get("content") in {None, ""}:
+            resolved_content = _resolve_payload_value(data, ("content", *_WRITE_FILE_CONTENT_ALIASES))
+            if resolved_content is not None:
+                data["content"] = resolved_content
         if data.get("content") is not None:
             data["content"] = str(data["content"]).replace("\r\n", "\n")
         return data
@@ -246,45 +276,102 @@ def read_file_tool(path: str, offset: int = 0, limit: int = 2000, show_line_numb
 
 
 @tool("write_file", args_schema=WriteFileInput)
-def write_file_tool(path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
+def write_file_tool(
+    path: str | None = None,
+    content: str | None = None,
+    file_path: str | None = None,
+    filepath: str | None = None,
+    text: str | None = None,
+    body: str | None = None,
+    contents: str | None = None,
+    **kwargs: Any,
+) -> str:
     """Create or overwrite a file using the exact full content provided."""
-    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    resolved_path = _resolve_payload_path(
+        {"path": path, "file_path": file_path, "filepath": filepath, **kwargs}
+    )
     if not resolved_path:
         return format_error(ErrorType.VALIDATION, "Missing required field: path.")
-    if content is None:
-        for alias in ("text", "body", "contents"):
-            alias_value = kwargs.get(alias)
-            if alias_value is not None:
-                content = str(alias_value)
-                break
+    if content in {None, ""}:
+        content = _resolve_payload_value(
+            {
+                "content": content,
+                "text": text,
+                "body": body,
+                "contents": contents,
+                **kwargs,
+            },
+            ("content", *_WRITE_FILE_CONTENT_ALIASES),
+        )
     if content is None:
         return format_error(ErrorType.VALIDATION, "Missing required field: content.")
     return _get_synced_backend().write_file(resolved_path, str(content))
 
 
 @tool("edit_file", args_schema=EditFileInput)
-def edit_file_tool(path: str | None = None, old_string: str | None = None, new_string: str | None = None, **kwargs: Any) -> str:
+def edit_file_tool(
+    path: str | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    file_path: str | None = None,
+    filepath: str | None = None,
+    old_text: str | None = None,
+    search_text: str | None = None,
+    find_text: str | None = None,
+    target_text: str | None = None,
+    old: str | None = None,
+    before: str | None = None,
+    from_: str | None = None,
+    new_text: str | None = None,
+    replace_text: str | None = None,
+    replacement: str | None = None,
+    replace_with: str | None = None,
+    new: str | None = None,
+    after: str | None = None,
+    to: str | None = None,
+    **kwargs: Any,
+) -> str:
     """Replace text in a file."""
-    resolved_path = _resolve_payload_path({"path": path, **kwargs})
+    resolved_path = _resolve_payload_path(
+        {"path": path, "file_path": file_path, "filepath": filepath, **kwargs}
+    )
     if not resolved_path:
         return format_error(ErrorType.VALIDATION, "Missing required field: path.")
     if old_string is None:
-        for alias in _EDIT_FILE_ALIAS_MAP["old_string"]:
-            alias_value = kwargs.get(alias)
-            if alias_value is not None:
-                old_string = str(alias_value)
-                break
+        old_string = _resolve_payload_value(
+            {
+                "old_string": old_string,
+                "old_text": old_text,
+                "search_text": search_text,
+                "find_text": find_text,
+                "target_text": target_text,
+                "old": old,
+                "before": before,
+                "from": from_,
+                **kwargs,
+            },
+            ("old_string", *_EDIT_FILE_ALIAS_MAP["old_string"]),
+        )
     if old_string is None or not str(old_string).strip():
         return format_error(
             ErrorType.VALIDATION,
             "Missing required field: old_string. Accepted aliases: old_text, search_text, find_text.",
         )
     if new_string is None:
-        for alias in _EDIT_FILE_ALIAS_MAP["new_string"]:
-            alias_value = kwargs.get(alias)
-            if alias_value is not None:
-                new_string = str(alias_value)
-                break
+        new_string = _resolve_payload_value(
+            {
+                "new_string": new_string,
+                "new_text": new_text,
+                "replace_text": replace_text,
+                "replacement": replacement,
+                "replace_with": replace_with,
+                "new": new,
+                "after": after,
+                "to": to,
+                **kwargs,
+            },
+            ("new_string", *_EDIT_FILE_ALIAS_MAP["new_string"]),
+        )
     if new_string is None:
         return format_error(
             ErrorType.VALIDATION,

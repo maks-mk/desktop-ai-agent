@@ -876,6 +876,193 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(finished[0]["args"], {"path": "."})
         self.assertEqual(missing, [])
 
+    def test_stream_processor_accumulates_streamed_tool_call_chunks(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": '{"pa', "id": "call-stream", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": None, "args": 'th": "demo.txt"}', "id": None, "index": 0}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertGreaterEqual(len(started), 2)
+        self.assertEqual({payload["tool_id"] for payload in started}, {"call-stream"})
+        self.assertEqual(started[-1]["args"], {"path": "demo.txt"})
+        self.assertTrue(started[-1].get("refresh"))
+
+    def test_stream_processor_aliases_late_tool_call_chunk_id_to_preview_card(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": '{"pa', "id": "call-preview", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": None, "args": 'th": "demo.txt"}', "id": "call-final", "index": 0}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+        processor._handle_tool_result(
+            ToolMessage(
+                tool_call_id="call-final",
+                name="read_file",
+                content="demo contents",
+                additional_kwargs={"tool_args": {"path": "demo.txt"}},
+            )
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        self.assertEqual({payload["tool_id"] for payload in started}, {"call-preview"})
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["tool_id"], "call-preview")
+        self.assertEqual(finished[0]["args"], {"path": "demo.txt"})
+
+    def test_stream_processor_matches_idless_stream_preview_to_tool_result(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": '{"path": "demo.txt"}', "id": None, "index": 0}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+        processor._handle_tool_result(
+            ToolMessage(
+                tool_call_id="call-real",
+                name="read_file",
+                content="demo contents",
+                additional_kwargs={"tool_args": {"path": "demo.txt"}},
+            )
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        self.assertEqual(len({payload["tool_id"] for payload in started}), 1)
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["tool_id"], started[0]["tool_id"])
+        self.assertEqual(finished[0]["args"], {"path": "demo.txt"})
+
+    def test_stream_processor_keeps_parallel_chunk_indexes_isolated_when_some_calls_are_not_yet_parseable(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": " ", "id": "call-b", "index": 1}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "file_info", "args": '{"path": "a.txt"}', "id": "call-a", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": '{"path": "b.txt"}', "id": "call-b", "index": 1}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertEqual(len(started), 2)
+        started_by_id = {payload["tool_id"]: payload for payload in started}
+        self.assertEqual(set(started_by_id), {"call-a", "call-b"})
+        self.assertEqual(started_by_id["call-a"]["name"], "file_info")
+        self.assertEqual(started_by_id["call-a"]["args"], {"path": "a.txt"})
+        self.assertEqual(started_by_id["call-b"]["name"], "read_file")
+        self.assertEqual(started_by_id["call-b"]["args"], {"path": "b.txt"})
+
+    def test_stream_processor_clears_completed_index_accumulator_before_index_reuse(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "file_info", "args": '{"path": "a.py"}', "id": "call-info", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_tool_result(
+            ToolMessage(
+                tool_call_id="call-info",
+                name="file_info",
+                content="ok",
+                additional_kwargs={"tool_args": {"path": "a.py"}},
+            )
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": '{"pa', "id": "call-read", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": None, "args": 'th": "a.py"}', "id": None, "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        read_starts = [payload for payload in started if payload["tool_id"] == "call-read"]
+        self.assertGreaterEqual(len(read_starts), 1)
+        self.assertEqual({payload["name"] for payload in read_starts}, {"read_file"})
+        self.assertEqual(read_starts[-1]["args"], {"path": "a.py"})
+
     def test_filesystem_delete_uses_virtual_mode_path_guard(self):
         tmp = self._workspace_tempdir()
         manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
