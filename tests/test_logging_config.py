@@ -1,7 +1,9 @@
 import logging
+import shutil
 import unittest
+from pathlib import Path
 
-from core.logging_config import SensitiveDataFilter
+from core.logging_config import SensitiveDataFilter, setup_logging
 
 
 class SensitiveDataFilterTests(unittest.TestCase):
@@ -46,6 +48,51 @@ class SensitiveDataFilterTests(unittest.TestCase):
         self.assertIn("api_key=AIza...<redacted>", rendered)
         self.assertEqual(record.api_key, "gm-d...<redacted>")
         self.assertNotIn("supersecrettoken", rendered)
+
+    def test_setup_logging_writes_reasoning_debug_to_separate_file(self):
+        log_dir = Path.cwd() / ".tmp_tests" / f"reasoning_log_{id(self)}"
+        if log_dir.exists():
+            shutil.rmtree(log_dir)
+        log_dir.mkdir(parents=True)
+        try:
+            log_file = log_dir / "agent.log"
+            setup_logging(level="INFO", log_file=log_file, reasoning_debug_enabled=True)
+
+            logger = logging.getLogger("agent.reasoning_debug")
+            logger.debug("reasoning api_key=sk-demo-secret provider=%s", "openrouter")
+            for handler in logger.handlers:
+                handler.flush()
+
+            reasoning_log = log_file.parent / "reasoning_debug.log"
+            self.assertTrue(reasoning_log.exists())
+            content = reasoning_log.read_text(encoding="utf-8")
+            self.assertIn("provider=openrouter", content)
+            self.assertIn("api_key=sk-d...<redacted>", content)
+            self.assertNotIn("sk-demo-secret", content)
+        finally:
+            for handler in list(logging.getLogger("agent.reasoning_debug").handlers):
+                handler.close()
+            shutil.rmtree(log_dir, ignore_errors=True)
+
+    def test_setup_logging_keeps_reasoning_debug_disabled_by_default(self):
+        log_dir = Path.cwd() / ".tmp_tests" / f"reasoning_log_disabled_{id(self)}"
+        if log_dir.exists():
+            shutil.rmtree(log_dir)
+        log_dir.mkdir(parents=True)
+        try:
+            log_file = log_dir / "agent.log"
+            setup_logging(level="INFO", log_file=log_file)
+
+            logger = logging.getLogger("agent.reasoning_debug")
+            logger.debug("reasoning provider=openrouter")
+            for handler in logger.handlers:
+                handler.flush()
+
+            self.assertFalse((log_file.parent / "reasoning_debug.log").exists())
+        finally:
+            for handler in list(logging.getLogger("agent.reasoning_debug").handlers):
+                handler.close()
+            shutil.rmtree(log_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

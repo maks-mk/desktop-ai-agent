@@ -121,6 +121,25 @@ class RuntimePayloadTests(unittest.TestCase):
         self.assertEqual(assistant_block["markdown"], "Итог готов.")
         self.assertNotIn("thought_markdown", assistant_block)
 
+    def test_build_transcript_payload_ignores_reasoning_details_text(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Проверь"),
+                    AIMessage(
+                        content=[
+                            {"type": "reasoning.text", "text": "Скрытое рассуждение."},
+                            {"type": "text", "text": "Итог готов."},
+                        ]
+                    ),
+                ]
+            }
+        )
+
+        assistant_block = payload["turns"][0]["blocks"][0]
+        self.assertEqual(assistant_block["markdown"], "Итог готов.")
+        self.assertNotIn("Скрытое", assistant_block["markdown"])
+
     def test_build_transcript_payload_restores_hidden_internal_notice_as_notice_block(self):
         payload = build_transcript_payload(
             {

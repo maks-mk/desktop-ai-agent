@@ -216,8 +216,16 @@ START
 | `OPENAI_API_KEY` | — | Обязателен для OpenAI (если нет `OPENAI_BASE_URL`) |
 | `OPENAI_MODEL` | `gpt-4o` | Имя модели OpenAI |
 | `OPENAI_BASE_URL` | — | Для OpenAI-compatible бэкендов (Ollama и др.) |
+| `ENABLE_MODEL_REASONING` | `true` | Включает provider-side reasoning/thinking для поддерживаемых моделей |
+| `MODEL_REASONING_EFFORT` | `medium` | Усилие reasoning для OpenAI/OpenAI-compatible моделей (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `GEMINI_THINKING_BUDGET` | `4096` | Thinking budget для `gemini-2.5*` / `gemini-3*`; старые Gemini-модели получают запрос без этого параметра |
+| `PROVIDER_REGISTRY_PATH` | `provider_registry.json` | Реестр OpenAI-compatible агрегаторов и их reasoning-параметров |
 | `ACTIVE_MODEL_PROFILE_ID` | — | ID активного профиля модели (для ротации ключей) |
 | `SHOW_MODEL_THOUGHTS` | `false` | Legacy-флаг отображения reasoning (runtime выставляет false) |
+
+### Добавление OpenAI-compatible агрегаторов
+
+Подробная инструкция по `provider_registry.json`, полям схемы, matching rules и добавлению новых агрегаторов находится в [`provider_registry_guide.md`](provider_registry_guide.md).
 
 ### Управление runtime
 

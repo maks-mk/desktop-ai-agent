@@ -41,8 +41,11 @@ class SessionRepairTests(unittest.IsolatedAsyncioTestCase):
         tool_messages = [message for message in app.values["messages"] if isinstance(message, ToolMessage)]
         self.assertEqual(len(tool_messages), 1)
         self.assertEqual(tool_messages[0].tool_call_id, "tc-1")
-        self.assertIn("Execution interrupted", str(tool_messages[0].content))
+        self.assertIn("ERROR[NETWORK]", str(tool_messages[0].content))
+        self.assertIn("not a user stop", str(tool_messages[0].content))
         self.assertEqual(tool_messages[0].additional_kwargs["tool_args"], {"command": "echo 1"})
+        self.assertIs(tool_messages[0].additional_kwargs["agent_internal"]["visible_in_ui"], False)
+        self.assertIn("History was repaired", tool_messages[0].additional_kwargs["agent_internal"]["ui_notice"])
         self.assertEqual(tool_messages[0].status, "error")
 
     async def test_repair_logs_structured_event_for_inserted_tool_message(self):
@@ -68,6 +71,7 @@ class SessionRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logged_events[0][0], "tool_repair_inserted")
         self.assertEqual(logged_events[0][1]["tool_call_id"], "tc-log")
         self.assertEqual(logged_events[0][1]["tool_args"], {"command": "echo 1"})
+        self.assertEqual(logged_events[0][1]["reason"], "missing_tool_output_after_stream_interruption")
 
     async def test_repair_skips_when_loop_budget_handoff_exists_after_pending_tool_call(self):
         app = _FakeAgentApp(
@@ -115,7 +119,7 @@ class SessionRepairTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(len(notices), 2)
         tool_messages = [message for message in app.values["messages"] if isinstance(message, ToolMessage)]
-        repaired_ids = [message.tool_call_id for message in tool_messages if "Execution interrupted" in str(message.content)]
+        repaired_ids = [message.tool_call_id for message in tool_messages if "ERROR[NETWORK]" in str(message.content)]
         self.assertEqual(repaired_ids, ["tc-2", "tc-3"])
 
     async def test_repair_preserves_tool_call_identity_for_next_provider_sanitization(self):

@@ -5,7 +5,7 @@ import json
 from enum import Enum
 from typing import Any
 
-from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
@@ -114,6 +114,13 @@ class ModelFetchWorker(QThread):
         self.fetched.emit(self._request_id, result)
 
 
+class SearchableModelComboBox(QComboBox):
+    popup_requested = Signal()
+
+    def showPopup(self) -> None:
+        self.popup_requested.emit()
+
+
 class ModelSettingsDialog(QDialog):
     profiles_saved = Signal(object)
 
@@ -140,6 +147,9 @@ class ModelSettingsDialog(QDialog):
         self._model_cache: dict[tuple[str, ...], list[ModelEntry]] = {}
         self._model_entries_by_id: dict[str, ModelEntry] = {}
         self._model_workers: list[ModelFetchWorker] = []
+        self._model_popup: QFrame | None = None
+        self._model_popup_search: QLineEdit | None = None
+        self._model_popup_list: QListWidget | None = None
         self._fetch_request_id = 0
         self._fetch_debounce = QTimer(self)
         self._fetch_debounce.setSingleShot(True)
@@ -331,7 +341,7 @@ class ModelSettingsDialog(QDialog):
         self.provider_combo.addItems(["openai", "gemini"])
         self.provider_combo.setAccessibleName("Provider")
 
-        self.model_combo = QComboBox()
+        self.model_combo = SearchableModelComboBox()
         self.model_combo.setObjectName("ModelSettingsModelCombo")
         self.model_combo.setAccessibleName("Model")
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -559,6 +569,7 @@ class ModelSettingsDialog(QDialog):
         self.name_edit.textEdited.connect(self._on_name_edited)
         self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self.model_combo.popup_requested.connect(self._show_model_popup)
         self.model_text_edit.textChanged.connect(self._on_model_changed)
         self.api_key_edit.textChanged.connect(self._on_api_key_changed)
         self.api_key_reveal_button.clicked.connect(self._toggle_api_key_visibility)
@@ -585,6 +596,7 @@ class ModelSettingsDialog(QDialog):
     def closeEvent(self, event) -> None:
         self._fetch_debounce.stop()
         self._fetch_request_id += 1
+        self._close_model_popup()
         for worker in list(self._model_workers):
             if worker.isRunning():
                 worker.wait(3000)
@@ -624,18 +636,40 @@ class ModelSettingsDialog(QDialog):
 
     def _clear_model_options(self) -> None:
         self._model_entries_by_id = {}
+        self._close_model_popup()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         self.model_combo.blockSignals(False)
 
     def _set_combo_placeholder(self, text: str) -> None:
         placeholder = str(text or "").strip()
+        self._close_model_popup()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         if placeholder:
             self.model_combo.addItem(placeholder)
             self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
+
+    def _filter_model_popup_items(self, text: str = "") -> None:
+        if self._model_popup_list is None:
+            return
+        query = str(text or "").strip().casefold()
+        for row in range(self._model_popup_list.count()):
+            item = self._model_popup_list.item(row)
+            item_text = str(item.text() or "")
+            selectable = bool(item.flags() & Qt.ItemFlag.ItemIsSelectable)
+            item.setHidden(bool(query) and (not selectable or query not in item_text.casefold()))
+
+    def _close_model_popup(self) -> None:
+        if self._model_popup is None:
+            return
+        popup = self._model_popup
+        self._model_popup = None
+        self._model_popup_search = None
+        self._model_popup_list = None
+        popup.close()
+        popup.deleteLater()
 
     def _set_model_state(self, state: ModelLoadState, *, message: str = "") -> None:
         self._model_state = state
@@ -651,6 +685,8 @@ class ModelSettingsDialog(QDialog):
         self.model_combo.setEditable(is_openai and state in {ModelLoadState.LOADED, ModelLoadState.FALLBACK})
         self.model_combo.setEnabled(self._form_enabled and state in {ModelLoadState.LOADED, ModelLoadState.FALLBACK})
         self.model_text_edit.setEnabled(self._form_enabled and state == ModelLoadState.FALLBACK)
+        if not (self._form_enabled and state == ModelLoadState.LOADED and self.model_combo.count() > 0):
+            self._close_model_popup()
         self.model_popup_button.setVisible(self._form_enabled and show_combo)
         self.model_popup_button.setEnabled(self._form_enabled and state == ModelLoadState.LOADED and self.model_combo.count() > 0)
         self.model_reload_button.setVisible(self._form_enabled)
@@ -680,8 +716,66 @@ class ModelSettingsDialog(QDialog):
     def _show_model_popup(self) -> None:
         if not self.model_combo.isVisible() or not self.model_combo.isEnabled() or self.model_combo.count() <= 0:
             return
-        self.model_combo.setFocus(Qt.OtherFocusReason)
-        self.model_combo.showPopup()
+        self._close_model_popup()
+
+        popup = QFrame(self, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setObjectName("ModelSettingsModelPopup")
+        popup_layout = QVBoxLayout(popup)
+        popup_layout.setContentsMargins(6, 6, 6, 6)
+        popup_layout.setSpacing(6)
+
+        search = QLineEdit(popup)
+        search.setObjectName("ModelSettingsSearchField")
+        search.setPlaceholderText("Быстрый поиск модели")
+        search.setClearButtonEnabled(True)
+        search.setAccessibleName("Model list search")
+        search.setAccessibleDescription("Filter available models returned by the current API URL")
+        search.addAction(_fa_icon("fa5s.search", color=TEXT_MUTED, size=10), QLineEdit.LeadingPosition)
+        popup_layout.addWidget(search)
+
+        model_list = QListWidget(popup)
+        model_list.setObjectName("ModelSettingsModelPopupList")
+        model_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        model_list.setSelectionMode(QListWidget.SingleSelection)
+        popup_layout.addWidget(model_list, 1)
+
+        combo_model = self.model_combo.model()
+        root_index = self.model_combo.rootModelIndex()
+        model_column = self.model_combo.modelColumn()
+        for row in range(self.model_combo.count()):
+            item_text = str(self.model_combo.itemText(row) or "")
+            combo_index = combo_model.index(row, model_column, root_index)
+            flags = combo_model.flags(combo_index)
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, row)
+            if not (flags & Qt.ItemFlag.ItemIsEnabled and flags & Qt.ItemFlag.ItemIsSelectable):
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+            model_list.addItem(item)
+            if row == self.model_combo.currentIndex():
+                model_list.setCurrentItem(item)
+
+        def choose_model(item: QListWidgetItem) -> None:
+            row = item.data(Qt.UserRole)
+            if row is None or not (item.flags() & Qt.ItemFlag.ItemIsSelectable):
+                return
+            self.model_combo.setCurrentIndex(int(row))
+            self._close_model_popup()
+
+        search.textChanged.connect(self._filter_model_popup_items)
+        model_list.itemActivated.connect(choose_model)
+        model_list.itemClicked.connect(choose_model)
+
+        self._model_popup = popup
+        self._model_popup_search = search
+        self._model_popup_list = model_list
+
+        popup_width = max(self.model_combo.width(), 360)
+        popup_height = min(max(240, self.model_combo.count() * 28 + 52), 460)
+        popup.resize(popup_width, popup_height)
+        popup.move(self.model_combo.mapToGlobal(QPoint(0, self.model_combo.height() + 2)))
+        popup.show()
+        search.setFocus(Qt.PopupFocusReason)
+        self._filter_model_popup_items("")
 
     def _get_current_model_value(self) -> str:
         if self._model_state == ModelLoadState.LOADED:

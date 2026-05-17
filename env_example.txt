@@ -1,5 +1,5 @@
 # ===========================
-# .env example (v0.66.996b)
+# .env example (v0.67.0b)
 # ===========================
 #
 # ВНИМАНИЕ:
@@ -17,14 +17,24 @@ PROVIDER=gemini
 # --- Google Gemini ---
 GEMINI_API_KEY=AIzaSyREPLACE_WITH_YOUR_KEY
 GEMINI_MODEL=gemini-1.5-flash
+# Включает provider-side reasoning/thinking для поддерживаемых моделей.
+ENABLE_MODEL_REASONING=true
+# Gemini thinking budget применяется к gemini-2.5* / gemini-3*.
+GEMINI_THINKING_BUDGET=4096
 
 # --- OpenAI / Compatible (OpenRouter, LocalLLM, etc.) ---
 # OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 # OPENAI_MODEL=gpt-4o
 # OPENAI_BASE_URL=https://api.openai.com/v1
+# OpenAI-compatible reasoning effort: none, minimal, low, medium, high, xhigh.
+# Для кастомных base_url отправляется через extra_body.reasoning без OpenAI summary.
+MODEL_REASONING_EFFORT=medium
 # Для OpenRouter:
-# OPENAI_BASE_URL=https://openrouter.ai/api/v1
-# OPENAI_MODEL=deepseek/deepseek-r1
+# замените OPENAI_BASE_URL выше на https://openrouter.ai/api/v1
+# замените OPENAI_MODEL выше на deepseek/deepseek-r1
+# Registry для provider-specific reasoning kwargs OpenAI-compatible агрегаторов.
+# Обычно менять не нужно.
+# PROVIDER_REGISTRY_PATH=provider_registry.json
 
 # ID активного профиля модели (для ротации API ключей).
 # Не обязательна: при отсутствии приложение работает в legacy-режиме (один ключ из .env).
@@ -63,6 +73,9 @@ DEBUG=false
 # Logging overrides (optional)
 # LOG_LEVEL=INFO
 # LOG_FILE=logs/agent.log
+# Подробный отдельный лог reasoning/thinking stream в logs/reasoning_debug.log.
+# Включайте только для диагностики провайдеров/агрегаторов.
+# DEBUG_REASONING_STREAM=false
 # Строгий режим (LLM меньше фантазирует, но менее креативна)
 # STRICT_MODE=false
 # Legacy-флаг отображения reasoning. Runtime выставляет false автоматически.
@@ -150,4 +163,3 @@ RETRY_DELAY=2
 # ===========================
 # Путь к конфигурации MCP серверов
 MCP_CONFIG_PATH=mcp.json
-

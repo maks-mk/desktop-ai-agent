@@ -7,6 +7,10 @@ from core.tool_args import canonicalize_tool_args
 
 logger = logging.getLogger("agent")
 HANDOFF_MARKERS_SKIP_REPAIR = frozenset({"loop_budget_handoff"})
+INCOMPLETE_TOOL_CALL_REPAIR_MESSAGE = (
+    "ERROR[NETWORK]: The provider or aggregator stream ended before this tool returned a result. "
+    "This is usually a transient upstream disconnect, not a user stop. Please retry or continue."
+)
 
 
 async def repair_session_if_needed(
@@ -100,17 +104,23 @@ async def repair_session_if_needed(
             return notices
 
         _notify(
-            f"Detected {len(missing_tool_calls)} interrupted tool execution(s). Filling gaps automatically."
+            f"Detected {len(missing_tool_calls)} incomplete tool execution(s) after a stream interruption. "
+            "Repairing history automatically."
         )
         tool_messages = [
             ToolMessage(
                 tool_call_id=tool_call["id"],
-                content="Error: Execution interrupted (system limit reached or user stop). Please retry.",
+                content=INCOMPLETE_TOOL_CALL_REPAIR_MESSAGE,
                 name=tool_call["name"],
                 additional_kwargs={
                     "tool_args": canonicalize_tool_args(tool_call.get("args")),
                     "agent_internal": {
                         "kind": "repaired_interrupted_tool_call",
+                        "visible_in_ui": False,
+                        "ui_notice": (
+                            "Provider stream interrupted while a tool was running. "
+                            "History was repaired automatically."
+                        ),
                     },
                 },
                 status="error",
@@ -126,7 +136,7 @@ async def repair_session_if_needed(
                         "tool_name": str(tool_call.get("name") or ""),
                         "tool_call_id": str(tool_call.get("id") or ""),
                         "tool_args": canonicalize_tool_args(tool_call.get("args")),
-                        "reason": "missing_tool_output_after_interrupt",
+                        "reason": "missing_tool_output_after_stream_interruption",
                     },
                 )
 

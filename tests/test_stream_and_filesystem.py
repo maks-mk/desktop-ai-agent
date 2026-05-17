@@ -328,6 +328,36 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         self.assertEqual(failed_events[0].payload["message"], "graph exploded")
 
+    def test_stream_processor_marks_active_tool_as_stream_interrupted_on_provider_error(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        async def _stream():
+            yield {
+                "type": "updates",
+                "data": {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"id": "tc-stream", "name": "read_file", "args": {"path": "a.py"}}],
+                            )
+                        ]
+                    }
+                },
+            }
+            raise RuntimeError("upstream disconnected")
+
+        result = asyncio.run(processor.process_stream(_stream()))
+
+        self.assertTrue(result.failed)
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0]["interrupted"])
+        self.assertEqual(finished[0]["interruption_reason"], "stream_error")
+        self.assertIn("ERROR[NETWORK]", finished[0]["content"])
+        self.assertIn("not a user stop", finished[0]["content"])
+
     def test_stream_processor_reads_token_usage_from_update_payload(self):
         processor = StreamProcessor()
         processor._handle_updates({"agent": {"token_usage": {"prompt_tokens": 321, "completion_tokens": 8}}})
@@ -412,6 +442,112 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(statuses[-1]["node"], "recovery")
         self.assertEqual(statuses[-1]["label"], "Reviewing results")
 
+    def test_stream_processor_reports_agent_status_as_working_for_plain_agent_output(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages((AIMessage(content="Готовлю ответ."), {"langgraph_node": "agent"}))
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Working...")
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_reasoning(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages((AIMessage(content=[{"type": "reasoning", "text": "Планирую."}]), {"langgraph_node": "agent"}))
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+
+    def test_stream_processor_reports_update_agent_status_as_thinking_for_reasoning(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_updates(
+            {"agent": {"messages": [AIMessage(content=[{"type": "reasoning", "text": "Планирую."}])]}}
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_reasoning_content_kwarg(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(content="", additional_kwargs={"reasoning_content": "Сверяю варианты."}),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_reasoning_details(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(
+                    content="",
+                    additional_kwargs={
+                        "reasoning_details": [
+                            {"type": "reasoning.text", "text": "Сверяю варианты."},
+                        ]
+                    },
+                ),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+        self.assertEqual(deltas, [])
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_analysis_field(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(content=[{"analysis": "internal reasoning"}]),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+        self.assertEqual(deltas, [])
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_partial_inline_think_tag(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages((AIMessage(content="<think>Сверяю"), {"langgraph_node": "agent"}))
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+        self.assertEqual(deltas, [])
+
     def test_stream_processor_skips_unknown_node_status_instead_of_fallback_thinking(self):
         events = []
         processor = StreamProcessor(events.append)
@@ -488,6 +624,25 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("&lt;think&gt;Проверяю ограничения.&lt;/think&gt;Итог готов", deltas[0]["full_text"])
         self.assertNotIn("thought_markdown", deltas[0])
         self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_suppresses_chunked_textual_tool_call_marker(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(content="Читаю файл.call:read_file{"),
+            source="messages",
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(content='path:<|"|>index.html<|"|>}<tool_call|>'),
+            source="messages",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Читаю файл.")
+        self.assertNotIn("call:read_file", processor.full_text)
+        self.assertNotIn("<tool_call|>", processor.full_text)
 
     def test_stream_processor_emits_cumulative_full_text_for_chunked_string_output(self):
         events = []
@@ -586,6 +741,24 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(deltas[0]["full_text"], "Готово.")
         self.assertNotIn("thought_markdown", deltas[0])
         self.assertNotIn("has_thought", deltas[0])
+
+    def test_stream_processor_ignores_reasoning_details_text(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content=[
+                    {"type": "reasoning.text", "text": "Скрытое рассуждение."},
+                    {"type": "text", "text": "Готово."},
+                ]
+            )
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Готово.")
+        self.assertNotIn("Скрытое", deltas[0]["full_text"])
 
     def test_stream_processor_ignores_langchain_content_blocks_reasoning(self):
         events = []
@@ -1562,7 +1735,41 @@ class StreamAndFilesystemTests(unittest.TestCase):
         finished = [event.payload for event in events if event.type == "tool_finished"]
         self.assertEqual(len(finished), 1)
         self.assertTrue(finished[0]["interrupted"])
-        self.assertIn("Execution interrupted", finished[0]["content"])
+        self.assertIn("ERROR[CANCELLED]", finished[0]["content"])
+
+    def test_stream_processor_hides_repaired_stream_interruption_tool_message(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        message = ToolMessage(
+            content=(
+                "ERROR[NETWORK]: The provider or aggregator stream ended before this tool returned a result. "
+                "This is usually a transient upstream disconnect, not a user stop. Please retry or continue."
+            ),
+            tool_call_id="tc-repaired",
+            name="read_file",
+            additional_kwargs={
+                "tool_args": {"path": "a.py"},
+                "agent_internal": {
+                    "kind": "repaired_interrupted_tool_call",
+                    "visible_in_ui": False,
+                    "ui_notice": (
+                        "Provider stream interrupted while a tool was running. "
+                        "History was repaired automatically."
+                    ),
+                },
+            },
+            status="error",
+        )
+
+        processor._handle_tool_result(message)
+
+        finished = [event.payload for event in events if event.type == "tool_finished"]
+        notices = [event.payload for event in events if event.type == "summary_notice"]
+        self.assertEqual(finished, [])
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["kind"], "agent_internal_notice")
+        self.assertIn("History was repaired automatically", notices[0]["message"])
 
 
 if __name__ == "__main__":

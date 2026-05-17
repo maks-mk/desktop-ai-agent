@@ -49,7 +49,11 @@ def setup_runtime() -> AgentConfig:
     if getattr(sys, "frozen", False):
         os.chdir(os.getcwd())
     config = AgentConfig()
-    setup_logging(level=config.log_level, log_file=config.log_file)
+    setup_logging(
+        level=config.log_level,
+        log_file=config.log_file,
+        reasoning_debug_enabled=config.debug_reasoning_stream,
+    )
     return config
 
 
@@ -423,8 +427,10 @@ class AgentRunWorker(QObject):
         )
         await self._run_graph_payload(build_initial_state(request_payload, session_id=self.current_session.session_id))
 
-    async def _run_graph_payload(self, payload: dict | Command) -> None:
+    async def _run_graph_payload(self, payload: dict | Command | None) -> None:
         try:
+            stream_repair_resume_attempts = 0
+            max_stream_repair_resumes = max(0, min(int(getattr(self.config, "max_retries", 1) or 1), 2))
             while True:
                 stream = self.agent_app.astream(
                     payload,
@@ -453,7 +459,30 @@ class AgentRunWorker(QObject):
 
                 if result.failed:
                     self._log_ui_run_event("run_failed", message=result.error_message)
-                    await self._repair_current_session_if_needed()
+                    repair_notices = await self._repair_current_session_if_needed()
+                    if repair_notices and stream_repair_resume_attempts < max_stream_repair_resumes:
+                        stream_repair_resume_attempts += 1
+                        self._log_ui_run_event(
+                            "run_auto_continued_after_stream_repair",
+                            attempt=stream_repair_resume_attempts,
+                            max_attempts=max_stream_repair_resumes,
+                            message=result.error_message,
+                        )
+                        self.event_emitted.emit(
+                            StreamEvent(
+                                "summary_notice",
+                                {
+                                    "message": (
+                                        "Provider stream interrupted. History was repaired automatically; "
+                                        "continuing the run…"
+                                    ),
+                                    "kind": "stream_repair_auto_continue",
+                                    "level": "warning",
+                                },
+                            )
+                        )
+                        payload = None
+                        continue
                     self._refresh_model_profiles_from_store()
                     self._active_run_elapsed_seconds = 0.0
                     self._active_request_has_images = False
@@ -461,6 +490,32 @@ class AgentRunWorker(QObject):
                     return
 
                 if result.interrupt is None:
+                    repair_notices = await self._repair_current_session_if_needed()
+                    if repair_notices and stream_repair_resume_attempts < max_stream_repair_resumes:
+                        stream_repair_resume_attempts += 1
+                        self._log_ui_run_event(
+                            "run_auto_continued_after_stream_repair",
+                            attempt=stream_repair_resume_attempts,
+                            max_attempts=max_stream_repair_resumes,
+                            phase="post_success",
+                            repaired_count=len(repair_notices),
+                        )
+                        self.event_emitted.emit(
+                            StreamEvent(
+                                "summary_notice",
+                                {
+                                    "message": (
+                                        "Provider stream ended with an incomplete tool call. "
+                                        "History was repaired automatically; continuing the run..."
+                                    ),
+                                    "kind": "stream_repair_auto_continue",
+                                    "level": "warning",
+                                },
+                            )
+                        )
+                        payload = None
+                        continue
+
                     self._refresh_model_profiles_from_store()
                     if self.current_session is not None:
                         self.current_session.last_run_stats = str(result.stats or "")

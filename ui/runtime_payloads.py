@@ -27,7 +27,9 @@ from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
 APPROVAL_MODE_PROMPT = "prompt"
 APPROVAL_MODE_ALWAYS = "always"
 APPROVAL_MODE_DENY = "deny"
-_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_CLOSE_PREFIX_RE = re.compile(r"^.*?</(think|thought)>\s*", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_UNCLOSED_RE = re.compile(r"<(think|thought)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 CHAT_TITLE_MAX_LENGTH = 50
 CHAT_TITLE_FALLBACK = DEFAULT_CHAT_TITLE
 TITLE_PREFIX_RE = re.compile(
@@ -241,9 +243,14 @@ def serialize_session_entries(entries: list[SessionListEntry]) -> list[dict[str,
 
 
 def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
+    def _strip_inline_thought_content(text: str) -> str:
+        cleaned = _INLINE_THOUGHT_BLOCK_RE.sub("", text)
+        cleaned = _INLINE_THOUGHT_CLOSE_PREFIX_RE.sub("", cleaned)
+        return _INLINE_THOUGHT_UNCLOSED_RE.sub("", cleaned)
+
     def _extract_visible_text(content: Any) -> str:
         if isinstance(content, str):
-            return _INLINE_THOUGHT_BLOCK_RE.sub("", content)
+            return _strip_inline_thought_content(content)
         if content is None:
             return ""
         if isinstance(content, list):
@@ -256,8 +263,10 @@ def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
                 "reasoning",
                 "reasoning_content",
                 "reasoning_summary",
+                "analysis",
+                "analysis_content",
                 "summary_text",
-            }:
+            } or item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
                 return ""
             for key in ("text", "output_text", "content", "answer", "response", "final", "final_text"):
                 if key in content:
@@ -348,6 +357,17 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
             continue
 
         if isinstance(message, ToolMessage):
+            if is_hidden_internal_message(message):
+                notice = get_internal_ui_notice(message)
+                if notice:
+                    current_turn["blocks"].append(
+                        {
+                            "type": "notice",
+                            "message": notice,
+                            "level": "warning",
+                        }
+                    )
+                continue
             tool_meta = pending_tool_calls.get(message.tool_call_id, {})
             tool_name = tool_meta.get("name") or message.name or "tool"
             tool_args = canonicalize_tool_args(tool_meta.get("args"))

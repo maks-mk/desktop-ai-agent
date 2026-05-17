@@ -116,7 +116,21 @@ def _coerce_log_level(level: int | str | None) -> int:
     return getattr(logging, normalized, logging.INFO)
 
 
-def setup_logging(level: int | str | None = None, log_file: str | Path | None = None) -> logging.Logger:
+def _coerce_debug_reasoning_stream(value: bool | str | None) -> bool:
+    if value is None:
+        value = os.getenv("DEBUG_REASONING_STREAM", "false")
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on", "debug"}
+
+
+def setup_logging(
+    level: int | str | None = None,
+    log_file: str | Path | None = None,
+    *,
+    reasoning_debug_enabled: bool | str | None = None,
+) -> logging.Logger:
     if level is None:
         level = _coerce_log_level(None)
     else:
@@ -172,7 +186,41 @@ def setup_logging(level: int | str | None = None, log_file: str | Path | None = 
 
     agent_logger = logging.getLogger("agent")
     agent_logger.setLevel(logging.DEBUG)
+    _setup_reasoning_debug_logger(log_file, enabled=_coerce_debug_reasoning_stream(reasoning_debug_enabled))
     return agent_logger
+
+
+def _setup_reasoning_debug_logger(log_file: str | Path | None, *, enabled: bool) -> logging.Logger:
+    logger = logging.getLogger("agent.reasoning_debug")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.disabled = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    if not enabled or not log_file:
+        logger.disabled = True
+        logger.addHandler(logging.NullHandler())
+        return logger
+
+    log_path = Path(log_file).parent / "reasoning_debug.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(log_path), encoding="utf-8")
+        handler._reasoning_debug_handler = True
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        handler.addFilter(SensitiveDataFilter())
+        logger.addHandler(handler)
+    except Exception as exc:
+        sys.stderr.write(f"Warning: could not create reasoning debug log file: {exc}\n")
+        logger.addHandler(logging.NullHandler())
+    return logger
 
 
 def _suppress_library_logs(root_level: int) -> None:

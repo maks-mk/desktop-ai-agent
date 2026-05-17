@@ -269,7 +269,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(missing, [])
 
-    def test_build_agent_result_injects_dummy_gemini_thought_signature_for_first_tool_call(self):
+    def test_build_agent_result_does_not_invent_gemini_thought_signature(self):
         tool = FakeTool("web_search", "ok")
         nodes = AgentNodes(
             config=self._make_config(
@@ -299,10 +299,36 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         message = next(item for item in result["messages"] if isinstance(item, AIMessage))
-        signature_map = message.additional_kwargs["__gemini_function_call_thought_signatures__"]
-        self.assertIn("tc-1", signature_map)
-        self.assertTrue(signature_map["tc-1"])
+        self.assertNotIn("__gemini_function_call_thought_signatures__", message.additional_kwargs)
         self.assertEqual(result["turn_outcome"], "run_tools")
+
+    def test_build_agent_result_recovers_textual_tool_call_from_compatible_provider(self):
+        tool = FakeTool("read_file", "ok")
+        nodes = AgentNodes(
+            config=self._make_config(PROVIDER="openai"),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+        response = AIMessage(
+            content='Читаю файл.call:read_file{path:<|"|>index.html<|"|>}<tool_call|>'
+        )
+
+        result = nodes._build_agent_result(
+            response=response,
+            current_task="прочитай файл",
+            tools_available=True,
+            turn_id=1,
+            messages=[HumanMessage(content="прочитай файл")],
+            allowed_tool_names=["read_file"],
+        )
+
+        message = next(item for item in result["messages"] if isinstance(item, AIMessage))
+        self.assertEqual(result["turn_outcome"], "run_tools")
+        self.assertEqual(message.tool_calls[0]["name"], "read_file")
+        self.assertEqual(message.tool_calls[0]["args"], {"path": "index.html"})
+        self.assertNotIn("call:read_file", str(message.content))
+        self.assertNotIn("<tool_call|>", str(message.content))
 
     def test_build_agent_result_preserves_existing_gemini_thought_signature(self):
         tool = FakeTool("web_search", "ok")
@@ -560,7 +586,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["google_api_key"], "gm-test")
         self.assertNotIn("convert_system_message_to_human", captured)
 
-    def test_create_llm_for_gemini_does_not_force_native_thoughts_by_default(self):
+    def test_create_llm_for_gemini_enables_thinking_budget_by_default_for_thinking_models(self):
         captured = {}
 
         class FakeChatGoogleGenerativeAI:
@@ -576,10 +602,55 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertNotIn("include_thoughts", captured)
+        self.assertEqual(captured["thinking_budget"], 4096)
+        self.assertIs(captured["include_thoughts"], True)
+
+    def test_create_llm_for_gemini3_uses_thinking_level_when_supported(self):
+        captured = {}
+
+        class FakeChatGoogleGenerativeAI:
+            model_fields = {"thinking_level": object(), "thinking_budget": object(), "include_thoughts": object()}
+
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_google_genai": mock.Mock(ChatGoogleGenerativeAI=FakeChatGoogleGenerativeAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="gemini",
+                    GEMINI_API_KEY="gm-test",
+                    GEMINI_MODEL="gemini-3-flash",
+                    MODEL_REASONING_EFFORT="low",
+                )
+            )
+
+        self.assertEqual(captured["thinking_level"], "low")
+        self.assertIs(captured["include_thoughts"], True)
         self.assertNotIn("thinking_budget", captured)
 
-    def test_create_llm_for_gemini_keeps_thought_flags_absent_with_legacy_flag_off(self):
+    def test_create_llm_for_gemini3_does_not_send_legacy_thinking_budget(self):
+        captured = {}
+
+        class FakeChatGoogleGenerativeAI:
+            model_fields = {"thinking_budget": object()}
+
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_google_genai": mock.Mock(ChatGoogleGenerativeAI=FakeChatGoogleGenerativeAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="gemini",
+                    GEMINI_API_KEY="gm-test",
+                    GEMINI_MODEL="gemini-3-flash",
+                )
+            )
+
+        self.assertNotIn("thinking_level", captured)
+        self.assertNotIn("thinking_budget", captured)
+        self.assertNotIn("include_thoughts", captured)
+
+    def test_create_llm_for_gemini_skips_thinking_budget_for_older_models(self):
         captured = {}
 
         class FakeChatGoogleGenerativeAI:
@@ -591,13 +662,76 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                 self._make_config(
                     PROVIDER="gemini",
                     GEMINI_API_KEY="gm-test",
-                    GEMINI_MODEL="gemini-2.5-flash",
-                    SHOW_MODEL_THOUGHTS=False,
+                    GEMINI_MODEL="gemini-1.5-flash",
                 )
             )
 
-        self.assertNotIn("include_thoughts", captured)
         self.assertNotIn("thinking_budget", captured)
+        self.assertNotIn("include_thoughts", captured)
+
+    def test_gemini_adapter_preserves_function_call_thought_signatures_from_response(self):
+        from google.genai.types import Candidate, Content, FunctionCall, GenerateContentResponse, Part
+
+        llm = create_llm(
+            self._make_config(
+                PROVIDER="gemini",
+                GEMINI_API_KEY="gm-test",
+                GEMINI_MODEL="gemini-2.5-flash",
+            )
+        )
+        response = GenerateContentResponse(
+            candidates=[
+                Candidate(
+                    content=Content(
+                        role="model",
+                        parts=[
+                            Part(
+                                functionCall=FunctionCall(name="read_file", args={"path": "index.html"}),
+                                thoughtSignature=b"real-signature",
+                            )
+                        ],
+                    )
+                )
+            ],
+            modelVersion="gemini-2.5-flash",
+        )
+        llm.client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **_kwargs: response))
+
+        result = llm._generate([HumanMessage(content="Read the file")])
+
+        message = result.generations[0].message
+        tool_call_id = message.tool_calls[0]["id"]
+        signature_map = message.additional_kwargs["__gemini_function_call_thought_signatures__"]
+        self.assertEqual(base64.b64decode(signature_map[tool_call_id]), b"real-signature")
+
+    def test_gemini_adapter_adds_thought_signatures_to_outbound_function_call_parts(self):
+        llm = create_llm(
+            self._make_config(
+                PROVIDER="gemini",
+                GEMINI_API_KEY="gm-test",
+                GEMINI_MODEL="gemini-2.5-flash",
+            )
+        )
+        ai_message = AIMessage(
+            content="",
+            additional_kwargs={
+                "__gemini_function_call_thought_signatures__": {
+                    "tc-1": base64.b64encode(b"real-signature").decode("ascii"),
+                }
+            },
+            tool_calls=[{"id": "tc-1", "name": "read_file", "args": {"path": "index.html"}}],
+        )
+
+        request = llm._prepare_request(
+            [
+                HumanMessage(content="Read the file"),
+                ai_message,
+                ToolMessage(content="ok", tool_call_id="tc-1", name="read_file"),
+            ]
+        )
+
+        model_content = next(content for content in request["contents"] if content.role == "model")
+        self.assertEqual(model_content.parts[0].thought_signature, b"real-signature")
 
     async def test_gemini_retry_patch_strips_retry_kwargs_before_async_generation_call(self):
         forwarded_kwargs = {}
@@ -751,6 +885,239 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(captured["reasoning"], {"effort": "medium", "summary": "auto"})
+
+    def test_create_llm_for_openai_compatible_reasoning_model_uses_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="openai/gpt-oss-120b",
+                    OPENAI_BASE_URL="https://openrouter.ai/api/v1",
+                    MODEL_REASONING_EFFORT="high",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertEqual(captured["extra_body"], {"reasoning": {"effort": "high"}})
+
+    def test_openai_raw_reasoning_delta_is_extracted_from_compatible_stream_chunk(self):
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning": "checking",
+                        "reasoning_content": "checking",
+                    }
+                }
+            ]
+        }
+
+        self.assertEqual(agent_module._extract_openai_reasoning_delta(chunk), "checking")
+
+    def test_gemini_latest_flash_alias_uses_thinking_budget(self):
+        self.assertTrue(agent_module._gemini_model_supports_thinking_budget("gemini-flash-latest"))
+
+    def test_create_llm_for_openai_compatible_reasoning_model_does_not_force_responses_api(self):
+        from langchain_core.messages import HumanMessage
+
+        llm = create_llm(
+            self._make_config(
+                PROVIDER="openai",
+                OPENAI_API_KEY="sk-test",
+                OPENAI_MODEL="openai/gpt-oss-120b",
+                OPENAI_BASE_URL="https://openrouter.ai/api/v1",
+                MODEL_REASONING_EFFORT="xhigh",
+            )
+        )
+
+        payload = llm._get_request_payload([HumanMessage(content="hi")])
+
+        self.assertFalse(llm._use_responses_api(payload))
+        self.assertEqual(payload["extra_body"], {"reasoning": {"effort": "xhigh"}})
+
+    def test_create_llm_for_ollama_cloud_reasoning_model_uses_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-oss:120b",
+                    OPENAI_BASE_URL="https://ollama.com/v1",
+                    MODEL_REASONING_EFFORT="xhigh",
+                )
+            )
+
+        self.assertEqual(captured["reasoning_effort"], "high")
+        self.assertNotIn("extra_body", captured)
+
+    def test_create_llm_for_ollama_cloud_gemma_reasoning_model_uses_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gemma4:31b",
+                    OPENAI_BASE_URL="https://ollama.com/v1",
+                    MODEL_REASONING_EFFORT="medium",
+                )
+            )
+
+        self.assertEqual(captured["reasoning_effort"], "medium")
+        self.assertNotIn("extra_body", captured)
+
+    def test_create_llm_for_nvidia_reasoning_model_uses_registry_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="openai/gpt-oss-120b",
+                    OPENAI_BASE_URL="https://integrate.api.nvidia.com/v1",
+                    MODEL_REASONING_EFFORT="xhigh",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("extra_body", captured)
+        self.assertEqual(captured["reasoning_effort"], "high")
+
+    def test_create_llm_for_fireworks_reasoning_model_uses_registry_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="accounts/fireworks/models/deepseek-r1",
+                    OPENAI_BASE_URL="https://api.fireworks.ai/inference/v1",
+                    MODEL_REASONING_EFFORT="high",
+                )
+            )
+
+        self.assertEqual(captured["reasoning_effort"], "high")
+
+    def test_create_llm_for_mistral_reasoning_model_uses_registry_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="mistral-medium-3-5",
+                    OPENAI_BASE_URL="https://api.mistral.ai/v1",
+                    MODEL_REASONING_EFFORT="xhigh",
+                )
+            )
+
+        self.assertEqual(captured["reasoning_effort"], "high")
+
+    def test_create_llm_for_conservative_registry_entries_skips_reasoning_kwargs(self):
+        for base_url in (
+            "https://api-inference.modelscope.ai/v1",
+            "https://api-inference.modelscope.cn/v1",
+            "https://api.freetheai.xyz/v1",
+            "http://localhost:3002/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                captured = {}
+
+                class FakeChatOpenAI:
+                    def __init__(self, **kwargs):
+                        captured.update(kwargs)
+
+                with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+                    create_llm(
+                        self._make_config(
+                            PROVIDER="openai",
+                            OPENAI_API_KEY="sk-test",
+                            OPENAI_MODEL="openai/gpt-oss-120b",
+                            OPENAI_BASE_URL=base_url,
+                            MODEL_REASONING_EFFORT="high",
+                        )
+                    )
+
+                self.assertNotIn("reasoning", captured)
+                self.assertNotIn("extra_body", captured)
+                self.assertNotIn("reasoning_effort", captured)
+
+    def test_create_llm_for_reasoning_effort_none_skips_reasoning_kwargs(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-5-mini",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                    MODEL_REASONING_EFFORT="none",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("extra_body", captured)
+        self.assertNotIn("reasoning_effort", captured)
+
+    def test_create_llm_for_openai_allows_disabling_reasoning_controls(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-5-mini",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                    ENABLE_MODEL_REASONING=False,
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
 
     def test_build_initial_state_supports_text_and_image_attachments(self):
         state = build_initial_state(
@@ -2096,6 +2463,44 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    def test_build_transcript_payload_hides_repaired_interruption_tool_message(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Сделай анализ проекта"),
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"id": "tc-repaired", "name": "read_file", "args": {"path": "script.js"}}],
+                    ),
+                    ToolMessage(
+                        content=(
+                            "ERROR[NETWORK]: The provider or aggregator stream ended before this tool returned a result. "
+                            "This is usually a transient upstream disconnect, not a user stop. Please retry or continue."
+                        ),
+                        tool_call_id="tc-repaired",
+                        name="read_file",
+                        additional_kwargs={
+                            "tool_args": {"path": "script.js"},
+                            "agent_internal": {
+                                "kind": "repaired_interrupted_tool_call",
+                                "visible_in_ui": False,
+                                "ui_notice": (
+                                    "Provider stream interrupted while a tool was running. "
+                                    "History was repaired automatically."
+                                ),
+                            },
+                        },
+                        status="error",
+                    ),
+                ]
+            }
+        )
+
+        blocks = payload["turns"][0]["blocks"]
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["type"], "notice")
+        self.assertIn("History was repaired automatically", blocks[0]["message"])
 
     def test_build_transcript_payload_keeps_assistant_text_without_pending_choice_state(self):
         payload = build_transcript_payload(
@@ -3458,6 +3863,144 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         repair_mock.assert_awaited_once()
         self.assertFalse(worker._is_busy)
 
+    async def test_run_graph_payload_auto_continues_once_after_stream_repair(self):
+        worker = gui_runtime.AgentRunWorker()
+
+        class DummyApp:
+            def __init__(self):
+                self.inputs = []
+
+            def astream(self, payload, *_args, **_kwargs):
+                self.inputs.append(payload)
+                return object()
+
+        dummy_app = DummyApp()
+        worker.agent_app = dummy_app
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config(MAX_RETRIES=3)
+        worker._set_busy(True)
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        with (
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    side_effect=[
+                        StreamProcessResult(
+                            stats=None,
+                            failed=True,
+                            error_message="upstream disconnected",
+                            elapsed_seconds=0.5,
+                        ),
+                        StreamProcessResult(
+                            stats="1.0s   In: 10   Out: 2",
+                            elapsed_seconds=1.0,
+                        ),
+                    ]
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "_repair_current_session_if_needed",
+                new=mock.AsyncMock(side_effect=[["repaired missing tool output"], []]),
+            ) as repair_mock,
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock()) as emit_session_mock,
+        ):
+            await worker._run_graph_payload({"messages": []})
+
+        self.assertEqual(len(dummy_app.inputs), 2)
+        self.assertEqual(dummy_app.inputs[0], {"messages": []})
+        self.assertIsNone(dummy_app.inputs[1])
+        self.assertEqual(repair_mock.await_count, 2)
+        worker.store.save_active_session.assert_called_once()
+        emit_session_mock.assert_awaited_once()
+        self.assertTrue(
+            any(
+                event.type == "summary_notice" and event.payload.get("kind") == "stream_repair_auto_continue"
+                for event in events
+            )
+        )
+        self.assertFalse(worker._is_busy)
+
+    async def test_run_graph_payload_auto_continues_after_successful_stream_repair(self):
+        worker = gui_runtime.AgentRunWorker()
+
+        class DummyApp:
+            def __init__(self):
+                self.inputs = []
+
+            def astream(self, payload, *_args, **_kwargs):
+                self.inputs.append(payload)
+                return object()
+
+        dummy_app = DummyApp()
+        worker.agent_app = dummy_app
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config(MAX_RETRIES=3)
+        worker._set_busy(True)
+        events = []
+        worker.event_emitted.connect(events.append)
+
+        with (
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    side_effect=[
+                        StreamProcessResult(
+                            stats="0.5s   In: 10   Out: 2",
+                            elapsed_seconds=0.5,
+                        ),
+                        StreamProcessResult(
+                            stats="1.0s   In: 12   Out: 4",
+                            elapsed_seconds=1.0,
+                        ),
+                    ]
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "_repair_current_session_if_needed",
+                new=mock.AsyncMock(side_effect=[["repaired missing tool output"], []]),
+            ) as repair_mock,
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock()) as emit_session_mock,
+        ):
+            await worker._run_graph_payload({"messages": []})
+
+        self.assertEqual(len(dummy_app.inputs), 2)
+        self.assertEqual(dummy_app.inputs[0], {"messages": []})
+        self.assertIsNone(dummy_app.inputs[1])
+        self.assertEqual(repair_mock.await_count, 2)
+        worker.store.save_active_session.assert_called_once()
+        emit_session_mock.assert_awaited_once()
+        self.assertTrue(
+            any(
+                event.type == "summary_notice" and event.payload.get("kind") == "stream_repair_auto_continue"
+                for event in events
+            )
+        )
+        self.assertFalse(worker._is_busy)
+
     async def test_run_graph_payload_success_refreshes_transcript_payload(self):
         worker = gui_runtime.AgentRunWorker()
         worker.agent_app = type(
@@ -3489,6 +4032,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ),
             ),
+            mock.patch.object(worker, "_repair_current_session_if_needed", new=mock.AsyncMock(return_value=[])),
             mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock(return_value={})) as emit_session_mock,
         ):
             await worker._run_graph_payload({"messages": []})

@@ -229,7 +229,7 @@ class AssistantMessageWidget(QFrame):
 
     def set_content(self, markdown: str) -> None:
         self._markdown = markdown
-        text = markdown.strip() or "*Thinking…*"
+        text = markdown.strip()
 
         parts = self._split_markdown_parts(text) if text else []
 
@@ -544,5 +544,3 @@ class ApprovalRequestCardWidget(QFrame):
         self.approve_button.setEnabled(enabled)
         self.always_button.setEnabled(enabled)
         self.deny_button.setEnabled(enabled)
-
-

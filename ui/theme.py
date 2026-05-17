@@ -488,6 +488,38 @@ def build_stylesheet() -> str:
         height: 0px;
     }}
 
+    QFrame#ModelSettingsModelPopup {{
+        background: {blend_hex(model_dialog_card, model_dialog_field_bg, 0.20)};
+        border: 1px solid {blend_hex(model_dialog_selected_border, model_dialog_border, 0.35)};
+        border-radius: {SOFT_RADIUS_MD + 4}px;
+    }}
+
+    QListWidget#ModelSettingsModelPopupList {{
+        background: transparent;
+        border: none;
+        outline: 0px;
+        color: {model_dialog_text};
+        selection-background-color: {blend_hex(model_dialog_selected, model_dialog_field_bg, 0.14)};
+        selection-color: {model_dialog_text};
+    }}
+
+    QListWidget#ModelSettingsModelPopupList::item {{
+        min-height: 26px;
+        padding: 4px 10px;
+        margin: 1px 4px;
+        border-radius: {SOFT_RADIUS_SM}px;
+        background: transparent;
+    }}
+
+    QListWidget#ModelSettingsModelPopupList::item:selected {{
+        background: {blend_hex(model_dialog_selected, model_dialog_field_bg, 0.18)};
+        color: {TEXT_PRIMARY};
+    }}
+
+    QListWidget#ModelSettingsModelPopupList::item:hover {{
+        background: {blend_hex(model_dialog_selected, model_dialog_field_bg, 0.10)};
+    }}
+
     QDialog#ModelSettingsDialog QComboBox QAbstractItemView {{
         background: {model_dialog_card};
         border: 1px solid {model_dialog_border};

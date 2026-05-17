@@ -349,6 +349,17 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(widget.markdown(), "Готово.")
         self.assertIs(widget.content_layout.itemAt(0).widget(), widget.parts_widgets[0])
 
+    def test_assistant_message_widget_does_not_render_thinking_placeholder_for_empty_content(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("")
+        widget.show()
+        self._process_events()
+
+        self.assertEqual(widget.markdown(), "")
+        self.assertEqual(widget.parts_widgets, [])
+
     def test_user_choice_card_renders_above_composer_and_resumes_selected_option(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Выбери режим"}))
@@ -875,7 +886,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsNotNone(self.window.current_turn.status_widget)
         self.assertEqual(self.window.current_turn.status_widget.label.text(), "Self-correcting")
 
-    def test_run_started_requeues_autofollow_after_inserting_thinking_status(self):
+    def test_run_started_requeues_autofollow_after_inserting_working_status(self):
         self.window._handle_initialized(self._snapshot_payload())
         with mock.patch.object(
             self.window.transcript,
@@ -885,7 +896,7 @@ class GuiUxTests(unittest.TestCase):
             self.window._handle_event(StreamEvent("run_started", {"text": "Ещё запрос"}))
 
         self.assertIsNotNone(self.window.current_turn.status_widget)
-        self.assertEqual(self.window.current_turn.status_widget.label.text(), "Analyzing request")
+        self.assertEqual(self.window.current_turn.status_widget.label.text(), "Working...")
         self.assertGreaterEqual(notify_mock.call_count, 2)
         self.assertEqual(notify_mock.call_args_list[-1].kwargs.get("force"), True)
 
@@ -941,7 +952,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertIn("compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
 
         self.window._handle_event(
-            StreamEvent("status_changed", {"label": "Analyzing request", "node": "agent"})
+            StreamEvent("status_changed", {"label": "Working...", "node": "agent"})
         )
         self.assertIsNotNone(self.window.current_turn.summary_notice_widget)
         self.assertIn("context compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
@@ -2827,6 +2838,55 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
         self.assertTrue(dialog.save_button.isEnabled())
 
+    def test_model_settings_dialog_filters_model_popup_without_changing_selection(self):
+        payload = {
+            "active_profile": "gpt-4o",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "https://api.openai.com/v1",
+                    "enabled": True,
+                }
+            ],
+        }
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+            self.addCleanup(dialog.close)
+            dialog.show()
+            self._process_events()
+
+            dialog._apply_loaded_models(
+                [
+                    ModelEntry("gpt-4o", "openai", True),
+                    ModelEntry("gpt-4o-mini", "openai", True),
+                    ModelEntry("claude-3-5-sonnet", "openai", False),
+                ]
+            )
+            self._process_events()
+
+            self.assertEqual(dialog.model_combo.currentText(), "gpt-4o")
+
+            dialog._show_model_popup()
+            self._process_events()
+            self.assertIsNotNone(dialog._model_popup)
+            self.assertIsNotNone(dialog._model_popup_search)
+            self.assertIsNotNone(dialog._model_popup_list)
+
+            dialog._model_popup_search.setText("mini")
+            self._process_events()
+
+            self.assertEqual(dialog.model_combo.currentText(), "gpt-4o")
+            hidden_by_text = {
+                dialog._model_popup_list.item(row).text(): dialog._model_popup_list.item(row).isHidden()
+                for row in range(dialog._model_popup_list.count())
+            }
+            self.assertTrue(hidden_by_text["gpt-4o"])
+            self.assertFalse(hidden_by_text["gpt-4o-mini"])
+            self.assertTrue(hidden_by_text["claude-3-5-sonnet"])
+
     def test_model_settings_dialog_profile_list_shows_provider_and_model(self):
         payload = {
             "active_profile": "gpt-4o",
@@ -2955,8 +3015,12 @@ class GuiUxTests(unittest.TestCase):
         dialog._show_model_popup()
         self._process_events()
 
-        self.assertTrue(dialog.model_combo.view().isVisible())
-        dialog.model_combo.hidePopup()
+        self.assertIsNotNone(dialog._model_popup)
+        self.assertTrue(dialog._model_popup.isVisible())
+        self.assertIsNotNone(dialog._model_popup_search)
+        self.assertIsNotNone(dialog._model_popup_list)
+        self.assertEqual(dialog._model_popup_list.count(), 2)
+        dialog._close_model_popup()
 
     def test_model_settings_dialog_gemini_loaded_state_shows_popup_and_reload_buttons(self):
         payload = {
@@ -3023,8 +3087,12 @@ class GuiUxTests(unittest.TestCase):
         dialog._show_model_popup()
         self._process_events()
 
-        self.assertTrue(dialog.model_combo.view().isVisible())
-        dialog.model_combo.hidePopup()
+        self.assertIsNotNone(dialog._model_popup)
+        self.assertTrue(dialog._model_popup.isVisible())
+        self.assertIsNotNone(dialog._model_popup_search)
+        self.assertIsNotNone(dialog._model_popup_list)
+        self.assertEqual(dialog._model_popup_list.count(), 2)
+        dialog._close_model_popup()
 
     def test_composer_expands_to_max_height_then_uses_internal_scroll(self):
         self.window._handle_initialized(self._snapshot_payload())

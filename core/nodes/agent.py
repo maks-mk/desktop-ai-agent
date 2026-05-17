@@ -7,15 +7,10 @@ from langchain_core.messages import AIMessage
 from core.state import AgentState
 from core.tool_args import canonicalize_tool_args
 from core.constants import TOOL_ISSUE_UI_NOTICE
+from core.message_utils import stringify_content
+from core.text_tool_calls import extract_text_tool_calls
 
 _GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY = "__gemini_function_call_thought_signatures__"
-_GEMINI_DUMMY_THOUGHT_SIGNATURE = (
-    "ErQCCrECAdHtim8MtxgeMCRCiNiyoyImxtYAEDzz4NXOr/HSL3rA7rPPvHWZCm+T9VSDYh/mt9lESoH4wQh"
-    "/ca1zDtWTN6XOL1+S3krYLQeqp47RV/b1eSq5jdZF28S4Lb7w4A3/EFdybc4SFb2/YhMm+CulYLmLA4Tr4V"
-    "Su0eMWgxM3HVt6u0jECf5BbXzj0qjJ32tEQYJvKvV8H1tCHvB6J+RZhsDr+TcyOCaqxDoR4WKxXYxNRZb3h"
-    "YTuCnBEDPhn1lROumVaghi9nEIgc17z002zLoyqIptlLfIVw70FXkCLsPUSL1SjPQYtGL8PVncVajeqGogR"
-    "D/eZSVZ1Zr5tshxh3DQ+JAYNcrHaRHWC4Hg0H6oftYx+JdJD9B/81NYV9jyGxP7zHKFHOELl0IUP5GEXP9I="
-)
 
 
 class AgentMixin:
@@ -43,14 +38,13 @@ class AgentMixin:
             if tool_call_id and isinstance(signature, str) and signature:
                 normalized_signature_map[tool_call_id] = signature
 
-        first_tool_call_id = str(tool_calls[0].get("id") or "").strip()
-        if first_tool_call_id and first_tool_call_id not in normalized_signature_map:
-            normalized_signature_map[first_tool_call_id] = _GEMINI_DUMMY_THOUGHT_SIGNATURE
-
         if raw_signature_map == normalized_signature_map:
             return response
 
-        metadata[_GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY] = normalized_signature_map
+        if normalized_signature_map:
+            metadata[_GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY] = normalized_signature_map
+        else:
+            metadata.pop(_GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY, None)
         return response.model_copy(update={"additional_kwargs": metadata})
 
     def _build_agent_result(
@@ -77,6 +71,21 @@ class AgentMixin:
             t_calls = list(getattr(response, "tool_calls", []))
             invalid_calls = list(getattr(response, "invalid_tool_calls", []))
             retry_user_input_turn = False
+
+            if tools_available and not t_calls and not invalid_calls:
+                recovered_tool_calls = extract_text_tool_calls(
+                    stringify_content(response.content),
+                    allowed_tool_names=allowed_tool_names or self._all_tool_names,
+                    id_prefix=f"txttc{max(0, int(turn_id or 0)) % 100:02d}",
+                )
+                if recovered_tool_calls.tool_calls:
+                    response = response.model_copy(
+                        update={
+                            "content": recovered_tool_calls.cleaned_text or "I will use the requested tool.",
+                            "tool_calls": recovered_tool_calls.tool_calls,
+                        }
+                    )
+                    t_calls = list(recovered_tool_calls.tool_calls)
 
             missing_fields = [
                 tc for tc in t_calls

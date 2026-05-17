@@ -20,6 +20,7 @@ from core import constants
 from core.config import AgentConfig
 from core.message_utils import stringify_content
 from core.multimodal import (
+    IMAGE_INPUT_PROFILE_KEYS,
     human_message_has_image_content,
     materialize_user_message_content_for_model,
     normalize_model_capabilities,
@@ -53,6 +54,11 @@ class ContextBuilder:
     ) -> None:
         self.config = config
         self._model_capabilities = normalize_model_capabilities(model_capabilities)
+        capability_payload = model_capabilities if isinstance(model_capabilities, dict) else {}
+        self._image_capability_known = any(
+            key in capability_payload
+            for key in ("image_input_supported", "supports_image_input", *IMAGE_INPUT_PROFILE_KEYS)
+        )
         self._prompt_loader = prompt_loader
         self._is_internal_retry = is_internal_retry
         self._log_run_event = log_run_event
@@ -80,13 +86,14 @@ class ContextBuilder:
         # Memory goes early: it's context ballast, must not override operational rules
         if summary:
             full_context.append(SystemMessage(content=f"<memory>\n{summary}\n</memory>"))
+        inferred_user_choice_locked = user_choice_locked or self._has_request_user_input_tool_result(sanitized_messages)
         full_context.extend(
             self._runtime_policy_builder.build_messages(
                 RuntimePromptContext(
                     current_task=current_task,
                     tools_available=tools_available,
                     active_tool_names=tuple(active_tool_names),
-                    user_choice_locked=user_choice_locked,
+                    user_choice_locked=inferred_user_choice_locked,
                 )
             )
         )
@@ -101,6 +108,12 @@ class ContextBuilder:
             full_context.append(recovery_message)
         full_context.extend(sanitized_messages)
         return self.normalize_system_prefix(full_context)
+
+    def _has_request_user_input_tool_result(self, messages: List[BaseMessage]) -> bool:
+        for message in messages:
+            if isinstance(message, ToolMessage) and str(message.name or "").strip().lower() == "request_user_input":
+                return True
+        return False
 
     def sanitize_messages(
         self,
@@ -188,7 +201,7 @@ class ContextBuilder:
                         remapped_count += 1
 
             if isinstance(normalized_message, HumanMessage) and human_message_has_image_content(normalized_message.content):
-                if not image_input_supported:
+                if self._image_capability_known and not image_input_supported:
                     sanitized_content, removed_blocks = strip_image_content_from_message_content(
                         normalized_message.content
                     )

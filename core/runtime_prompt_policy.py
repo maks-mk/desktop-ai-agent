@@ -52,8 +52,12 @@ class RuntimePromptPolicyBuilder:
         "TOOL INTENT REQUIREMENT:\n"
         "Never send an empty assistant message when tool_calls are present.\n"
         "The `content` field of every assistant message that contains `tool_calls` MUST be non-empty.\n"
-        "Write one plain sentence: what you are about to do and why.\n"
-        "Example: 'Reading config.py to find the database host setting.'\n"
+        "Write 1-2 short, natural sentences before the tool call.\n"
+        "Say what you are checking or changing, why it matters, and what signal you expect next.\n"
+        "If you say you will use a tool, emit the matching structured tool_call in the same assistant message.\n"
+        "Keep it concrete and useful to the user; avoid generic notes like 'I will use a tool now.'\n"
+        "Example: 'I will inspect config.py and the startup path to see where the database host is resolved. "
+        "That should show whether the wrong value comes from env loading or runtime overrides.'\n"
         "An empty `content` when `tool_calls` are present is a PROTOCOL ERROR."
     )
     def __init__(self, *, config: AgentConfig) -> None:

@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
         self.quit_action = refs.quit_action
         self.status_icon = refs.status_icon
         self.status_text = refs.status_text
+        self.status_line_label = refs.status_text
         self.status_meta = refs.status_meta
         self.top_status_chip = refs.top_status_chip
         self.new_project_button = refs.new_project_button

@@ -339,9 +339,17 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
             self._make_config(MAX_FILE_SIZE="300MBps")
 
     def test_logging_env_keys_are_loaded_via_agent_config(self):
-        config = self._make_config(LOG_LEVEL="debug", LOG_FILE="logs/custom-agent.log")
+        config = self._make_config(LOG_LEVEL="debug", LOG_FILE="logs/custom-agent.log", DEBUG_REASONING_STREAM=True)
         self.assertEqual(config.log_level, "DEBUG")
         self.assertEqual(config.log_file.name, "custom-agent.log")
+        self.assertTrue(config.debug_reasoning_stream)
+
+    def test_provider_registry_path_is_resolved_from_project_root(self):
+        config = self._make_config(PROVIDER_REGISTRY_PATH="provider_registry.json")
+
+        self.assertTrue(config.provider_registry_path.is_absolute())
+        self.assertEqual(config.provider_registry_path.name, "provider_registry.json")
+        self.assertTrue(config.provider_registry_path.exists())
 
     def test_text_utils_import_does_not_require_prompt_toolkit(self):
         import core.text_utils as text_utils

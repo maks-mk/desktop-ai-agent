@@ -127,6 +127,11 @@ class ToolPreflightMixin:
             except Exception:
                 pass
 
+        if self._normalize_tool_name(tool_name) == "write_file":
+            content = normalized_args.get("content")
+            if content is None or (isinstance(content, str) and not content.strip()):
+                return ["content"]
+
         required = self._required_tool_fields(tool_name)
         if not required:
             return []

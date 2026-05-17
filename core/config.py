@@ -104,6 +104,10 @@ class AgentConfig(BaseSettings):
         default=BASE_DIR / ".agent_state" / "config.json",
         alias="MODEL_PROFILE_CONFIG_PATH",
     )
+    provider_registry_path: Path = Field(
+        default_factory=lambda: _existing_path_or_default("provider_registry.json"),
+        alias="PROVIDER_REGISTRY_PATH",
+    )
     session_state_path: Path = Field(
         default=BASE_DIR / ".agent_state" / "session.json",
         alias="SESSION_STATE_PATH",
@@ -126,6 +130,10 @@ class AgentConfig(BaseSettings):
     openai_api_key: Optional[SecretStr] = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
     openai_base_url: Optional[str] = Field(default=None, alias="OPENAI_BASE_URL")
+    enable_model_reasoning: bool = Field(default=True, alias="ENABLE_MODEL_REASONING")
+    debug_reasoning_stream: bool = Field(default=False, alias="DEBUG_REASONING_STREAM")
+    model_reasoning_effort: str = Field(default="medium", alias="MODEL_REASONING_EFFORT")
+    gemini_thinking_budget: int = Field(default=4096, alias="GEMINI_THINKING_BUDGET")
     show_model_thoughts: bool = Field(default=False, alias="SHOW_MODEL_THOUGHTS")
 
     # Common Logic
@@ -214,6 +222,7 @@ class AgentConfig(BaseSettings):
         "mcp_config_path",
         "checkpoint_sqlite_path",
         "model_profile_config_path",
+        "provider_registry_path",
         "session_state_path",
         "run_log_dir",
         "log_file",

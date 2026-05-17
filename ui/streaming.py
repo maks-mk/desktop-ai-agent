@@ -16,13 +16,40 @@ from core.text_utils import (
     format_tool_output,
     prepare_markdown_for_render,
 )
+from core.reasoning_debug import debug_event, elapsed_since, log_unknown_fields, now, preview_value
 from core.tool_args import canonicalize_tool_args
 from ui.tool_message_utils import extract_tool_args, extract_tool_duration
 from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
 
 DIFF_REGEX = re.compile(r"```diff\r?\n(.*?)```", re.DOTALL)
-_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_OPEN_RE = re.compile(r"<(think|thought)\b[^>]*>", re.IGNORECASE)
+_INLINE_THOUGHT_CLOSE_PREFIX_RE = re.compile(r"^.*?</(think|thought)>\s*", re.IGNORECASE | re.DOTALL)
+_INLINE_THOUGHT_UNCLOSED_RE = re.compile(r"<(think|thought)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+_TEXT_TOOL_CALL_START_RE = re.compile(r"call:[A-Za-z_][\w.-]*\s*\{", re.DOTALL)
+_TEXT_TOOL_CALL_END = "<tool_call|>"
+_AGENT_WORKING_LABEL = "Working..."
+_AGENT_THINKING_LABEL = "Thinking..."
 logger = logging.getLogger("agent")
+reasoning_logger = logging.getLogger("agent.reasoning_debug")
+
+
+INTERRUPTED_TOOL_MESSAGES = {
+    "cancelled": "ERROR[CANCELLED]: The run was stopped before this tool returned a result.",
+    "stream_error": (
+        "ERROR[NETWORK]: The provider or aggregator stream ended before this tool returned a result. "
+        "This is usually a transient upstream disconnect, not a user stop. Please retry or continue."
+    ),
+}
+DEFAULT_INTERRUPTED_TOOL_MESSAGE = (
+    "ERROR[INTERRUPTED]: The run ended before this tool returned a result. Please retry or continue."
+)
+
+
+def _strip_inline_thought_content(text: str) -> str:
+    cleaned = _INLINE_THOUGHT_BLOCK_RE.sub("", text)
+    cleaned = _INLINE_THOUGHT_CLOSE_PREFIX_RE.sub("", cleaned)
+    return _INLINE_THOUGHT_UNCLOSED_RE.sub("", cleaned)
 
 
 def _clip_debug_text(value: Any, limit: int = 240) -> str:
@@ -30,6 +57,78 @@ def _clip_debug_text(value: Any, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}…(+{len(text) - limit} chars)"
+
+
+def _describe_thinking_signal(content: Any) -> str:
+    if isinstance(content, str):
+        if _INLINE_THOUGHT_OPEN_RE.search(content):
+            return "inline_thought_tag"
+        return ""
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        for item in content:
+            signal = _describe_thinking_signal(item)
+            if signal:
+                return signal
+        return ""
+    if isinstance(content, dict):
+        item_type = str(content.get("type") or "").strip().lower()
+        if bool(content.get("thought")):
+            return "thought_flag"
+        if item_type in {"thinking", "thought", "reasoning", "reasoning_content", "reasoning_summary"}:
+            return f"type:{item_type}"
+        if item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
+            return f"type:{item_type}"
+        for key in (
+            "analysis",
+            "analysis_content",
+            "reasoning_content",
+            "reasoning",
+            "reasoning_summary",
+            "reasoning_details",
+            "thinking",
+            "thinking_content",
+        ):
+            if key in content and content.get(key):
+                nested_signal = _describe_thinking_signal(content.get(key))
+                return f"key:{key}" + (f"/{nested_signal}" if nested_signal else "")
+        for key in ("parts", "items", "content", "content_blocks", "message", "messages", "data"):
+            if key in content:
+                signal = _describe_thinking_signal(content.get(key))
+                if signal:
+                    return f"key:{key}/{signal}"
+        return ""
+    for key in ("content", "content_blocks", "text", "additional_kwargs"):
+        try:
+            value = getattr(content, key)
+        except Exception:
+            continue
+        if callable(value) or value is None:
+            continue
+        signal = _describe_thinking_signal(value)
+        if signal:
+            return f"attr:{key}/{signal}"
+    return ""
+
+
+def _reasoning_type_from_signal(signal: str) -> str:
+    normalized = str(signal or "").lower()
+    if not normalized:
+        return "unknown"
+    if "inline_thought_tag" in normalized:
+        return "think_tag"
+    if "reasoning.delta" in normalized:
+        return "reasoning_delta"
+    if "reasoning" in normalized:
+        return "reasoning_field"
+    if "thinking" in normalized:
+        return "thinking_block"
+    if "analysis" in normalized:
+        return "analysis_field"
+    if "thought" in normalized:
+        return "thinking_block"
+    return "unknown"
 
 
 def _normalize_stream_chunk(chunk: Any) -> tuple[str, Any]:
@@ -84,6 +183,10 @@ class StreamProcessor:
         "_synthetic_tool_counter",
         "_base_elapsed_seconds",
         "_last_internal_notice",
+        "_agent_is_thinking",
+        "_first_token_at",
+        "_first_reasoning_at",
+        "_suppressing_text_tool_call",
     )
 
     def __init__(
@@ -118,6 +221,10 @@ class StreamProcessor:
         self._synthetic_tool_counter = 0
         self._base_elapsed_seconds = max(0.0, float(base_elapsed_seconds or 0.0))
         self._last_internal_notice = ""
+        self._agent_is_thinking = False
+        self._first_token_at: float | None = None
+        self._first_reasoning_at: float | None = None
+        self._suppressing_text_tool_call = False
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -126,6 +233,13 @@ class StreamProcessor:
         self._emit_status(force=True)
         try:
             async for chunk in stream:
+                debug_event(
+                    "raw_stream_chunk",
+                    source="langgraph_stream",
+                    elapsed=elapsed_since(self.start_time),
+                    chunk_preview=preview_value(chunk),
+                )
+                log_unknown_fields("langgraph_stream_chunk", chunk)
                 mode, payload = _normalize_stream_chunk(chunk)
                 self._handle_stream_event(mode, payload)
                 if self.pending_interrupt is not None:
@@ -142,6 +256,7 @@ class StreamProcessor:
             )
         except Exception as exc:
             logger.debug("Stream processing failed: %s", exc)
+            self._emit_interrupted_tool_results(reason="stream_error")
             self._emit("run_failed", {"message": str(exc)})
             return StreamProcessResult(
                 stats=None,
@@ -162,6 +277,14 @@ class StreamProcessor:
             )
 
         duration = self._elapsed_seconds()
+        debug_event(
+            "stream_timing",
+            time_to_first_token=(self._first_token_at - self.start_time) if self._first_token_at is not None else None,
+            time_to_first_reasoning=(self._first_reasoning_at - self.start_time)
+            if self._first_reasoning_at is not None
+            else None,
+            time_to_final_response=duration,
+        )
         stats = self.tracker.render(duration)
         self._emit("run_finished", {"stats": stats, "duration": duration})
         return StreamProcessResult(
@@ -291,6 +414,17 @@ class StreamProcessor:
 
         if node:
             self.active_node = node
+            if node == "agent" and isinstance(message, (AIMessage, AIMessageChunk)):
+                self._agent_is_thinking = self._has_thinking_content(message)
+                if self._agent_is_thinking and self._first_reasoning_at is None:
+                    self._first_reasoning_at = now()
+                reasoning_logger.debug(
+                    "status parse source=messages node=agent message_type=%s thinking=%s signal=%s content_type=%s",
+                    type(message).__name__,
+                    self._agent_is_thinking,
+                    _describe_thinking_signal(message),
+                    type(getattr(message, "content", None)).__name__,
+                )
             self._emit_status()
 
         if node == "agent" and isinstance(message, (AIMessage, AIMessageChunk)):
@@ -300,7 +434,6 @@ class StreamProcessor:
 
     def _handle_agent_message(self, message: AIMessage | AIMessageChunk, *, source: str = "messages") -> None:
         self._handle_tool_calls_from_message(message, source=source)
-
         if is_hidden_internal_message(message):
             notice = get_internal_ui_notice(message)
             if notice and notice != self._last_internal_notice:
@@ -315,9 +448,38 @@ class StreamProcessor:
                 )
             return
 
+        if self.active_node == "agent":
+            self._agent_is_thinking = self._has_thinking_content(message)
+            if self._agent_is_thinking and self._first_reasoning_at is None:
+                self._first_reasoning_at = now()
+            signal = _describe_thinking_signal(message)
+            debug_event(
+                "reasoning_detected",
+                detected=self._agent_is_thinking,
+                reasoning_type=_reasoning_type_from_signal(signal),
+                source_field=signal,
+                source=source,
+            )
+            reasoning_logger.debug(
+                "status parse source=%s node=agent message_type=%s thinking=%s signal=%s content_type=%s",
+                source,
+                type(message).__name__,
+                self._agent_is_thinking,
+                signal,
+                type(getattr(message, "content", None)).__name__,
+            )
+            self._emit_status()
+
         chunk = self._extract_text_content(message.content)
         if not chunk:
             chunk = self._extract_text_content(message)
+        reasoning_logger.debug(
+            "thought text extraction source=%s message_type=%s visible_chunk_len=%s thinking_signal=%s",
+            source,
+            type(message).__name__,
+            len(chunk or ""),
+            _describe_thinking_signal(message),
+        )
         if not chunk:
             logger.debug(
                 "Stream empty assistant chunk content_type=%s additional_kwargs=%s response_metadata=%s content_preview=%s",
@@ -327,6 +489,11 @@ class StreamProcessor:
                 _clip_debug_text(message.content),
             )
             return
+        chunk = self._filter_visible_text_tool_call_chunk(chunk)
+        if not chunk:
+            return
+        if self._first_token_at is None:
+            self._first_token_at = now()
 
         merged_text = self._merge_assistant_text(chunk, source=source)
         if merged_text is None:
@@ -385,10 +552,35 @@ class StreamProcessor:
             return text
         return current + text
 
+    def _filter_visible_text_tool_call_chunk(self, text: str) -> str:
+        raw_text = str(text or "")
+        if not raw_text:
+            return ""
+
+        if self._suppressing_text_tool_call:
+            marker_index = raw_text.find(_TEXT_TOOL_CALL_END)
+            if marker_index < 0:
+                return ""
+            self._suppressing_text_tool_call = False
+            return raw_text[marker_index + len(_TEXT_TOOL_CALL_END) :]
+
+        match = _TEXT_TOOL_CALL_START_RE.search(raw_text)
+        if not match:
+            return raw_text
+
+        start = match.start(0)
+        before = raw_text[:start]
+        marker_index = raw_text.find(_TEXT_TOOL_CALL_END, start)
+        if marker_index < 0:
+            self._suppressing_text_tool_call = True
+            return before
+        after = raw_text[marker_index + len(_TEXT_TOOL_CALL_END) :]
+        return before + after
+
     @staticmethod
     def _extract_text_content(content: Any) -> str:
         if isinstance(content, str):
-            return _INLINE_THOUGHT_BLOCK_RE.sub("", content)
+            return _strip_inline_thought_content(content)
         if content is None:
             return ""
         if isinstance(content, list):
@@ -401,8 +593,10 @@ class StreamProcessor:
                 "reasoning",
                 "reasoning_content",
                 "reasoning_summary",
+                "analysis",
+                "analysis_content",
                 "summary_text",
-            }:
+            } or item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
                 return ""
             for key in ("text", "output_text", "content", "answer", "response", "final", "final_text"):
                 if key in content:
@@ -431,6 +625,58 @@ class StreamProcessor:
         if isinstance(additional_kwargs, dict):
             return StreamProcessor._extract_text_content(additional_kwargs.get("content_blocks"))
         return ""
+
+    @staticmethod
+    def _has_thinking_content(content: Any) -> bool:
+        if isinstance(content, str):
+            return bool(_INLINE_THOUGHT_BLOCK_RE.search(content) or _INLINE_THOUGHT_OPEN_RE.search(content))
+        if content is None:
+            return False
+        if isinstance(content, list):
+            return any(StreamProcessor._has_thinking_content(item) for item in content)
+        if isinstance(content, dict):
+            item_type = str(content.get("type") or "").strip().lower()
+            if bool(content.get("thought")) or item_type in {
+                "thinking",
+                "thought",
+                "reasoning",
+                "reasoning_content",
+                "reasoning_summary",
+                "analysis",
+                "analysis_content",
+            } or item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
+                return True
+            for key in (
+                "analysis",
+                "analysis_content",
+                "reasoning_content",
+                "reasoning",
+                "reasoning_summary",
+                "reasoning_details",
+                "thinking",
+                "thinking_content",
+            ):
+                if key in content and content.get(key):
+                    if isinstance(content.get(key), str):
+                        return True
+                    if StreamProcessor._has_thinking_content(content.get(key)):
+                        return True
+                    return True
+            return any(
+                StreamProcessor._has_thinking_content(content.get(key))
+                for key in ("parts", "items", "content", "content_blocks", "message", "messages", "data")
+                if key in content
+            )
+        for key in ("content", "content_blocks", "text", "additional_kwargs"):
+            try:
+                value = getattr(content, key)
+            except Exception:
+                continue
+            if callable(value) or value is None:
+                continue
+            if StreamProcessor._has_thinking_content(value):
+                return True
+        return False
 
     def _handle_tool_calls_from_message(self, message: AIMessage | AIMessageChunk, *, source: str) -> None:
         if isinstance(message, AIMessageChunk):
@@ -724,6 +970,20 @@ class StreamProcessor:
         self._emit("tool_started", self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="preparing"))
 
     def _handle_tool_result(self, message: ToolMessage) -> None:
+        if is_hidden_internal_message(message):
+            notice = get_internal_ui_notice(message)
+            if notice and notice != self._last_internal_notice:
+                self._last_internal_notice = notice
+                self._emit(
+                    "summary_notice",
+                    {
+                        "message": notice,
+                        "kind": "agent_internal_notice",
+                        "level": "warning",
+                    },
+                )
+            return
+
         raw_tool_id = str(message.tool_call_id or "").strip()
         message_args = extract_tool_args(message)
         message_name = str(message.name or "").strip() or "unknown_tool"
@@ -771,6 +1031,7 @@ class StreamProcessor:
             elapsed = max(0.0, time.perf_counter() - start_time)
 
         diff_blocks = [match.group(1).strip() for match in DIFF_REGEX.finditer(content_str)]
+        is_repaired_stream_interruption = self._is_repaired_stream_interruption(message, content_str)
         payload = {
             "content": content_str,
             "summary": summary,
@@ -780,6 +1041,16 @@ class StreamProcessor:
             "diff_blocks": diff_blocks,
         }
         payload.update(self._build_tool_event_payload(tool_id, tool_name, tool_args, phase="finished", is_error=is_error))
+        if is_repaired_stream_interruption:
+            payload.update(
+                {
+                    "display": "Provider stream interrupted",
+                    "subtitle": f"{tool_name} did not return a result before the upstream stream ended.",
+                    "raw_display": content_str,
+                    "interrupted": True,
+                    "interruption_reason": "stream_error",
+                }
+            )
         self._emit("tool_finished", payload)
         if tool_id:
             self.tool_buffer.pop(tool_id, None)
@@ -790,6 +1061,14 @@ class StreamProcessor:
 
         self.active_node = "agent"
         self._emit_status(force=True)
+
+    @staticmethod
+    def _is_repaired_stream_interruption(message: ToolMessage, content: str) -> bool:
+        metadata = getattr(message, "additional_kwargs", {}) or {}
+        internal = metadata.get("agent_internal") if isinstance(metadata, dict) else None
+        if isinstance(internal, dict) and str(internal.get("kind") or "") == "repaired_interrupted_tool_call":
+            return True
+        return False
 
     def _emit_interrupted_tool_results(self, reason: str) -> list[Dict[str, Any]]:
         interrupted_payloads: list[Dict[str, Any]] = []
@@ -802,7 +1081,7 @@ class StreamProcessor:
             start_time = self.tool_start_times.pop(tool_id, None)
             if start_time is not None:
                 elapsed = time.perf_counter() - start_time
-            content = "Error: Execution interrupted (system limit reached or user stop). Please retry."
+            content = INTERRUPTED_TOOL_MESSAGES.get(reason, DEFAULT_INTERRUPTED_TOOL_MESSAGE)
             payload = {
                 "content": content,
                 "summary": format_tool_output(tool_name, content, True),
@@ -830,7 +1109,7 @@ class StreamProcessor:
 
     def _status_label(self) -> str:
         node_labels = {
-            "agent": "Analyzing request",
+            "agent": _AGENT_THINKING_LABEL if self._agent_is_thinking else _AGENT_WORKING_LABEL,
             "recovery": "Reviewing results",
             "tools": "Running tools",
             "summarize": "Compressing context",
@@ -893,6 +1172,13 @@ class StreamProcessor:
         if not force and current == self._last_status:
             return
         self._last_status = current
+        reasoning_logger.debug(
+            "status emitted node=%s label=%s thinking=%s phase=%s",
+            self.active_node,
+            label,
+            self._agent_is_thinking,
+            self._status_phase(),
+        )
         self._emit(
             "status_changed",
             {

@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "data_version": 1,
+  "providers": [
+    {
+      "id": "openai",
+      "enabled": true,
+      "priority": 100,
+      "match": ["api.openai.com"],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning.effort",
+        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
+        "value_map": {},
+        "extra_fields": {
+          "reasoning.summary": "auto"
+        }
+      },
+      "notes": "Native OpenAI Responses API through LangChain ChatOpenAI."
+    },
+    {
+      "id": "openrouter",
+      "enabled": true,
+      "priority": 90,
+      "match": ["openrouter.ai"],
+      "match_type": "suffix",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "extra_body.reasoning.effort",
+        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
+        "value_map": {
+          "none": "none"
+        }
+      },
+      "notes": "OpenRouter reasoning object API on OpenAI-compatible chat completions."
+    },
+    {
+      "id": "ollama_cloud",
+      "enabled": true,
+      "priority": 85,
+      "match": ["ollama.com"],
+      "match_type": "suffix",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      },
+      "notes": "Hosted Ollama cloud API."
+    },
+    {
+      "id": "fireworks",
+      "enabled": true,
+      "priority": 80,
+      "match": ["api.fireworks.ai"],
+      "match_type": "suffix",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      },
+      "notes": "Fireworks OpenAI-compatible reasoning API."
+    },
+    {
+      "id": "nvidia_nim",
+      "enabled": true,
+      "priority": 70,
+      "match": ["integrate.api.nvidia.com", "api.nvidia.com"],
+      "match_type": "suffix",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      },
+      "notes": "Reasoning support depends on model."
+    },
+    {
+      "id": "aihubmix",
+      "enabled": true,
+      "priority": 70,
+      "match": ["aihubmix.com"],
+      "match_type": "suffix",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "extra_body.reasoning.effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      }
+    },
+    {
+      "id": "mistral",
+      "enabled": true,
+      "priority": 60,
+      "match": ["api.mistral.ai"],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      },
+      "notes": "Mistral adjustable reasoning for supported models; guarded by model name."
+    },
+    {
+      "id": "modelscope_global",
+      "enabled": true,
+      "priority": 60,
+      "match": ["api-inference.modelscope.ai"],
+      "match_type": "exact",
+      "supports_reasoning": false,
+      "validation": "passthrough",
+      "notes": "Conservative default: do not send undocumented reasoning fields."
+    },
+    {
+      "id": "modelscope_cn",
+      "enabled": true,
+      "priority": 60,
+      "match": ["api-inference.modelscope.cn"],
+      "match_type": "exact",
+      "supports_reasoning": false,
+      "validation": "passthrough",
+      "notes": "Conservative default: do not send undocumented reasoning fields."
+    },
+    {
+      "id": "freetheai",
+      "enabled": true,
+      "priority": 60,
+      "match": ["freetheai.xyz"],
+      "match_type": "suffix",
+      "supports_reasoning": false,
+      "validation": "passthrough",
+      "notes": "Conservative default: do not send undocumented reasoning fields."
+    }
+  ]
+}

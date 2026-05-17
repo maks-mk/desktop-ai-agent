@@ -179,7 +179,7 @@ class RunStatusController:
         )
         self.window._summarize_in_progress = False
         self.window._run_start_time = time.time()
-        self.window._current_status_label = "Analyzing request"
+        self.window._current_status_label = "Working..."
         self.window._current_status_phase = "working"
 
         if self.window.current_turn is not None:
@@ -189,7 +189,7 @@ class RunStatusController:
             )
             self.window.transcript.notify_content_changed(force=True)
 
-        self.set_status_visual("Analyzing request…", busy=True)
+        self.set_status_visual("Working...", busy=True)
         self.window._realtime_timer.start(100)
 
     def on_status_changed(self, payload: dict) -> None:
@@ -303,7 +303,7 @@ class RunStatusController:
         self.window.stop_action_button.setVisible(busy)
 
         if busy:
-            self.set_status_visual("Working…", busy=True)
+            self.set_status_visual("Working...", busy=True)
         elif not self.window.awaiting_approval and not self.window.awaiting_user_choice:
             self.set_status_visual("Ready", success=True)
             self.window.status_meta.setText("")
