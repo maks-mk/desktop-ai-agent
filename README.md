@@ -281,6 +281,7 @@ START
 | `CHECKPOINT_BACKEND` | `sqlite` | `sqlite` или `memory` |
 | `CHECKPOINT_SQLITE_PATH` | `.agent_state/checkpoints.sqlite` | Путь к БД |
 | `SESSION_STATE_PATH` | `.agent_state/session.json` | Активная сессия |
+| `MODEL_PROFILE_CONFIG_PATH` | `.agent_state/config.json` | Файл профилей моделей и активного профиля |
 | `RUN_LOG_DIR` | `logs/runs` | Директория JSONL-логов |
 | `LOG_FILE` | `logs/agent.log` | Файл лога |
 | `PROMPT_PATH` | `prompt.txt` | Путь к системному промпту |
@@ -292,118 +293,46 @@ START
 |---|---|
 | `DEBUG` | Включить debug-режим |
 | `LOG_LEVEL` | Уровень логирования (`INFO`, `DEBUG`, `WARNING`) |
+| `DEBUG_REASONING_STREAM` | Отдельный подробный лог reasoning/thinking stream для диагностики провайдеров |
 | `STRICT_MODE` | Строгий режим: без догадок, точное выполнение |
 
 ---
 
 ## Структура Проекта
 
+Подробная карта модулей находится в [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md). Ниже — краткая рабочая схема.
+
 ```text
 .
-├── agent.py              # Сборка и маршрутизация LangGraph графа
-├── main.py               # Точка входа
-├── build.bat             # Сборка portable .exe
-├── prompt.txt            # Системный промпт агента
-├── prompt_dev.txt        # Dev-вариант промпта для отладки
-├── mcp.json              # Конфиг MCP-серверов
-├── env_example.txt       # Шаблон .env
+├── main.py                # Точка входа GUI
+├── agent.py               # Сборка LLM, tools и LangGraph workflow
+├── prompt.txt             # Основной системный промпт
+├── prompt_dev.txt         # Дополнительный dev/devops-промпт
+├── mcp.json               # Конфигурация MCP-серверов
+├── env_example.txt        # Шаблон .env
+├── provider_registry.json # Reasoning kwargs для OpenAI-compatible провайдеров
+├── provider_registry_guide.md
+├── build.bat              # Сборка portable .exe
 ├── requirements.txt
-├── core/                 # Ядро runtime (~31 модуль)
-│   ├── nodes/            # 11 узлов LangGraph (mixin-архитектура)
-│   │   ├── __init__.py   # AgentNodes — сборка всех mixin в единый класс
-│   │   ├── base.py       # BaseMixin — логирование, state introspection, turn_id
-│   │   ├── llm.py        # LLMMixin — вызов LLM, token streaming, tool binding
-│   │   ├── context.py    # ContextMixin — сборка контекста для LLM-промпта
-│   │   ├── tool_preflight.py  # ToolPreflightMixin — metadata, JSON-schema, loop detection, approval gate
-│   │   ├── protocol.py   # ProtocolMixin — tool issues, message filtering, error merging
-│   │   ├── summarize.py  # SummarizeMixin — compact history при превышении токенов
-│   │   ├── agent.py      # AgentMixin — фасад agent_node, result building
-│   │   ├── approval.py   # ApprovalMixin — interrupt для мутирующих операций
-│   │   ├── tools.py      # ToolsMixin — dispatch tool execution, parallel batching
-│   │   └── recovery.py   # RecoveryMixin — bounded recovery, self-correction ceiling
-│   ├── config.py         # Pydantic-settings конфигурация из .env
-│   ├── state.py          # TypedDict состояния графа
-│   ├── checkpointing.py  # SQLite / memory checkpoint store
-│   ├── context_builder.py # Сборка runtime-промпта (OS, shell, safety, recovery)
-│   ├── recovery_manager.py # Recovery strategies и retry logic
-│   ├── self_correction_engine.py # Repair fingerprints, strategy dispatch
-│   ├── tool_executor.py  # Async execution, parallel coordinator, batch runner
-│   ├── tool_policy.py   # ToolMetadata, approval rules
-│   ├── policy_engine.py  # Shell command classification (read-only / mutating / destructive)
-│   ├── safety_policy.py  # Workspace boundary, safety levels
-│   ├── model_fetcher.py  # Автозагрузка и фильтрация моделей из Gemini / OpenAI API
-│   ├── model_profiles.py # Профили моделей с переключением в GUI
-│   ├── api_key_rotation.py # Circular key-pool rotation without invalidation
-│   ├── session_store.py  # Persist сессий и индекса
-│   ├── session_utils.py  # Session helpers, ID generation
-│   ├── run_logger.py     # JSONL логирование каждого run
-│   ├── runtime_prompt_policy.py # Runtime-слой промпта (дата, ОС, политика)
-│   ├── text_utils.py     # Форматирование, compact, elide, truncate
-│   ├── message_context.py # Message context helper
-│   ├── message_utils.py  # Stringify, compact content
-│   ├── input_sanitizer.py # Очистка input от control-символов
-│   ├── multimodal.py     # Image input, base64, MIME detection
-│   ├── errors.py          # Error formatting, ErrorType
-│   ├── tool_args.py       # Canonicalize, inspect tool args
-│   ├── tool_results.py    # Parse tool execution results
-│   ├── tool_issues.py     # Build tool issues, fingerprints
-│   ├── node_errors.py     # Provider-specific errors
-│   ├── constants.py       # Константы промптов, лимитов
-│   ├── validation.py      # Validation helpers
-│   ├── fast_copy.py       # Clipboard-safe copy helpers
-│   └── utils.py           # Misc utilities
-├── tools/                # Встроенные инструменты и MCP-интеграция (7 файлов)
-│   ├── filesystem.py      # read_file, write_file, edit_file, list_directory, search, tail…
-│   ├── filesystem_impl/   # Низкоуровневая реализация filesystem-операций
-│   │   ├── __init__.py
-│   │   ├── manager.py     # FilesystemManager
-│   │   ├── editing.py     # Diff-based editing helpers
-│   │   └── reader.py      # File reading with bounds
-│   ├── local_shell.py     # cli_exec, shell streaming, command classification
-│   ├── search_tools.py    # web_search, fetch_content, batch_web_search (Tavily)
-│   ├── system_tools.py    # get_system_info, get_public_ip, network_info
-│   ├── process_tools.py   # run_background_process, process management
-│   ├── user_input_tool.py # request_user_input — блокирующий выбор пользователя
-│   └── tool_registry.py   # ToolRegistry — загрузка, metadata, MCP clients
-├── ui/                    # Qt GUI (~13 модулей)
-│   ├── main_window.py     # Entry point re-export
-│   ├── main_window_state.py # State machine окна (busy, initialized, error)
-│   ├── runtime.py         # Runtime snapshot builder
-│   ├── runtime_payloads.py # Payload builders для GUI events
-│   ├── runtime_session.py # Session coordination, load/save
-│   ├── runtime_worker.py  # Async worker thread, event loop для графа
-│   ├── streaming.py       # StreamEvent, event routing
-│   ├── theme.py           # QSS stylesheet, палитра, icons
-│   ├── tool_message_utils.py # Tool message formatting для GUI
-│   ├── visibility.py      # Widget visibility helpers
-│   ├── window_components/ # Builders и controllers главного окна (7 файлов)
-│   │   ├── __init__.py
-│   │   ├── main_window.py      # MainWindow — главное окно, menu, layout
-│   │   ├── inspector_controller.py # Inspector panel controller
-│   │   ├── sidebar_controller.py   # Sidebar controller
-│   │   ├── status_bar_manager.py   # Status bar manager
-│   │   ├── menu_builder.py         # Menu builder
-│   │   └── workspace_builder.py    # Workspace layout builder
-│   └── widgets/           # Виджеты интерфейса (11 файлов)
-│       ├── __init__.py    # Экспорт всех public-классов
-│       ├── transcript.py  # ChatTranscriptWidget, ConversationTurnWidget
-│       ├── tools.py       # ToolCardWidget, CliExecWidget
-│       ├── tool_group.py  # ToolGroupWidget — контейнер для группы tool cards
-│       ├── composer.py    # ComposerTextEdit — редактор ввода с @-mentions
-│       ├── messages.py    # AssistantMessageWidget, UserMessageWidget, NoticeWidget…
-│       ├── foundation.py  # Базовые виджеты: CollapsibleSection, CodeBlockWidget, ElidedLabel…
-│       ├── attachments.py # ImageAttachmentChipWidget, ImageAttachmentStripWidget
-│       ├── dialogs.py     # ApprovalDialog, ModelSettingsDialog, InfoPopupDialog
-│       ├── panels.py      # OverviewPanelWidget, InspectorPanelWidget, ToolsPanelWidget
-│       └── sidebar.py     # SessionSidebarWidget, SessionListModel
-└── tests/                # 19 тестовых файлов (~370K байт)
+├── core/                  # Ядро агента: config, state, policies, recovery, provider registry
+│   └── nodes/             # Узлы LangGraph: context, llm, agent, tools, approval, recovery
+├── tools/                 # Filesystem, shell, search, system, process, user input, MCP registry
+│   └── filesystem_impl/   # Низкоуровневые filesystem helpers
+├── ui/                    # PySide6 GUI, runtime worker, streaming/status handling
+│   ├── window_components/ # Главное окно, sidebar, inspector, menu, status bar
+│   └── widgets/           # Transcript, composer, messages, tool cards, dialogs, panels
+├── docs/
+│   └── PROJECT_STRUCTURE.md
+├── tests/                 # Runtime, UI, tools, provider registry, logging, policies
+├── .agent_state/          # Локальное состояние, профили, checkpoints
+└── logs/                  # JSONL/runtime/debug logs
 ```
 
 ---
 
 ## Тесты
 
-19 тестовых файлов:
+20 тестовых файлов:
 
 | Файл | Что покрывает |
 |---|---|
@@ -419,6 +348,7 @@ START
 | `test_session_utils.py` | Session ID generation, index management |
 | `test_runtime_session_coordination.py` | Session state coordination, load/save |
 | `test_tooling_refactor.py` | Tool registry, MCP loading, tool metadata |
+| `test_provider_registry.py` | Matching OpenAI-compatible провайдеров и reasoning kwargs |
 | `test_input_sanitizer.py` | Input sanitization, truncation, control chars |
 | `test_logging_config.py` | Log configuration, sensitive data filtering |
 | `test_intent_engine.py` | Intent parsing, routing |
