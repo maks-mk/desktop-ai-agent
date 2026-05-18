@@ -96,6 +96,7 @@ def build_stylesheet() -> str:
     model_dialog_bg = blend_hex(SURFACE_BG, "#FFFFFF", 0.03)
     model_dialog_card = blend_hex(SURFACE_CARD, "#FFFFFF", 0.03)
     model_dialog_card_alt = blend_hex(SURFACE_CARD, SURFACE_ALT, 0.28)
+    model_dialog_editor = blend_hex(model_dialog_card, "#FFFFFF", 0.035)
     model_dialog_soft = blend_hex(SURFACE_ALT, "#FFFFFF", 0.04)
     model_dialog_border = blend_hex(BORDER, "#FFFFFF", 0.10)
     model_dialog_text = TEXT_PRIMARY
@@ -239,6 +240,11 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD + 6}px;
     }}
 
+    QFrame#ModelSettingsPane[paneRole="editor"] {{
+        background: {model_dialog_editor};
+        border: 1px solid {blend_hex(model_dialog_border, "#FFFFFF", 0.08)};
+    }}
+
     QFrame#ModelSettingsHeroCard {{
         background: {model_dialog_card};
         border: 1px solid {model_dialog_border};
@@ -282,12 +288,30 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD + 4}px;
     }}
 
+    QFrame#ModelSettingsPane[paneRole="editor"] {{
+        background: {model_dialog_editor};
+        border: 1px solid {blend_hex(model_dialog_border, "#FFFFFF", 0.08)};
+    }}
+
     QFrame#ModelSettingsFormCard,
-    QFrame#ModelSettingsSummaryCard,
     QFrame#ModelSettingsHelperCard {{
         background: {model_dialog_card};
         border: 1px solid {model_dialog_border};
         border-radius: {SOFT_RADIUS_MD + 2}px;
+    }}
+
+    QFrame#ModelSettingsSelectedProfileHeader {{
+        background: {blend_hex(model_dialog_editor, "#FFFFFF", 0.035)};
+        border: 1px solid {blend_hex(model_dialog_border, "#FFFFFF", 0.07)};
+        border-radius: {SOFT_RADIUS_MD + 2}px;
+    }}
+
+    QLabel#ModelSettingsSelectedProfileTitle {{
+        color: {model_dialog_text};
+        background: transparent;
+        font-size: 11pt;
+        font-weight: 760;
+        padding: 0px;
     }}
 
     QLabel#ModelSettingsSummaryLabel {{
@@ -353,14 +377,33 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD + 4}px;
     }}
 
-    QWidget#ModelProfileRowCard[selectedProfile="true"] {{
-        background: {model_dialog_selected};
-        border: 1px solid {model_dialog_selected_border};
-    }}
-
     QWidget#ModelProfileRowCard[disabledProfile="true"] {{
         background: {model_dialog_disabled};
         border: 1px solid {model_dialog_border};
+    }}
+
+    QWidget#ModelProfileRowCard[selectedProfile="true"] {{
+        background: {model_dialog_editor};
+        border: 1px solid {model_dialog_selected_border};
+        border-right: 3px solid {model_dialog_selected_border};
+    }}
+
+    QWidget#ModelProfileRowCard[selectedProfile="true"][disabledProfile="true"] {{
+        background: {blend_hex(model_dialog_editor, model_dialog_disabled, 0.45)};
+        border: 1px solid {blend_hex(model_dialog_selected_border, model_dialog_border, 0.40)};
+        border-right: 3px solid {blend_hex(model_dialog_selected_border, model_dialog_border, 0.28)};
+    }}
+
+    QFrame#ModelProfileTabRail {{
+        background: transparent;
+        border: none;
+        border-radius: 1px;
+        min-width: 3px;
+        max-width: 3px;
+    }}
+
+    QFrame#ModelProfileTabRail[selectedProfile="true"] {{
+        background: {model_dialog_selected_border};
     }}
 
     QLabel#ModelProfileItemTitle {{

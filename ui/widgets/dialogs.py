@@ -210,6 +210,7 @@ class ModelSettingsDialog(QDialog):
 
         left_container = QFrame()
         left_container.setObjectName("ModelSettingsPane")
+        left_container.setProperty("paneRole", "library")
         left = QVBoxLayout(left_container)
         left.setContentsMargins(8, 8, 8, 8)
         left.setSpacing(6)
@@ -217,7 +218,7 @@ class ModelSettingsDialog(QDialog):
         left_header = QHBoxLayout()
         left_header.setContentsMargins(0, 0, 0, 0)
         left_header.setSpacing(4)
-        left_label = QLabel("Library")
+        left_label = QLabel("Profiles")
         left_label.setObjectName("ModelSettingsSectionTitle")
         left_header.addWidget(left_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
         left_header.addStretch(1)
@@ -259,6 +260,7 @@ class ModelSettingsDialog(QDialog):
 
         right_container = QFrame()
         right_container.setObjectName("ModelSettingsPane")
+        right_container.setProperty("paneRole", "editor")
         right = QVBoxLayout(right_container)
         right.setContentsMargins(8, 8, 8, 8)
         right.setSpacing(6)
@@ -266,13 +268,9 @@ class ModelSettingsDialog(QDialog):
         right_header = QHBoxLayout()
         right_header.setContentsMargins(0, 0, 0, 0)
         right_header.setSpacing(4)
-        right_label = QLabel("Editor")
+        right_label = QLabel("Selected profile")
         right_label.setObjectName("ModelSettingsSectionTitle")
         right_header.addWidget(right_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.profile_state_chip = QLabel("No profile selected")
-        self.profile_state_chip.setObjectName("ModelSettingsChip")
-        right_header.addWidget(self.profile_state_chip, 0, Qt.AlignLeft | Qt.AlignVCenter)
         right_header.addStretch(1)
 
         self.duplicate_button = QPushButton("Duplicate")
@@ -282,10 +280,30 @@ class ModelSettingsDialog(QDialog):
         right_header.addWidget(self.duplicate_button, 0, Qt.AlignRight | Qt.AlignVCenter)
         right.addLayout(right_header)
 
+        self.selected_profile_header = QFrame()
+        self.selected_profile_header.setObjectName("ModelSettingsSelectedProfileHeader")
+        selected_header_layout = QVBoxLayout(self.selected_profile_header)
+        selected_header_layout.setContentsMargins(8, 7, 8, 7)
+        selected_header_layout.setSpacing(5)
+
+        selected_title_row = QHBoxLayout()
+        selected_title_row.setContentsMargins(0, 0, 0, 0)
+        selected_title_row.setSpacing(6)
+
+        self.selected_profile_title = QLabel("No profile selected")
+        self.selected_profile_title.setObjectName("ModelSettingsSelectedProfileTitle")
+        self.selected_profile_title.setWordWrap(True)
+        selected_title_row.addWidget(self.selected_profile_title, 1, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.profile_state_chip = QLabel("No profile selected")
+        self.profile_state_chip.setObjectName("ModelSettingsChip")
+        selected_title_row.addWidget(self.profile_state_chip, 0, Qt.AlignRight | Qt.AlignVCenter)
+        selected_header_layout.addLayout(selected_title_row)
+
         self.form_hint = QLabel("Select a profile to review credentials, key rotation, model settings, and image support.")
         self.form_hint.setObjectName("ModelSettingsMeta")
         self.form_hint.setWordWrap(True)
-        right.addWidget(self.form_hint)
+        selected_header_layout.addWidget(self.form_hint)
 
         self.save_state_label = QLabel("")
         self.save_state_label.setObjectName("ModelSettingsMeta")
@@ -293,11 +311,9 @@ class ModelSettingsDialog(QDialog):
         self.save_state_label.setVisible(False)
         right.addWidget(self.save_state_label)
 
-        self.summary_card = QFrame()
-        self.summary_card.setObjectName("ModelSettingsSummaryCard")
-        summary_layout = QHBoxLayout(self.summary_card)
-        summary_layout.setContentsMargins(6, 4, 6, 4)
-        summary_layout.setSpacing(4)
+        summary_layout = QHBoxLayout()
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
 
         self.summary_provider = QLabel("Provider: —")
         self.summary_provider.setObjectName("ModelSettingsSummaryLabel")
@@ -308,7 +324,8 @@ class ModelSettingsDialog(QDialog):
         summary_layout.addWidget(self.summary_provider)
         summary_layout.addWidget(self.summary_model, 1)
         summary_layout.addWidget(self.summary_images)
-        right.addWidget(self.summary_card)
+        selected_header_layout.addLayout(summary_layout)
+        right.addWidget(self.selected_profile_header)
 
         editor_scroll = QScrollArea()
         editor_scroll.setObjectName("ModelSettingsScrollArea")
@@ -512,7 +529,7 @@ class ModelSettingsDialog(QDialog):
         self.api_key_rotation_section = CollapsibleSection(
             "API key rotation",
             rotation_content,
-            expanded=True,
+            expanded=False,
             content_margins=(0, 0, 0, 0),
         )
         editor_layout.addWidget(self.api_key_rotation_section)
@@ -1137,6 +1154,11 @@ class ModelSettingsDialog(QDialog):
             widget.setProperty("disabledProfile", not is_enabled)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+            rail = widget.findChild(QFrame, "ModelProfileTabRail")
+            if rail is not None:
+                rail.setProperty("selectedProfile", is_selected)
+                rail.style().unpolish(rail)
+                rail.style().polish(rail)
 
     def _toggle_api_key_visibility(self) -> None:
         reveal = self.api_key_edit.echoMode() != QLineEdit.Normal
@@ -1206,11 +1228,12 @@ class ModelSettingsDialog(QDialog):
     def _build_profile_item_widget(self, profile: dict[str, Any], row: int) -> QWidget:
         container = QWidget()
         container.setObjectName("ModelProfileRowCard")
+        container.setAttribute(Qt.WA_StyledBackground, True)
         is_enabled = bool(profile.get("enabled", True))
         container.setProperty("disabledProfile", not is_enabled)
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(14, 10, 12, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 10, 8, 10)
+        layout.setSpacing(10)
 
         text_column = QVBoxLayout()
         text_column.setContentsMargins(0, 0, 0, 0)
@@ -1276,6 +1299,12 @@ class ModelSettingsDialog(QDialog):
         enabled_switch.pressed.connect(lambda target_row=row: self.profile_list.setCurrentRow(target_row))
         enabled_switch.toggled.connect(lambda checked, target_row=row: self._toggle_profile_enabled(target_row, checked))
         layout.addWidget(enabled_switch, 0, Qt.AlignRight | Qt.AlignVCenter)
+
+        tab_rail = QFrame()
+        tab_rail.setObjectName("ModelProfileTabRail")
+        tab_rail.setFixedWidth(3)
+        tab_rail.setProperty("selectedProfile", False)
+        layout.addWidget(tab_rail)
         container.ensurePolished()
         title_label.ensurePolished()
         details_label.ensurePolished()
@@ -1316,6 +1345,7 @@ class ModelSettingsDialog(QDialog):
             self._selected_row = -1
             self._set_form_enabled(False)
             self.form_hint.setText("Add a profile to start configuring models.")
+            self.selected_profile_title.setText("No profile selected")
             self.profile_state_chip.setText("No profile selected")
             self.summary_provider.setText("Provider: —")
             self.summary_model.setText("Model: —")
@@ -1354,6 +1384,7 @@ class ModelSettingsDialog(QDialog):
             self._set_form_enabled(False)
             self._set_model_state(ModelLoadState.IDLE)
             self.form_hint.setText("Select a profile and edit keys, model settings, and image support on the right.")
+            self.selected_profile_title.setText("No profile selected")
             self.profile_state_chip.setText("No profile selected")
             self.summary_provider.setText("Provider: —")
             self.summary_model.setText("Model: —")
@@ -1386,6 +1417,7 @@ class ModelSettingsDialog(QDialog):
         self._selected_row = row
         profile_id = str(profile.get("id") or "").strip() or "(unnamed)"
         status = "enabled" if bool(profile.get("enabled", True)) else "disabled"
+        self.selected_profile_title.setText(profile_id)
         self.form_hint.setText(f"Editing profile: {profile_id} ({status})")
         is_active = bool(profile_id != "(unnamed)" and profile_id == self._active_profile)
         self.profile_state_chip.setText("Active profile" if is_active else status.title())
@@ -1451,6 +1483,10 @@ class ModelSettingsDialog(QDialog):
             enabled = "yes" if bool(self._profiles[target_row].get("enabled", True)) else "no"
             item.setToolTip(f"Provider: {provider_text}\nModel: {model_name}\nEnabled: {enabled}".strip())
         if target_row == self._selected_row:
+            profile_id = str(self._profiles[target_row].get("id") or "").strip() or "(unnamed)"
+            status = "enabled" if bool(self._profiles[target_row].get("enabled", True)) else "disabled"
+            self.selected_profile_title.setText(profile_id)
+            self.form_hint.setText(f"Editing profile: {profile_id} ({status})")
             self.summary_provider.setText(f"Provider: {provider or '—'}")
             self.summary_model.setText(f"Model: {self._profiles[target_row].get('model') or '—'}")
             self.summary_images.setText(

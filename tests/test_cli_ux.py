@@ -2835,10 +2835,15 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsNotNone(dialog.save_button)
         self.assertFalse(dialog.save_button.isEnabled())
         self.assertIn("Add a profile", dialog.form_hint.text())
+        self.assertFalse(dialog.api_key_rotation_section.content_container.isVisible())
 
         dialog._add_profile()
         self._process_events()
         self.assertTrue(dialog.save_button.isEnabled())
+        selected_item = dialog.profile_list.itemWidget(dialog.profile_list.item(dialog._current_row()))
+        self.assertIsNotNone(selected_item)
+        self.assertTrue(bool(selected_item.property("selectedProfile")))
+        self.assertEqual(dialog.selected_profile_title.text(), "(unnamed)")
 
     def test_model_settings_dialog_filters_model_popup_without_changing_selection(self):
         payload = {
