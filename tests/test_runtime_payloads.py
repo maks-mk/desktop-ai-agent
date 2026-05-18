@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from ui.runtime_payloads import (
     append_project_label,
+    build_summary_progress_payload,
     build_transcript_payload,
     build_user_choice_payload,
     generate_chat_title,
@@ -12,6 +13,36 @@ from ui.runtime_payloads import (
 
 
 class RuntimePayloadTests(unittest.TestCase):
+    def test_build_summary_progress_payload_reports_context_budget(self):
+        config = type("Config", (), {"summary_threshold": 100, "summary_keep_last": 4})()
+
+        payload = build_summary_progress_payload(
+            config,
+            {"messages": [HumanMessage(content="hello world")], "summary": ""},
+        )
+
+        self.assertGreater(payload["estimated_tokens"], 0)
+        self.assertEqual(payload["threshold"], 100)
+        self.assertEqual(payload["remaining_tokens"], max(0, 100 - payload["estimated_tokens"]))
+        self.assertGreaterEqual(payload["progress"], 0.0)
+        self.assertLessEqual(payload["progress"], 1.0)
+        self.assertFalse(payload["will_summarize"])
+
+    def test_build_summary_progress_payload_marks_ready_to_summarize(self):
+        config = type("Config", (), {"summary_threshold": 10, "summary_keep_last": 1})()
+        messages = [
+            HumanMessage(content="token " * 1200),
+            AIMessage(content="old answer " * 1200),
+            HumanMessage(content="new question"),
+        ]
+
+        payload = build_summary_progress_payload(config, {"messages": messages})
+
+        self.assertEqual(payload["threshold"], 10)
+        self.assertEqual(payload["remaining_tokens"], 0)
+        self.assertEqual(payload["progress"], 1.0)
+        self.assertTrue(payload["will_summarize"])
+
     def test_generate_chat_title_strips_common_prefixes_and_limits_length(self):
         self.assertEqual(
             generate_chat_title("Помоги скачать и настроить Apache на Windows"),

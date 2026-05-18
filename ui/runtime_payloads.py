@@ -18,6 +18,7 @@ from core.session_store import (
     SessionStore,
     normalize_project_path,
 )
+from core.summarize_policy import estimate_tokens, should_summarize
 from core.text_utils import build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
@@ -166,6 +167,38 @@ def build_runtime_snapshot(config: AgentConfig, tool_registry, snapshot: Session
         "config_mode": "debug" if config.debug else "standard",
         "runtime_lines": tool_registry.get_runtime_status_lines(),
         "tools": tools,
+    }
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_summary_progress_payload(config: AgentConfig, state_values: dict[str, Any] | None) -> dict[str, Any]:
+    values = state_values if isinstance(state_values, dict) else {}
+    messages = list(values.get("messages", []) or [])
+    threshold = max(0, _safe_int(getattr(config, "summary_threshold", 0), 0))
+    estimated_tokens = estimate_tokens(messages) if messages else 0
+    progress = (estimated_tokens / threshold) if threshold else 0.0
+    has_summary = bool(str(values.get("summary") or "").strip())
+    keep_last = _safe_int(getattr(config, "summary_keep_last", 0), 0)
+    will_summarize = should_summarize(
+        messages,
+        threshold=threshold,
+        keep_last=keep_last,
+        has_summary=has_summary,
+    ) if messages and threshold > 0 else False
+    return {
+        "estimated_tokens": estimated_tokens,
+        "threshold": threshold,
+        "remaining_tokens": max(0, threshold - estimated_tokens),
+        "progress": max(0.0, min(1.0, progress)),
+        "message_count": len(messages),
+        "has_summary": has_summary,
+        "will_summarize": will_summarize,
     }
 
 
@@ -415,7 +448,7 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
     }
 
 
-async def load_transcript_payload(agent_app, thread_id: str, snapshot: SessionSnapshot) -> dict[str, Any]:
+async def load_state_values(agent_app, thread_id: str) -> dict[str, Any]:
     config = {"configurable": {"thread_id": thread_id}}
     async_get_state = getattr(agent_app, "aget_state", None)
     if callable(async_get_state):
@@ -423,7 +456,12 @@ async def load_transcript_payload(agent_app, thread_id: str, snapshot: SessionSn
     else:
         state = agent_app.get_state(config)
     values = getattr(state, "values", {}) if state is not None else {}
-    return build_transcript_payload(values if isinstance(values, dict) else {}, last_run_stats=getattr(snapshot, "last_run_stats", ""))
+    return values if isinstance(values, dict) else {}
+
+
+async def load_transcript_payload(agent_app, thread_id: str, snapshot: SessionSnapshot) -> dict[str, Any]:
+    values = await load_state_values(agent_app, thread_id)
+    return build_transcript_payload(values, last_run_stats=getattr(snapshot, "last_run_stats", ""))
 
 
 def summarize_approval_request(req_tools: list[dict]) -> ApprovalSummary:
@@ -548,8 +586,15 @@ async def build_ui_payload(
         find_active_profile(normalized_profiles),
         model_capabilities if model_capabilities is not None else getattr(tool_registry, "model_capabilities", None),
     )
+    state_values: dict[str, Any] = {}
+    if agent_app is not None:
+        try:
+            state_values = await load_state_values(agent_app, snapshot.thread_id)
+        except Exception:
+            state_values = {}
     payload = {
         "snapshot": runtime_snapshot,
+        "summary_progress": build_summary_progress_payload(config, state_values),
         "tools": runtime_snapshot["tools"],
         "help_markdown": build_help_markdown(),
         "sessions": serialize_session_entries(store.list_sessions()),
@@ -558,7 +603,10 @@ async def build_ui_payload(
         "model_capabilities": effective_capabilities,
     }
     if include_transcript and agent_app is not None:
-        payload["transcript"] = await load_transcript_payload(agent_app, snapshot.thread_id, snapshot)
+        payload["transcript"] = build_transcript_payload(
+            state_values,
+            last_run_stats=getattr(snapshot, "last_run_stats", ""),
+        )
     return payload
 
 

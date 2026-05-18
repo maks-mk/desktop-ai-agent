@@ -499,7 +499,9 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         self.assertFalse(self.window.model_image_badge.isHidden())
-        self.assertEqual(self.window.model_image_badge.text(), "No image input")
+        self.assertEqual(self.window.model_image_badge.text(), "")
+        self.assertFalse(self.window.model_image_badge.pixmap().isNull())
+        self.assertIn("Image input unavailable", self.window.model_image_badge.toolTip())
         self.assertEqual(self.window.draft_image_attachments, [])
         self.assertFalse(self.window.composer_notice_label.isHidden())
         self.assertIn("does not support image input", self.window.composer_notice_label.text())

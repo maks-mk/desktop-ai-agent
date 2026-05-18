@@ -799,8 +799,8 @@ def build_stylesheet() -> str:
         color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.18)};
         background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.04)};
         border: none;
-        border-radius: {SOFT_RADIUS_SM}px;
-        padding: 4px 8px;
+        border-radius: {SOFT_RADIUS_MD + 8}px;
+        padding: 0px;
         font-size: 8.6pt;
         font-weight: 600;
     }}

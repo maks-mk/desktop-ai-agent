@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import qtawesome as qta
-from PySide6.QtCore import QMimeData, QRegularExpression, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat
+from PySide6.QtCore import QMimeData, QRectF, QRegularExpression, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget
 
 from ui.theme import (
@@ -165,6 +165,88 @@ def _fa_icon(name: str, *, color: str = TEXT_MUTED, size: int = 14, **kwargs: An
     if pixmap.isNull():
         return icon
     return QIcon(pixmap)
+
+
+class SummaryProgressRing(QWidget):
+    """Compact context-usage indicator for the composer controls."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._progress = 0.0
+        self._estimated_tokens = 0
+        self._threshold = 0
+        self._remaining_tokens = 0
+        self._will_summarize = False
+        self.setObjectName("SummaryProgressRing")
+        self.setFixedSize(18, 18)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.setAccessibleName("Auto-summary progress")
+        self.setAccessibleDescription("Shows how close the current chat context is to automatic summarization")
+        self.set_summary_progress({})
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(18, 18)
+
+    def set_summary_progress(self, payload: dict[str, Any] | None) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        threshold = max(0, int(data.get("threshold", 0) or 0))
+        estimated = max(0, int(data.get("estimated_tokens", 0) or 0))
+        remaining = max(0, int(data.get("remaining_tokens", max(0, threshold - estimated)) or 0))
+        progress = float(data.get("progress", (estimated / threshold) if threshold else 0.0) or 0.0)
+
+        self._threshold = threshold
+        self._estimated_tokens = estimated
+        self._remaining_tokens = remaining
+        self._progress = max(0.0, min(1.0, progress))
+        self._will_summarize = bool(data.get("will_summarize"))
+        self.setVisible(threshold > 0)
+        self.setToolTip(self._build_tooltip())
+        self.update()
+
+    def _build_tooltip(self) -> str:
+        if self._threshold <= 0:
+            return "Auto-summary is disabled."
+        if self._will_summarize:
+            return (
+                "Auto-summary is ready for the next agent step.\n"
+                f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens."
+            )
+        return (
+            f"Auto-summary: {self._remaining_tokens:,} estimated tokens left.\n"
+            f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens.\n"
+            "A soft guard may delay compression until there is enough older context to summarize."
+        )
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        _ = event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        side = min(self.width(), self.height())
+        pen_width = 2.0
+        margin = pen_width / 2 + 1
+        rect = QRectF(
+            (self.width() - side) / 2 + margin,
+            (self.height() - side) / 2 + margin,
+            side - (margin * 2),
+            side - (margin * 2),
+        )
+
+        track = QPen(QColor(BORDER), pen_width)
+        track.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(track)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        if self._progress <= 0:
+            return
+
+        color = AMBER_WARNING if self._progress >= 0.85 else ACCENT_BLUE
+        if self._will_summarize:
+            color = SUCCESS_GREEN
+        arc = QPen(QColor(color), pen_width)
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc)
+        painter.drawArc(rect, 90 * 16, -int(360 * 16 * self._progress))
 
 
 def _collapsed_user_message_text(text: str) -> tuple[str, bool]:

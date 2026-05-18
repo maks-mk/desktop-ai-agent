@@ -26,6 +26,7 @@ from ui.widgets import (
     ImageAttachmentStripWidget,
     InspectorPanelWidget,
     SessionSidebarWidget,
+    SummaryProgressRing,
     TRANSCRIPT_MAX_WIDTH,
     UserChoiceCardWidget,
     _fa_icon,
@@ -61,6 +62,7 @@ class WorkspaceBuildResult:
     model_image_badge: QLabel
     no_models_label: QLabel
     open_settings_inline_button: QPushButton
+    summary_progress_ring: SummaryProgressRing
     send_button: QPushButton
     stop_action_button: QPushButton
     inspector_container: QFrame
@@ -190,8 +192,14 @@ class WorkspaceBuilder:
         apply_popup_shadow(model_chip_menu)
         control_row.addWidget(model_chip, 0, Qt.AlignVCenter)
 
-        model_image_badge = QLabel("No image input")
+        model_image_badge = QLabel()
         model_image_badge.setObjectName("ComposerCapabilityBadge")
+        model_image_badge.setPixmap(_fa_icon("mdi6.image-off-outline", color=TEXT_MUTED, size=14).pixmap(14, 14))
+        model_image_badge.setFixedSize(28, 28)
+        model_image_badge.setAlignment(Qt.AlignCenter)
+        model_image_badge.setToolTip("Image input unavailable for this model")
+        model_image_badge.setAccessibleName("Image input unavailable")
+        model_image_badge.setAccessibleDescription("The active model profile does not accept image attachments")
         model_image_badge.setVisible(False)
         control_row.addWidget(model_image_badge, 0, Qt.AlignVCenter)
 
@@ -207,6 +215,9 @@ class WorkspaceBuilder:
         control_row.addWidget(open_settings_inline_button, 0, Qt.AlignVCenter)
 
         control_row.addStretch(1)
+
+        summary_progress_ring = SummaryProgressRing()
+        control_row.addWidget(summary_progress_ring, 0, Qt.AlignVCenter)
 
         send_button = QPushButton(_fa_icon("fa5s.arrow-up", color="#08090B", size=14), "")
         send_button.setObjectName("ComposerSendButton")
@@ -276,6 +287,7 @@ class WorkspaceBuilder:
             model_image_badge=model_image_badge,
             no_models_label=no_models_label,
             open_settings_inline_button=open_settings_inline_button,
+            summary_progress_ring=summary_progress_ring,
             send_button=send_button,
             stop_action_button=stop_action_button,
             inspector_container=inspector_container,

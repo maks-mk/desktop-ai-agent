@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         self.model_image_badge = refs.model_image_badge
         self.no_models_label = refs.no_models_label
         self.open_settings_inline_button = refs.open_settings_inline_button
+        self.summary_progress_ring = refs.summary_progress_ring
         self.send_button = refs.send_button
         self.stop_action_button = refs.stop_action_button
         self.inspector_container = refs.inspector_container
@@ -569,6 +570,7 @@ class MainWindow(QMainWindow):
         self.composer.set_history_session(self.active_session_id)
         self.overview_panel.set_snapshot(self.current_snapshot)
         self._update_env_info(self.current_snapshot)
+        self.summary_progress_ring.set_summary_progress(payload.get("summary_progress"))
         tools = payload.get("tools", self.current_snapshot.get("tools", []))
         new_hash = hash(tuple(t.get("name", "") for t in tools))
         if new_hash != self._tools_hash:

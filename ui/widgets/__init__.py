@@ -1,7 +1,7 @@
 from .attachments import ImageAttachmentChipWidget, ImageAttachmentStripWidget
 from .composer import ComposerTextEdit
 from .dialogs import ApprovalDialog, ModelSettingsDialog
-from .foundation import TRANSCRIPT_MAX_WIDTH, _fa_icon
+from .foundation import TRANSCRIPT_MAX_WIDTH, SummaryProgressRing, _fa_icon
 from .messages import (
     ApprovalRequestCardWidget,
     AssistantMessageWidget,
@@ -36,6 +36,7 @@ __all__ = [
     "SessionListModel",
     "SessionSidebarWidget",
     "StatusIndicatorWidget",
+    "SummaryProgressRing",
     "ToolCardWidget",
     "ToolGroupWidget",
     "ToolsPanelWidget",
