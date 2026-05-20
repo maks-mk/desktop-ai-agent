@@ -147,6 +147,26 @@
       "notes": "Conservative default: do not send undocumented reasoning fields."
     },
     {
+      "id": "freemodel",
+      "enabled": true,
+      "priority": 60,
+      "match": ["api.freemodel.dev"],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning.effort",
+        "allowed_values": ["minimal", "low", "medium", "high"],
+        "value_map": {
+          "xhigh": "high"
+        },
+        "extra_fields": {
+          "reasoning.summary": "auto"
+        }
+      },
+      "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through freemodel.dev."
+    },
+    {
       "id": "freetheai",
       "enabled": true,
       "priority": 60,

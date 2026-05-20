@@ -20,6 +20,11 @@ from core.provider_registry import ProviderRegistry, build_reasoning_kwargs
 from core.reasoning_debug import debug_event, elapsed_since, log_unknown_fields, now, preview_value
 from core.run_logger import JsonlRunLogger
 from core.state import AgentState
+from core.turn_outcomes import (
+    TURN_OUTCOME_RECOVER_AGENT,
+    TURN_OUTCOME_RUN_TOOLS,
+    normalize_turn_outcome,
+)
 from tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger("agent")
@@ -958,11 +963,11 @@ def create_agent_workflow(
             logger.warning("Agent node returned no messages; ending turn safely.")
             return END
 
-        turn_outcome = str(state.get("turn_outcome") or "").strip().lower()
+        turn_outcome = normalize_turn_outcome(state.get("turn_outcome"))
         has_open_tool_issue = bool(state.get("open_tool_issue"))
         has_protocol_error = bool(state.get("has_protocol_error"))
 
-        if tools_enabled and turn_outcome == "run_tools":
+        if tools_enabled and turn_outcome == TURN_OUTCOME_RUN_TOOLS:
             if steps >= config.max_loops:
                 logger.warning(
                     "Loop guard reached at step %s/%s with pending tool calls. Routing to recovery.",
@@ -981,7 +986,7 @@ def create_agent_workflow(
             )
             return "recovery"
 
-        if turn_outcome == "recover_agent" or has_open_tool_issue or has_protocol_error:
+        if turn_outcome == TURN_OUTCOME_RECOVER_AGENT or has_open_tool_issue or has_protocol_error:
             return "recovery"
 
         return END
@@ -992,7 +997,7 @@ def create_agent_workflow(
         return "update_step"
 
     def route_after_recovery(state: AgentState):
-        if state.get("turn_outcome") == "recover_agent":
+        if normalize_turn_outcome(state.get("turn_outcome")) == TURN_OUTCOME_RECOVER_AGENT:
             return "update_step"
         return END
 

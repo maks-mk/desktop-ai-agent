@@ -9,6 +9,11 @@ from core.tool_args import canonicalize_tool_args
 from core.constants import TOOL_ISSUE_UI_NOTICE
 from core.message_utils import stringify_content
 from core.text_tool_calls import extract_text_tool_calls
+from core.turn_outcomes import (
+    TURN_OUTCOME_FINISH_TURN,
+    TURN_OUTCOME_RECOVER_AGENT,
+    TURN_OUTCOME_RUN_TOOLS,
+)
 
 _GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY = "__gemini_function_call_thought_signatures__"
 
@@ -79,13 +84,37 @@ class AgentMixin:
                     id_prefix=f"txttc{max(0, int(turn_id or 0)) % 100:02d}",
                 )
                 if recovered_tool_calls.tool_calls:
-                    response = response.model_copy(
-                        update={
-                            "content": recovered_tool_calls.cleaned_text or "I will use the requested tool.",
-                            "tool_calls": recovered_tool_calls.tool_calls,
-                        }
-                    )
-                    t_calls = list(recovered_tool_calls.tool_calls)
+                    if bool(getattr(self.config, "enable_text_tool_call_recovery", False)):
+                        response = response.model_copy(
+                            update={
+                                "content": recovered_tool_calls.cleaned_text or "I will use the requested tool.",
+                                "tool_calls": recovered_tool_calls.tool_calls,
+                            }
+                        )
+                        t_calls = list(recovered_tool_calls.tool_calls)
+                    else:
+                        tool_names = [
+                            str(tool_call.get("name") or "").strip()
+                            for tool_call in recovered_tool_calls.tool_calls
+                            if str(tool_call.get("name") or "").strip()
+                        ]
+                        first_args = canonicalize_tool_args(recovered_tool_calls.tool_calls[0].get("args"))
+                        protocol_error = (
+                            "INTERNAL TOOL PROTOCOL ERROR: the model emitted a textual tool call marker instead of "
+                            "a structured tool_calls payload. Textual tool-call recovery is disabled. If a tool is "
+                            "still needed, retry with a fresh structured tool call only."
+                        )
+                        protocol_issue = self._build_protocol_open_tool_issue(
+                            current_turn_id=turn_id,
+                            summary=protocol_error,
+                            reason="textual_tool_call_disabled",
+                            source="agent",
+                            tool_names=tool_names,
+                            tool_args=first_args,
+                            details={"recovered_textual_tool_call_count": len(recovered_tool_calls.tool_calls)},
+                            response_preview=stringify_content(response.content),
+                        )
+                        response = response.model_copy(update={"content": protocol_error, "tool_calls": []})
 
             missing_fields = [
                 tc for tc in t_calls
@@ -200,13 +229,23 @@ class AgentMixin:
             and str(next_open_tool_issue.get("kind") or "").strip().lower() == "approval_denied"
         ):
             next_open_tool_issue = None
+        elif not has_tool_calls and protocol_issue is None:
+            # A normal prose answer after a tool/recovery issue is the model's final response.
+            # Clear the stale issue so the graph does not re-enter recovery and ask the model
+            # to answer the same turn again.
+            if isinstance(next_open_tool_issue, dict) and hasattr(self, "recovery_manager"):
+                recovery_state = self.recovery_manager.reset_after_success(
+                    recovery_state,
+                    current_turn_id=turn_id,
+                )
+            next_open_tool_issue = None
 
         if has_tool_calls:
-            turn_outcome = "run_tools"
+            turn_outcome = TURN_OUTCOME_RUN_TOOLS
         elif protocol_issue is not None:
-            turn_outcome = "recover_agent"
+            turn_outcome = TURN_OUTCOME_RECOVER_AGENT
         else:
-            turn_outcome = "finish_turn"
+            turn_outcome = TURN_OUTCOME_FINISH_TURN
 
         return {
             "messages": outbound_messages,

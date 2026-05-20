@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, To
 
 from core.text_utils import format_tool_output, prepare_markdown_for_render, split_markdown_segments
 from ui.streaming import StreamProcessor
+from ui.window_components.main_window import MainWindow
 from tools import filesystem, local_shell
 from tools.filesystem import FilesystemManager, _DOWNLOAD_HEADERS, _format_download_http_error
 
@@ -677,6 +678,161 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(deltas[-1]["full_text"], "Понял, продолжаю")
         self.assertEqual(processor.full_text, "Понял, продолжаю")
 
+    def test_stream_processor_suppresses_near_duplicate_final_agent_update_after_message_stream(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        streamed = (
+            "## Анализ проекта\n\n"
+            "Проект в текущей директории — не полноценое приложение, а небольшой registry-модуль "
+            "для OpenAI-compatible провайдеров.\n\n"
+            "Найдено 3 файла: freemodel_home.html, provider_registry.json, provider_registry_guide.md.\n"
+        )
+        final_update = streamed.replace("полноценое", "полноценное")
+
+        processor._handle_agent_message(AIMessageChunk(content=streamed), source="messages")
+        processor._handle_updates({"agent": {"messages": [AIMessage(content=final_update)]}})
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], streamed.rstrip("\n"))
+        self.assertEqual(processor.full_text, streamed)
+
+    def test_stream_processor_defers_post_tool_text_until_tool_finishes(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Читаю файл."), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
+        processor._handle_agent_message(AIMessageChunk(content="Готово, вот анализ."), source="messages")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Читаю файл.")
+        self.assertEqual(processor.full_text, "Читаю файл.Готово, вот анализ.")
+
+        processor._handle_tool_result(
+            ToolMessage(
+                content="ok",
+                name="read_file",
+                tool_call_id="call-read",
+            )
+        )
+
+        event_types = [event.type for event in events]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[-1]["full_text"], "Читаю файл.Готово, вот анализ.")
+        self.assertLess(event_types.index("tool_finished"), event_types.index("assistant_delta", 2))
+
+    def test_stream_processor_keeps_tool_call_message_text_visible_before_result(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content="Проверю файл.",
+                tool_calls=[{"id": "call-read", "name": "read_file", "args": {"path": "index.html"}}],
+            ),
+            source="updates_agent",
+        )
+
+        event_types = [event.type for event in events]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertIn("tool_started", event_types)
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Проверю файл.")
+
+    def test_stream_processor_suppresses_duplicate_preface_replay_while_tool_is_active(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверю файл."), source="messages")
+        processor._handle_agent_message(
+            AIMessage(
+                content="Проверю файл.\n\nПроверю файл.",
+                tool_calls=[{"id": "call-read", "name": "read_file", "args": {"path": "index.html"}}],
+            ),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Проверю файл.")
+        self.assertEqual(processor.full_text, "Проверю файл.")
+        self.assertIn("call-read", processor.tool_start_times)
+
+    def test_stream_processor_suppresses_updates_agent_tool_preface_after_message_stream(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Открою официальные страницы."), source="messages")
+        processor._handle_agent_message(
+            AIMessage(
+                content="\nОткрою официальные страницы.\n",
+                tool_calls=[{"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://example.com"]}}],
+            ),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Открою официальные страницы.")
+        self.assertEqual(processor.full_text, "Открою официальные страницы.")
+        self.assertIn("call-fetch", processor.tool_start_times)
+
+    def test_stream_processor_suppresses_last_paragraph_replay_while_tool_is_active(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверю информацию."), source="messages")
+        processor._handle_tool_result(
+            ToolMessage(content="ok", name="web_search", tool_call_id="call-search")
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(content="Открою официальные страницы Zhipu AI."),
+            source="messages",
+        )
+        processor._emit_tool_started(
+            {"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://example.com"]}}
+        )
+        processor._handle_agent_message(
+            AIMessage(
+                content="Открою официальные страницы Zhipu AI.",
+                tool_calls=[{"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://example.com"]}}],
+            ),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(deltas[-1]["full_text"].count("Открою официальные страницы Zhipu AI."), 1)
+        self.assertEqual(processor.full_text.count("Открою официальные страницы Zhipu AI."), 1)
+
+    def test_stream_processor_merges_post_tool_answer_without_repeating_last_preface(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверю источники."), source="messages")
+        processor._emit_tool_started({"id": "call-search", "name": "web_search", "args": {"query": "gpt-5.4"}})
+        processor._handle_tool_result(
+            ToolMessage(content="ok", name="web_search", tool_call_id="call-search")
+        )
+        processor._handle_agent_message(AIMessageChunk(content="Открою официальные страницы."), source="messages")
+        processor._emit_tool_started(
+            {"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://openai.com"]}}
+        )
+        processor._handle_tool_result(
+            ToolMessage(content="ok", name="fetch_content", tool_call_id="call-fetch")
+        )
+        processor._handle_agent_message(
+            AIMessage(content="Открою официальные страницы.\n\nВот полная информация."),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(deltas[-1]["full_text"].count("Открою официальные страницы."), 1)
+        self.assertEqual(processor.full_text.count("Открою официальные страницы."), 1)
+        self.assertIn("Вот полная информация.", deltas[-1]["full_text"])
+
     def test_stream_processor_ignores_reasoning_only_update_without_text_chunk(self):
         events = []
         processor = StreamProcessor(events.append)
@@ -1165,7 +1321,7 @@ class StreamAndFilesystemTests(unittest.TestCase):
             AIMessageChunk(
                 content="",
                 tool_call_chunks=[
-                    {"name": "file_info", "args": '{"path": "a.txt"}', "id": "call-a", "index": 0}
+                    {"name": "list_directory", "args": '{"path": "."}', "id": "call-a", "index": 0}
                 ],
             ),
             source="messages",
@@ -1185,8 +1341,8 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(len(started), 2)
         started_by_id = {payload["tool_id"]: payload for payload in started}
         self.assertEqual(set(started_by_id), {"call-a", "call-b"})
-        self.assertEqual(started_by_id["call-a"]["name"], "file_info")
-        self.assertEqual(started_by_id["call-a"]["args"], {"path": "a.txt"})
+        self.assertEqual(started_by_id["call-a"]["name"], "list_directory")
+        self.assertEqual(started_by_id["call-a"]["args"], {"path": "."})
         self.assertEqual(started_by_id["call-b"]["name"], "read_file")
         self.assertEqual(started_by_id["call-b"]["args"], {"path": "b.txt"})
 
@@ -1198,7 +1354,7 @@ class StreamAndFilesystemTests(unittest.TestCase):
             AIMessageChunk(
                 content="",
                 tool_call_chunks=[
-                    {"name": "file_info", "args": '{"path": "a.py"}', "id": "call-info", "index": 0}
+                    {"name": "list_directory", "args": '{"path": "."}', "id": "call-info", "index": 0}
                 ],
             ),
             source="messages",
@@ -1206,9 +1362,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
         processor._handle_tool_result(
             ToolMessage(
                 tool_call_id="call-info",
-                name="file_info",
+                name="list_directory",
                 content="ok",
-                additional_kwargs={"tool_args": {"path": "a.py"}},
+                additional_kwargs={"tool_args": {"path": "."}},
             )
         )
         processor._handle_agent_message(
@@ -1380,6 +1536,46 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertIn("Success: File edited.", result)
         self.assertEqual(target.read_text(encoding="utf-8"), "after")
+
+    def test_edit_file_strips_read_file_line_numbers_before_matching_code(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        target = tmp / "demo.py"
+        target.write_text(
+            "def main():\n"
+            "    if True:\n"
+            "        print('old')\n",
+            encoding="utf-8",
+        )
+
+        result = filesystem.edit_file_tool.invoke(
+            {
+                "path": "demo.py",
+                "old_string": (
+                    "     1  def main():\n"
+                    "     2      if True:\n"
+                    "     3          print('old')"
+                ),
+                "new_string": (
+                    "     1  def main():\n"
+                    "     2      if True:\n"
+                    "     3          print('new')"
+                ),
+            }
+        )
+
+        self.assertIn("Success: File edited.", result)
+        self.assertIn("line-number prefixes were removed", result)
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "def main():\n"
+            "    if True:\n"
+            "        print('new')\n",
+        )
+        self.assertNotIn("     1  ", target.read_text(encoding="utf-8"))
 
     def test_write_file_accepts_file_path_alias(self):
         tmp = self._workspace_tempdir()
@@ -1770,6 +1966,51 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0]["kind"], "agent_internal_notice")
         self.assertIn("History was repaired automatically", notices[0]["message"])
+
+    def test_stream_processor_assistant_delta_sequence_increases_monotonically(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Первый "))
+        processor._handle_agent_message(AIMessageChunk(content="ответ"))
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual([payload["sequence"] for payload in deltas], [1, 2])
+        self.assertEqual(deltas[-1]["full_text"], "Первый ответ")
+
+    def test_main_window_stale_delta_fallback_detects_shorter_prefix_replay(self):
+        window = MainWindow.__new__(MainWindow)
+        window._last_assistant_delta_text = "Проверяю файлы.\n\n## Анализ"
+
+        self.assertTrue(window._is_stale_assistant_delta_without_sequence("Проверяю файлы."))
+        self.assertFalse(window._is_stale_assistant_delta_without_sequence("Другая корректировка"))
+
+    def test_main_window_assistant_delta_ignores_older_sequence(self):
+        class _Turn:
+            def __init__(self):
+                self.markdown = ""
+
+            def set_assistant_markdown(self, markdown):
+                self.markdown = markdown
+
+        class _Transcript:
+            def __init__(self):
+                self.notify_count = 0
+
+            def notify_content_changed(self):
+                self.notify_count += 1
+
+        window = MainWindow.__new__(MainWindow)
+        window.current_turn = _Turn()
+        window.transcript = _Transcript()
+        window._last_assistant_delta_sequence = 0
+        window._last_assistant_delta_text = ""
+
+        MainWindow._on_assistant_delta(window, {"full_text": "Новый текст", "sequence": 2})
+        MainWindow._on_assistant_delta(window, {"full_text": "Старый текст", "sequence": 1})
+
+        self.assertEqual(window.current_turn.markdown, "Новый текст")
+        self.assertEqual(window.transcript.notify_count, 1)
 
 
 if __name__ == "__main__":

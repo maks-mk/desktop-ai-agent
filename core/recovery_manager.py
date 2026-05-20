@@ -11,6 +11,11 @@ from core.fast_copy import copy_jsonish
 from core.message_utils import compact_text, stringify_content
 from core.self_correction_engine import RepairPlan, build_repair_plan
 from core.tool_results import parse_tool_execution_result
+from core.turn_outcomes import (
+    TURN_OUTCOME_CONTINUE_AGENT,
+    TURN_OUTCOME_FINISH_TURN,
+    TURN_OUTCOME_RECOVER_AGENT,
+)
 
 
 def _compact_json_payload(payload: Dict[str, Any], *, limit: int = 180) -> str:
@@ -416,7 +421,7 @@ class RecoveryManager:
         if loop_budget_reached and pending_tool_calls and not open_tool_issue:
             branch = {
                 "completion_reason": "loop_budget_exhausted_pending_tool_call",
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "handoff_message": self.build_loop_budget_handoff_text(
                     current_task=current_task,
                     tool_names=[
@@ -436,7 +441,7 @@ class RecoveryManager:
             }
             branch = {
                 "completion_reason": "loop_budget_exhausted",
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "next_open_tool_issue": next_open_tool_issue,
                 "handoff_message": (
                     self.build_tool_issue_handoff_text(open_tool_issue, repair_plan=repair_plan)
@@ -453,7 +458,7 @@ class RecoveryManager:
             }
             branch = {
                 "completion_reason": "self_correction_disabled",
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "next_open_tool_issue": None,
                 "handoff_message": self.build_tool_issue_handoff_text(
                     open_tool_issue,
@@ -469,7 +474,7 @@ class RecoveryManager:
             }
             branch = {
                 "completion_reason": "recovery_stagnated",
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "next_open_tool_issue": None,
                 "handoff_message": self.build_tool_issue_handoff_text(
                     open_tool_issue,
@@ -492,19 +497,19 @@ class RecoveryManager:
                 if successful_tool_repeat_count >= max(2, int(successful_tool_stagnation_limit or 0)):
                     branch = {
                         "completion_reason": "successful_tool_stagnation",
-                        "turn_outcome": "continue_agent",
+                        "turn_outcome": TURN_OUTCOME_CONTINUE_AGENT,
                         "next_open_tool_issue": None,
                     }
                 else:
                     branch = {
                         "completion_reason": "tool_result_ready_for_agent",
-                        "turn_outcome": "continue_agent",
+                        "turn_outcome": TURN_OUTCOME_CONTINUE_AGENT,
                         "next_open_tool_issue": None,
                     }
             else:
                 branch = {
                     "completion_reason": "no_open_tool_issue",
-                    "turn_outcome": "finish_turn",
+                    "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                     "next_open_tool_issue": None,
                 }
         elif repair_plan and (repair_plan.needs_external_input or repair_plan.terminal_reason):
@@ -516,7 +521,7 @@ class RecoveryManager:
             }
             branch = {
                 "completion_reason": repair_plan.terminal_reason or "needs_external_input",
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "next_open_tool_issue": None,
                 "handoff_message": self.build_tool_issue_handoff_text(
                     open_tool_issue,
@@ -627,7 +632,7 @@ class RecoveryManager:
             next_recovery_state["external_blocker"] = None
             return {
                 "completion_reason": f"recover_{repair_plan.strategy}",
-                "turn_outcome": "recover_agent",
+                "turn_outcome": TURN_OUTCOME_RECOVER_AGENT,
                 "next_open_tool_issue": open_tool_issue,
                 "next_retry_count": next_retry_count,
                 "next_fingerprint_history": list(next_fingerprint_history),
@@ -662,7 +667,7 @@ class RecoveryManager:
         next_recovery_state["external_blocker"] = None
         return {
             "completion_reason": "recover_llm_replan",
-            "turn_outcome": "recover_agent",
+            "turn_outcome": TURN_OUTCOME_RECOVER_AGENT,
             "next_open_tool_issue": open_tool_issue,
             "next_retry_count": next_retry_count,
             "next_fingerprint_history": list(next_fingerprint_history),

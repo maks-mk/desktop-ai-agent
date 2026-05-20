@@ -14,6 +14,11 @@ from core.node_errors import EmptyLLMResponseError
 from core.self_correction_engine import normalize_tool_args
 from core.tool_args import canonicalize_tool_args, inspect_tool_args_payload
 from core.tool_results import parse_tool_execution_result
+from core.turn_outcomes import (
+    TURN_OUTCOME_FINISH_TURN,
+    TURN_OUTCOME_RECOVER_AGENT,
+    TURN_OUTCOME_RUN_TOOLS,
+)
 
 
 class AgentTurnOrchestrator:
@@ -78,7 +83,7 @@ class AgentTurnOrchestrator:
                 return {
                     "current_task": current_task,
                     "turn_id": current_turn_id,
-                    "turn_outcome": "recover_agent",
+                    "turn_outcome": TURN_OUTCOME_RECOVER_AGENT,
                     "recovery_state": recovery_state,
                     "pending_approval": None,
                     "open_tool_issue": preflight_loop_issue,
@@ -123,7 +128,7 @@ class AgentTurnOrchestrator:
                 return {
                     "current_task": current_task,
                     "turn_id": current_turn_id,
-                    "turn_outcome": "recover_agent",
+                    "turn_outcome": TURN_OUTCOME_RECOVER_AGENT,
                     "recovery_state": recovery_state,
                     "pending_approval": None,
                     "open_tool_issue": protocol_issue,
@@ -242,7 +247,7 @@ class AgentTurnOrchestrator:
                 ],
                 "current_task": current_task,
                 "turn_id": current_turn_id,
-                "turn_outcome": "finish_turn",
+                "turn_outcome": TURN_OUTCOME_FINISH_TURN,
                 "recovery_state": recovery_state,
                 "pending_approval": None,
                 "open_tool_issue": None,
@@ -311,7 +316,7 @@ class RecoveryTurnOrchestrator:
             and getattr(last_ai, "id", None)
         ):
             outbound_messages.append(RemoveMessage(id=last_ai.id))
-        if result["turn_outcome"] == "finish_turn" and result["handoff_message"]:
+        if result["turn_outcome"] == TURN_OUTCOME_FINISH_TURN and result["handoff_message"]:
             handoff_kind = (
                 "loop_budget_handoff"
                 if str(result["completion_reason"]).startswith("loop_budget_exhausted")
@@ -333,10 +338,10 @@ class RecoveryTurnOrchestrator:
                 )
             )
 
-        turn_outcome = "finish_turn"
+        turn_outcome = TURN_OUTCOME_FINISH_TURN
         next_recovery_state = result["recovery_state"]
-        if result["turn_outcome"] == "recover_agent":
-            turn_outcome = "recover_agent"
+        if result["turn_outcome"] == TURN_OUTCOME_RECOVER_AGENT:
+            turn_outcome = TURN_OUTCOME_RECOVER_AGENT
             active_strategy = next_recovery_state.get("active_strategy") if isinstance(next_recovery_state, dict) else {}
             owner._log_run_event(
                 state,
@@ -379,6 +384,12 @@ class RecoveryTurnOrchestrator:
             "last_tool_error": result.get("last_tool_error", state.get("last_tool_error", "")),
             "last_tool_result": result.get("last_tool_result", state.get("last_tool_result", "")),
         }
+        if (
+            turn_outcome == TURN_OUTCOME_FINISH_TURN
+            and result["handoff_message"]
+            and not str(result["completion_reason"]).startswith("loop_budget_exhausted")
+        ):
+            payload["steps"] = int(state.get("steps", 0) or 0) + 1
         if outbound_messages:
             payload["messages"] = outbound_messages
         return payload
@@ -521,7 +532,7 @@ class ToolBatchCoordinator:
             payload = {
                 "messages": final_messages,
                 "turn_id": current_turn_id,
-                "turn_outcome": "run_tools",
+                "turn_outcome": TURN_OUTCOME_RUN_TOOLS,
                 "pending_approval": None,
                 "open_tool_issue": merged_issue,
                 "has_protocol_error": False,

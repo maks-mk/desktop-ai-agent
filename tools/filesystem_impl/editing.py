@@ -1,11 +1,43 @@
 import difflib
 import json
 import logging
+import re
 from pathlib import Path
 
 from core.errors import ErrorType, format_error
 
 logger = logging.getLogger(__name__)
+
+_READ_FILE_LINE_NUMBER_RE = re.compile(r"^\s*\d+\s{2}(.*)$")
+
+
+def _strip_read_file_line_numbers(text: str) -> tuple[str, bool]:
+    """Remove line-number prefixes produced by read_file(show_line_numbers=True)."""
+    lines = text.split("\n")
+    meaningful_count = 0
+    numbered_count = 0
+    stripped_lines: list[str] = []
+
+    for line in lines:
+        if not line.strip():
+            stripped_lines.append(line)
+            continue
+
+        meaningful_count += 1
+        match = _READ_FILE_LINE_NUMBER_RE.match(line)
+        if match:
+            numbered_count += 1
+            stripped_lines.append(match.group(1))
+        else:
+            stripped_lines.append(line)
+
+    if not meaningful_count:
+        return text, False
+
+    if numbered_count >= max(1, int(meaningful_count * 0.6)):
+        return "\n".join(stripped_lines), True
+
+    return text, False
 
 
 def _realign_indentation(
@@ -77,7 +109,17 @@ def edit_text_file(target: Path, path_label: str, old_string: str, new_string: s
         old_string_norm = old_string.replace("\r\n", "\n")
         new_string_norm = new_string.replace("\r\n", "\n")
 
+        old_string_norm, stripped_old_line_numbers = _strip_read_file_line_numbers(old_string_norm)
+        new_string_norm, stripped_new_line_numbers = _strip_read_file_line_numbers(new_string_norm)
+
         fallback_warning: str = ""
+        line_number_warning: str = ""
+        if stripped_old_line_numbers or stripped_new_line_numbers:
+            logger.info("edit_file: stripped read_file line-number prefixes for '%s'.", path_label)
+            line_number_warning = (
+                "\n\n⚠ Warning: read_file line-number prefixes were removed before applying the edit. "
+                "Verify the diff carefully."
+            )
 
         count = content_norm.count(old_string_norm)
         if count == 1:
@@ -189,6 +231,6 @@ def edit_text_file(target: Path, path_label: str, old_string: str, new_string: s
             lineterm="",
         )
         diff_text = "\n".join(diff)
-        return f"Success: File edited.{fallback_warning}\n\nDiff:\n```diff\n{diff_text}\n```"
+        return f"Success: File edited.{line_number_warning}{fallback_warning}\n\nDiff:\n```diff\n{diff_text}\n```"
     except Exception as exc:
         return format_error(ErrorType.EXECUTION, f"Error editing file: {exc}")

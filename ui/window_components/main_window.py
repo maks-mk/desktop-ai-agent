@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import Final
 
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenuBar, QMessageBox, QVBoxLayout, QWidget
 
 from core.constants import AGENT_VERSION
@@ -23,6 +24,8 @@ from ui.window_components.status_bar_manager import StatusBarManager
 from ui.window_components.workspace_builder import WorkspaceBuilder
 
 logger = logging.getLogger("agent")
+APP_DISPLAY_NAME: Final[str] = "AI Agent"
+WINDOWS_APP_USER_MODEL_ID: Final[str] = "simple_ai_agent.ai_agent"
 
 
 def _configure_qt_logging() -> None:
@@ -31,6 +34,26 @@ def _configure_qt_logging() -> None:
     if rule in {item.strip() for item in current.split(";") if item.strip()}:
         return
     os.environ["QT_LOGGING_RULES"] = f"{current};{rule}" if current else rule
+
+
+def _configure_windows_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
+    except Exception:
+        logger.debug("Failed to set Windows AppUserModelID.", exc_info=True)
+
+
+def _build_app_icon() -> QIcon:
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        pixmap = _fa_icon("fa5s.robot", color=ACCENT_BLUE, size=size).pixmap(size, size)
+        if not pixmap.isNull():
+            icon.addPixmap(pixmap)
+    return icon if not icon.isNull() else _fa_icon("fa5s.robot", color=ACCENT_BLUE, size=32)
 
 
 class MainWindow(QMainWindow):
@@ -66,6 +89,8 @@ class MainWindow(QMainWindow):
         self._current_status_label = ""
         self._current_status_phase = "working"
         self._last_rendered_elapsed_text = ""
+        self._last_assistant_delta_sequence = 0
+        self._last_assistant_delta_text = ""
         self._event_router: StreamEventRouter | None = None
 
         self._menu_builder = MenuBuilder(self)
@@ -90,7 +115,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"AI Agent {AGENT_VERSION}")
         self.resize(1300, 670)
         self.setMinimumSize(900, 600)
-        self.setWindowIcon(_fa_icon("fa5s.robot", color=ACCENT_BLUE, size=16))
+        if app := QApplication.instance():
+            self.setWindowIcon(app.windowIcon())
+        else:
+            self.setWindowIcon(_build_app_icon())
 
         status_refs = self._status_bar_manager.build()
         self.runtime_meta_label = status_refs.runtime_meta_label
@@ -214,6 +242,7 @@ class MainWindow(QMainWindow):
                 "cli_output": self._on_cli_output,
                 "tool_finished": self._on_tool_finished,
                 "tool_args_missing": self._on_tool_args_missing,
+                "summary_progress": self._on_summary_progress,
                 "summary_notice": self._on_summary_notice,
                 "approval_resolved": self._on_approval_resolved,
                 "run_finished": self._on_run_finished,
@@ -280,6 +309,8 @@ class MainWindow(QMainWindow):
         self.send_button.setIcon(_fa_icon("fa5s.arrow-up", color=icon_color, size=14))
 
     def _on_run_started(self, payload: dict) -> None:
+        self._last_assistant_delta_sequence = 0
+        self._last_assistant_delta_text = ""
         self._status_controller.on_run_started(payload)
 
     def _on_status_changed(self, payload: dict) -> None:
@@ -289,6 +320,26 @@ class MainWindow(QMainWindow):
         if self.current_turn is None:
             return
         full_text = str(payload.get("full_text", "") or "")
+        sequence = payload.get("sequence")
+        if isinstance(sequence, int):
+            if sequence <= self._last_assistant_delta_sequence:
+                logger.debug(
+                    "Stream ignored stale main_window_assistant_delta sequence=%s last_sequence=%s full_len=%s",
+                    sequence,
+                    self._last_assistant_delta_sequence,
+                    len(full_text),
+                )
+                return
+            self._last_assistant_delta_sequence = sequence
+        elif self._is_stale_assistant_delta_without_sequence(full_text):
+            logger.debug(
+                "Stream ignored stale main_window_assistant_delta without sequence full_len=%s last_len=%s",
+                len(full_text),
+                len(self._last_assistant_delta_text),
+            )
+            return
+
+        self._last_assistant_delta_text = full_text
         logger.debug(
             "Stream main_window_assistant_delta full_len=%s",
             len(full_text),
@@ -342,6 +393,9 @@ class MainWindow(QMainWindow):
         _ = payload
         return
 
+    def _on_summary_progress(self, payload: dict) -> None:
+        self.summary_progress_ring.set_summary_progress(payload)
+
     def _on_approval_resolved(self, payload: dict) -> None:
         if self.current_turn is None:
             return
@@ -365,7 +419,26 @@ class MainWindow(QMainWindow):
         self._status_controller.on_run_failed(payload)
 
     def _on_chat_reset(self, _payload: dict) -> None:
+        self._last_assistant_delta_sequence = 0
+        self._last_assistant_delta_text = ""
         self._status_controller.on_chat_reset()
+
+    def _is_stale_assistant_delta_without_sequence(self, full_text: str) -> bool:
+        previous = self._last_assistant_delta_text
+        if not previous or len(full_text) >= len(previous):
+            return False
+        if previous.startswith(full_text):
+            return True
+        prefix_len = self._common_prefix_len(previous, full_text)
+        return prefix_len >= max(48, int(len(full_text) * 0.8))
+
+    @staticmethod
+    def _common_prefix_len(first: str, second: str) -> int:
+        limit = min(len(first), len(second))
+        index = 0
+        while index < limit and first[index] == second[index]:
+            index += 1
+        return index
 
     def _set_primary_status_message(self, label: str) -> None:
         self._status_bar_manager.set_primary_status_message(label)
@@ -786,10 +859,16 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     _configure_qt_logging()
+    _configure_windows_app_user_model_id()
+    QApplication.setApplicationName(APP_DISPLAY_NAME)
+    QApplication.setOrganizationName("Simple AI Agent")
+    QApplication.setApplicationDisplayName(APP_DISPLAY_NAME)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setWindowIcon(_fa_icon("fa5s.robot", color=ACCENT_BLUE, size=32))
+    app_icon = _build_app_icon()
+    app.setWindowIcon(app_icon)
     window = MainWindow()
+    window.setWindowIcon(app_icon)
     window.show()
     return app.exec()
 

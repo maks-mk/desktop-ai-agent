@@ -1,6 +1,7 @@
 from typing import TypedDict, Annotated, List, NotRequired, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from core.turn_outcomes import TurnOutcome
 
 class AgentState(TypedDict):
     """
@@ -25,7 +26,7 @@ class AgentState(TypedDict):
     safety_mode: NotRequired[str]
 
     # Internal workflow state
-    turn_outcome: NotRequired[str]
+    turn_outcome: NotRequired[TurnOutcome]
     recovery_state: NotRequired[Dict[str, Any]]
     self_correction_retry_count: NotRequired[int]
     self_correction_retry_turn_id: NotRequired[int]

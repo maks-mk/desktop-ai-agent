@@ -60,7 +60,6 @@ class AgentNodes(
     # Any unknown or mutating tool keeps sequential execution for safety.
     PARALLEL_SAFE_TOOL_NAMES = frozenset(
         {
-            "file_info",
             "read_file",
             "list_directory",
             "search_in_file",
@@ -80,7 +79,6 @@ class AgentNodes(
     # Read-only tools can be called repeatedly while an agent verifies edits/results.
     READ_ONLY_LOOP_TOLERANT_TOOL_NAMES = frozenset(
         {
-            "file_info",
             "read_file",
             "search_in_file",
             "search_in_directory",

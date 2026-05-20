@@ -33,6 +33,12 @@ from core.session_store import SessionSnapshot, SessionStore
 from core.state import AgentState
 from core.summarize_policy import format_history_for_summary, should_summarize
 from core.tool_policy import ToolMetadata
+from core.turn_outcomes import (
+    TURN_OUTCOME_FINISH_TURN,
+    TURN_OUTCOME_RECOVER_AGENT,
+    TURN_OUTCOME_RUN_TOOLS,
+    normalize_turn_outcome,
+)
 from tools import process_tools
 from tools.filesystem import write_file_tool
 from tools.tool_registry import ToolRegistry
@@ -46,7 +52,7 @@ from ui.runtime import (
     generate_chat_title,
     short_project_label,
 )
-from ui.streaming import StreamProcessResult, StreamProcessor
+from ui.streaming import StreamEvent, StreamProcessResult, StreamProcessor
 
 
 class FakeLLM:
@@ -302,7 +308,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("__gemini_function_call_thought_signatures__", message.additional_kwargs)
         self.assertEqual(result["turn_outcome"], "run_tools")
 
-    def test_build_agent_result_recovers_textual_tool_call_from_compatible_provider(self):
+    def test_build_agent_result_rejects_textual_tool_call_by_default(self):
         tool = FakeTool("read_file", "ok")
         nodes = AgentNodes(
             config=self._make_config(PROVIDER="openai"),
@@ -324,11 +330,49 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         message = next(item for item in result["messages"] if isinstance(item, AIMessage))
-        self.assertEqual(result["turn_outcome"], "run_tools")
+        self.assertEqual(result["turn_outcome"], TURN_OUTCOME_RECOVER_AGENT)
+        self.assertTrue(result["has_protocol_error"])
+        self.assertEqual(result["open_tool_issue"]["details"]["protocol_reason"], "textual_tool_call_disabled")
+        self.assertEqual(result["open_tool_issue"]["tool_names"], ["read_file"])
+        self.assertEqual(result["open_tool_issue"]["tool_args"], {"path": "index.html"})
+        self.assertFalse(message.tool_calls)
+        self.assertFalse(message.additional_kwargs["agent_internal"]["visible_in_ui"])
+        self.assertNotIn("call:read_file", str(message.content))
+        self.assertNotIn("<tool_call|>", str(message.content))
+
+    def test_build_agent_result_recovers_textual_tool_call_when_flag_enabled(self):
+        tool = FakeTool("read_file", "ok")
+        nodes = AgentNodes(
+            config=self._make_config(PROVIDER="openai", ENABLE_TEXT_TOOL_CALL_RECOVERY=True),
+            llm=FakeLLM([]),
+            tools=[tool],
+            llm_with_tools=FakeLLM([]),
+        )
+        response = AIMessage(
+            content='Читаю файл.call:read_file{path:<|"|>index.html<|"|>}<tool_call|>'
+        )
+
+        result = nodes._build_agent_result(
+            response=response,
+            current_task="прочитай файл",
+            tools_available=True,
+            turn_id=1,
+            messages=[HumanMessage(content="прочитай файл")],
+            allowed_tool_names=["read_file"],
+        )
+
+        message = next(item for item in result["messages"] if isinstance(item, AIMessage))
+        self.assertEqual(result["turn_outcome"], TURN_OUTCOME_RUN_TOOLS)
         self.assertEqual(message.tool_calls[0]["name"], "read_file")
         self.assertEqual(message.tool_calls[0]["args"], {"path": "index.html"})
         self.assertNotIn("call:read_file", str(message.content))
         self.assertNotIn("<tool_call|>", str(message.content))
+
+    def test_normalize_turn_outcome_defaults_unknown_values_to_finish_turn(self):
+        self.assertEqual(normalize_turn_outcome("run_tools"), TURN_OUTCOME_RUN_TOOLS)
+        self.assertEqual(normalize_turn_outcome(" recover_agent "), TURN_OUTCOME_RECOVER_AGENT)
+        self.assertEqual(normalize_turn_outcome(""), TURN_OUTCOME_FINISH_TURN)
+        self.assertEqual(normalize_turn_outcome("unexpected"), TURN_OUTCOME_FINISH_TURN)
 
     def test_build_agent_result_preserves_existing_gemini_thought_signature(self):
         tool = FakeTool("web_search", "ok")
@@ -2395,6 +2439,30 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated)
         self.assertEqual(worker.current_session.title, "Сводку по ошибкам [client/demo-app]")
 
+    def test_worker_emits_live_summary_progress_after_tool_finished(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.config = SimpleNamespace(summary_threshold=100, summary_keep_last=1)
+        worker._active_summary_estimated_tokens = 10
+        worker._active_summary_message_count = 2
+        worker._active_summary_has_summary = False
+        emitted = []
+        worker.event_emitted.connect(emitted.append)
+
+        worker._emit_stream_event(
+            StreamEvent(
+                "tool_finished",
+                {"tool_id": "call-read", "name": "read_file", "content": "alpha beta gamma " * 12},
+            )
+        )
+
+        self.assertEqual(emitted[0].type, "tool_finished")
+        progress_events = [event for event in emitted if event.type == "summary_progress"]
+        self.assertEqual(len(progress_events), 1)
+        payload = progress_events[0].payload
+        self.assertGreater(payload["estimated_tokens"], 10)
+        self.assertEqual(payload["threshold"], 100)
+        self.assertTrue(payload["live"])
+
     def test_build_transcript_payload_restores_turns_and_summary_notice(self):
         payload = build_transcript_payload(
             {
@@ -2932,6 +3000,69 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["has_protocol_error"])
         self.assertIsNone(result["open_tool_issue"])
         self.assertEqual(str(result["messages"][-1].content), "Сейчас исправлю файл и внесу правки.")
+        self.assertEqual(len(agent_llm.invocations), 1)
+
+    async def test_agent_node_clears_open_tool_issue_after_final_prose_response(self):
+        agent_llm = FakeLLM([AIMessage(content="Не нашёл docs, поэтому даю вывод по доступным данным.")])
+        read_tool = FakeTool("web_search", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[read_tool],
+            llm_with_tools=agent_llm,
+            tool_metadata={"web_search": ToolMetadata(name="web_search", read_only=True)},
+        )
+        state = {
+            **self._initial_state("проверь провайдера"),
+            "messages": [
+                HumanMessage(content="проверь провайдера"),
+                AIMessage(
+                    content="Ищу документацию.",
+                    tool_calls=[
+                        {
+                            "id": "call-search",
+                            "name": "web_search",
+                            "args": {"query": "provider docs"},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content="ERROR[NOT_FOUND]: No results found.",
+                    tool_call_id="call-search",
+                    name="web_search",
+                ),
+            ],
+            "open_tool_issue": {
+                "turn_id": 1,
+                "kind": "tool_error",
+                "summary": "No results found.",
+                "tool_names": ["web_search"],
+                "tool_args": {"query": "provider docs"},
+                "source": "tools",
+                "error_type": "NOT_FOUND",
+                "fingerprint": "fp-search",
+                "progress_fingerprint": "fp-search",
+            },
+            "recovery_state": {
+                "turn_id": 1,
+                "active_issue": {"summary": "No results found."},
+                "active_strategy": {"strategy": "llm_replan"},
+                "strategy_queue": [],
+                "attempts_by_strategy": {"fp-search::llm_replan": 1},
+                "progress_markers": ["fp-search"],
+                "last_successful_evidence": "",
+                "external_blocker": None,
+                "llm_replan_attempted_for": ["fp-search"],
+            },
+        }
+
+        result = await nodes.agent_node(state)
+
+        self.assertEqual(result["turn_outcome"], "finish_turn")
+        self.assertIsNone(result["open_tool_issue"])
+        self.assertIsNone(result["recovery_state"]["active_issue"])
+        self.assertIsNone(result["recovery_state"]["active_strategy"])
+        self.assertEqual(result["recovery_state"]["llm_replan_attempted_for"], [])
         self.assertEqual(len(agent_llm.invocations), 1)
 
     async def test_agent_node_marks_malformed_tool_payload_as_protocol_error(self):

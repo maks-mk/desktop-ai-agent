@@ -243,6 +243,7 @@ START
 | Переменная | Описание |
 |---|---|
 | `MODEL_SUPPORTS_TOOLS` | Включить tool calling |
+| `ENABLE_TEXT_TOOL_CALL_RECOVERY` | Диагностический fallback для провайдеров, которые пишут `call:...<tool_call|>` текстом вместо structured `tool_calls`; по умолчанию выключен |
 | `ENABLE_FILESYSTEM_TOOLS` | Инструменты для работы с файлами |
 | `ENABLE_SHELL_TOOL` | Shell-выполнение команд |
 | `ENABLE_SEARCH_TOOLS` | Web search через Tavily |

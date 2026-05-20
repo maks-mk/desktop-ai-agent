@@ -14,7 +14,7 @@ from core.multimodal import DEFAULT_MODEL_CAPABILITIES
 from core.validation import validate_tool_result
 from tools import process_tools
 from tools.process_tools import run_background_process
-from tools.search_tools import fetch_content
+from tools.search_tools import _parse_urls_input, fetch_content
 from tools.tool_registry import ToolRegistry
 from tools.user_input_tool import request_user_input
 
@@ -312,6 +312,33 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(validated.urls, ["https://example.com"])
 
+    def test_fetch_content_parser_accepts_url_lists_and_discards_invalid_entries(self):
+        raw_urls = [
+            "https://openai.com/index/introducing-gpt-5-5/,",
+            "not-a-url",
+            "https://openai.com/index/introducing-gpt-5-5/",
+            "https://example.com/docs",
+        ]
+
+        self.assertEqual(
+            _parse_urls_input(raw_urls),
+            [
+                "https://openai.com/index/introducing-gpt-5-5/",
+                "https://example.com/docs",
+            ],
+        )
+
+    def test_fetch_content_parser_accepts_stringified_url_list(self):
+        raw_urls = "['https://openai.com/index/introducing-gpt-5-5/', 'https://example.com/docs']"
+
+        self.assertEqual(
+            _parse_urls_input(raw_urls),
+            [
+                "https://openai.com/index/introducing-gpt-5-5/",
+                "https://example.com/docs",
+            ],
+        )
+
     def test_run_background_process_schema_uses_array_command_for_gemini_compatibility(self):
         schema = run_background_process.get_input_schema().model_json_schema()
         command_schema = schema["properties"]["command"]
@@ -339,10 +366,16 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
             self._make_config(MAX_FILE_SIZE="300MBps")
 
     def test_logging_env_keys_are_loaded_via_agent_config(self):
-        config = self._make_config(LOG_LEVEL="debug", LOG_FILE="logs/custom-agent.log", DEBUG_REASONING_STREAM=True)
+        config = self._make_config(
+            LOG_LEVEL="debug",
+            LOG_FILE="logs/custom-agent.log",
+            DEBUG_REASONING_STREAM=True,
+            ENABLE_TEXT_TOOL_CALL_RECOVERY=True,
+        )
         self.assertEqual(config.log_level, "DEBUG")
         self.assertEqual(config.log_file.name, "custom-agent.log")
         self.assertTrue(config.debug_reasoning_stream)
+        self.assertTrue(config.enable_text_tool_call_recovery)
 
     def test_provider_registry_path_is_resolved_from_project_root(self):
         config = self._make_config(PROVIDER_REGISTRY_PATH="provider_registry.json")

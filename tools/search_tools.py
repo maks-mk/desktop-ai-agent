@@ -2,6 +2,7 @@ import ast
 import asyncio
 import json
 import logging
+import re
 import time
 from functools import wraps
 from typing import Any, Dict, List, Optional, Union
@@ -220,6 +221,58 @@ def _is_valid_http_url(url: str) -> bool:
     except Exception:
         return False
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+_URL_TOKEN_RE = re.compile(r"https?://[^\s,\"'<>\\\]\)]+", re.IGNORECASE)
+
+
+def _parse_urls_input(raw_urls: Any) -> List[str]:
+    """Normalize model-supplied URL input into a deduplicated HTTP(S) list."""
+
+    def iter_candidates(value: Any):
+        if value is None:
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                yield from iter_candidates(item)
+            return
+        if not isinstance(value, str):
+            value = str(value)
+
+        text = value.strip()
+        if not text:
+            return
+
+        if text.startswith(("[", "(")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, tuple, set)):
+                yield from iter_candidates(parsed)
+                return
+
+        matches = _URL_TOKEN_RE.findall(text)
+        if matches:
+            for match in matches:
+                yield match
+            return
+
+        yield text
+
+    clean_urls: List[str] = []
+    seen: set[str] = set()
+    for candidate in iter_candidates(raw_urls) or []:
+        clean = candidate.strip().strip("`'\"")
+        clean = clean.rstrip(".,;:")
+        if not _is_valid_http_url(clean) or clean in seen:
+            continue
+        seen.add(clean)
+        clean_urls.append(clean)
+        if len(clean_urls) >= _TAVILY_MAX_EXTRACT_URLS:
+            break
+
+    return clean_urls
 
 
 class FetchContentInput(BaseModel):
@@ -447,6 +500,5 @@ async def batch_web_search(
         )
         output.append(f"Query: {query}\n{rendered}\n{'=' * 50}")
     return "\n".join(output)
-
 
 

@@ -109,7 +109,6 @@ class ToolRegistry:
                 enabled=lambda config: config.enable_filesystem_tools,
                 module_name="tools.filesystem",
                 tool_names=(
-                    "file_info_tool",
                     "read_file_tool",
                     "write_file_tool",
                     "edit_file_tool",
@@ -124,7 +123,6 @@ class ToolRegistry:
                 ),
                 configure=self._configure_safety,
                 metadata={
-                    "file_info_tool": ToolMetadata(name="file_info", read_only=True),
                     "read_file_tool": ToolMetadata(name="read_file", read_only=True),
                     "write_file_tool": ToolMetadata(
                         name="write_file", mutating=True, requires_approval=True

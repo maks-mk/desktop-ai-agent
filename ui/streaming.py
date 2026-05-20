@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import logging
 import re
 import time
@@ -186,7 +187,11 @@ class StreamProcessor:
         "_agent_is_thinking",
         "_first_token_at",
         "_first_reasoning_at",
+        "_messages_text_seen",
         "_suppressing_text_tool_call",
+        "_visible_full_text",
+        "_deferred_assistant_delta",
+        "_assistant_delta_sequence",
     )
 
     def __init__(
@@ -224,7 +229,11 @@ class StreamProcessor:
         self._agent_is_thinking = False
         self._first_token_at: float | None = None
         self._first_reasoning_at: float | None = None
+        self._messages_text_seen = False
         self._suppressing_text_tool_call = False
+        self._visible_full_text = ""
+        self._deferred_assistant_delta = False
+        self._assistant_delta_sequence = 0
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -276,6 +285,7 @@ class StreamProcessor:
                 elapsed_seconds=self._elapsed_seconds(),
             )
 
+        self._flush_deferred_assistant_delta()
         duration = self._elapsed_seconds()
         debug_event(
             "stream_timing",
@@ -433,6 +443,7 @@ class StreamProcessor:
             self._handle_tool_result(message)
 
     def _handle_agent_message(self, message: AIMessage | AIMessageChunk, *, source: str = "messages") -> None:
+        message_has_tool_calls = self._message_has_tool_calls(message)
         self._handle_tool_calls_from_message(message, source=source)
         if is_hidden_internal_message(message):
             notice = get_internal_ui_notice(message)
@@ -492,12 +503,25 @@ class StreamProcessor:
         chunk = self._filter_visible_text_tool_call_chunk(chunk)
         if not chunk:
             return
+        if source == "updates_agent" and self._messages_text_seen and (
+            not self._updates_agent_text_has_new_visible_content(chunk)
+            or (message_has_tool_calls and self._is_replay_of_visible_text(chunk))
+        ):
+            logger.debug(
+                "Stream suppressed updates_agent text replay chunk_len=%s tool_calls=%s preview=%s",
+                len(chunk),
+                message_has_tool_calls,
+                _clip_debug_text(chunk),
+            )
+            return
         if self._first_token_at is None:
             self._first_token_at = now()
 
         merged_text = self._merge_assistant_text(chunk, source=source)
         if merged_text is None:
             return
+        if source == "messages":
+            self._messages_text_seen = True
 
         self.full_text = merged_text
         self.clean_full = self.full_text
@@ -511,8 +535,22 @@ class StreamProcessor:
 
         self._trim_text_buffers()
 
+        if self._should_defer_assistant_text(message_has_tool_calls=message_has_tool_calls):
+            self._deferred_assistant_delta = True
+            logger.debug(
+                "Stream deferred assistant chunk until active tools finish source=%s active_tools=%s full_len=%s",
+                source,
+                len(self.tool_start_times),
+                len(self.full_text),
+            )
+            return
+
+        self._emit_assistant_delta(chunk)
+
+    def _emit_assistant_delta(self, chunk: str) -> None:
         self._emit_status()
         rendered_markdown = prepare_markdown_for_render(self.clean_full) if self.clean_full else ""
+        self._assistant_delta_sequence += 1
         logger.debug(
             "Stream emit_assistant_delta rendered_len=%s rendered_preview=%s",
             len(rendered_markdown),
@@ -523,10 +561,68 @@ class StreamProcessor:
             {
                 "text": chunk,
                 "full_text": rendered_markdown,
+                "sequence": self._assistant_delta_sequence,
             },
         )
+        self._visible_full_text = self.full_text
+        self._deferred_assistant_delta = False
 
-    def _merge_assistant_text(self, incoming_text: str, *, source: str) -> str | None:
+    def _flush_deferred_assistant_delta(self) -> None:
+        if not self._deferred_assistant_delta or self.tool_start_times:
+            return
+        if not self.full_text or self.full_text == self._visible_full_text:
+            self._deferred_assistant_delta = False
+            return
+        if self.full_text.startswith(self._visible_full_text):
+            chunk = self.full_text[len(self._visible_full_text) :]
+        else:
+            chunk = self.full_text
+        logger.debug(
+            "Stream flushing deferred assistant delta full_len=%s visible_len=%s",
+            len(self.full_text),
+            len(self._visible_full_text),
+        )
+        self._emit_assistant_delta(chunk)
+
+    def _should_defer_assistant_text(self, *, message_has_tool_calls: bool) -> bool:
+        if message_has_tool_calls:
+            return False
+        return bool(self.tool_start_times)
+
+    def _is_replay_of_visible_text(self, incoming_text: str) -> bool:
+        incoming = str(incoming_text or "").strip()
+        visible = str(self._visible_full_text or self.full_text or "").strip()
+        if not incoming or not visible:
+            return False
+        if visible.endswith(incoming):
+            return True
+        tail = self._last_nonempty_paragraph(visible)
+        return bool(tail and incoming == tail)
+
+    def _updates_agent_text_has_new_visible_content(self, incoming_text: str) -> bool:
+        incoming = str(incoming_text or "").strip()
+        if not incoming:
+            return False
+        visible = str(self._visible_full_text or self.full_text or "").strip()
+        if not visible:
+            return True
+        if incoming == visible or incoming.startswith(visible) or visible.startswith(incoming):
+            return False
+        if min(len(incoming), len(visible)) >= 120:
+            similarity = difflib.SequenceMatcher(None, visible, incoming).quick_ratio()
+            if similarity >= 0.92:
+                return False
+        replay_merge = self._merge_with_replay_guard(visible, incoming)
+        if replay_merge is not None:
+            return replay_merge.strip() != visible
+        return True
+
+    def _merge_assistant_text(
+        self,
+        incoming_text: str,
+        *,
+        source: str,
+    ) -> str | None:
         text = str(incoming_text or "")
         if not text:
             return None
@@ -535,22 +631,100 @@ class StreamProcessor:
         if not current:
             return text
 
-        if text == current:
+        if text == current or text.strip() == current.strip():
             return None
 
+        if text.startswith(current):
+            merged = self._merge_current_prefix_replay(current, text)
+            return merged
+
+        merged = self._merge_with_replay_guard(current, text)
+        if merged is not None:
+            return merged
+
         if source == "messages":
-            if text.startswith(current):
-                return text
             return current + text
 
         if source == "updates_agent":
-            if current == text:
-                return None
             return text
 
-        if text.startswith(current):
-            return text
         return current + text
+
+    def _merge_current_prefix_replay(self, current: str, incoming: str) -> str | None:
+        remainder = incoming[len(current) :]
+        if not remainder:
+            return None
+
+        if current.rstrip().endswith(remainder.strip()):
+            logger.debug(
+                "Stream suppressed duplicate assistant replay after full prefix current_len=%s incoming_len=%s",
+                len(current),
+                len(incoming),
+            )
+            return None
+
+        return incoming
+
+    def _merge_with_replay_guard(self, current: str, incoming: str) -> str | None:
+        replay = self._drop_replayed_tail(current, incoming)
+        if replay is not None:
+            return replay
+
+        overlap = self._suffix_prefix_overlap(current, incoming)
+        if overlap <= 0:
+            return None
+        merged = current + incoming[overlap:]
+        if merged == current or merged.strip() == current.strip():
+            return None
+        logger.debug(
+            "Stream merged assistant text by suffix/prefix overlap overlap=%s current_len=%s incoming_len=%s",
+            overlap,
+            len(current),
+            len(incoming),
+        )
+        return merged
+
+    def _drop_replayed_tail(self, current: str, incoming: str) -> str | None:
+        current_trimmed = current.rstrip()
+        incoming_left = incoming.lstrip()
+        incoming_trimmed = incoming_left.strip()
+        if not current_trimmed or not incoming_trimmed:
+            return None
+
+        if current_trimmed.endswith(incoming_trimmed):
+            logger.debug(
+                "Stream suppressed assistant text replay matching already visible tail incoming_len=%s",
+                len(incoming),
+            )
+            return None
+
+        tail = self._last_nonempty_paragraph(current_trimmed)
+        if not tail or not incoming_left.startswith(tail):
+            return None
+
+        remainder = incoming_left[len(tail) :]
+        if not remainder.strip():
+            return None
+
+        logger.debug(
+            "Stream dropped replayed assistant tail paragraph tail_len=%s incoming_len=%s",
+            len(tail),
+            len(incoming),
+        )
+        return current + remainder
+
+    @staticmethod
+    def _last_nonempty_paragraph(text: str) -> str:
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        return paragraphs[-1] if paragraphs else ""
+
+    @staticmethod
+    def _suffix_prefix_overlap(current: str, incoming: str) -> int:
+        max_len = min(len(current), len(incoming))
+        for size in range(max_len, 0, -1):
+            if current.endswith(incoming[:size]):
+                return size
+        return 0
 
     def _filter_visible_text_tool_call_chunk(self, text: str) -> str:
         raw_text = str(text or "")
@@ -677,6 +851,14 @@ class StreamProcessor:
             if StreamProcessor._has_thinking_content(value):
                 return True
         return False
+
+    @staticmethod
+    def _message_has_tool_calls(message: AIMessage | AIMessageChunk) -> bool:
+        return bool(
+            list(getattr(message, "tool_calls", []) or [])
+            or list(getattr(message, "tool_call_chunks", []) or [])
+            or list(getattr(message, "invalid_tool_calls", []) or [])
+        )
 
     def _handle_tool_calls_from_message(self, message: AIMessage | AIMessageChunk, *, source: str) -> None:
         if isinstance(message, AIMessageChunk):
@@ -1061,6 +1243,7 @@ class StreamProcessor:
 
         self.active_node = "agent"
         self._emit_status(force=True)
+        self._flush_deferred_assistant_delta()
 
     @staticmethod
     def _is_repaired_stream_interruption(message: ToolMessage, content: str) -> bool:
@@ -1105,6 +1288,7 @@ class StreamProcessor:
         if interrupted_payloads:
             self.active_node = "agent"
             self._emit_status(force=True)
+            self._flush_deferred_assistant_delta()
         return interrupted_payloads
 
     def _status_label(self) -> str:

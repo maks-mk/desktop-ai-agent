@@ -110,6 +110,10 @@ ENABLE_SHELL_TOOL=false
 # Self-correction retries after tool/protocol failures.
 # 0 disables automatic self-correction, positive values set the retry ceiling.
 # SELF_CORRECTION_RETRY_LIMIT=8
+# Diagnostic fallback for broken providers that emit textual markers like
+# call:read_file{...}<tool_call|> instead of structured tool_calls.
+# Keep disabled unless you are debugging a specific model/provider.
+# ENABLE_TEXT_TOOL_CALL_RECOVERY=false
 # Require interactive approval before mutating/destructive tools execute
 ENABLE_APPROVALS=true
 # Allow stopping external PIDs not started by this agent

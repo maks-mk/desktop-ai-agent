@@ -307,6 +307,12 @@ class ToolExecutor:
             issue_details=issue_details,
             workspace_boundary_violated=self._workspace_boundary_violated,
         )
+        metadata = self._metadata_for_tool(tool_name)
+        details.setdefault("retryable", bool(parsed_result.retryable))
+        details.setdefault("tool_read_only", bool(metadata.read_only))
+        details.setdefault("tool_mutating", bool(metadata.mutating))
+        details.setdefault("tool_destructive", bool(metadata.destructive))
+        details.setdefault("tool_requires_approval", bool(metadata.requires_approval))
         issue_kind = "approval_denied" if details.get("approval_denied") else "tool_error"
         issue_source = "approval" if issue_kind == "approval_denied" else "tools"
         return build_tool_issue(

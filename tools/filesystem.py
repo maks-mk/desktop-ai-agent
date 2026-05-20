@@ -27,7 +27,6 @@ class FilesystemBackend(Protocol):
     safety_policy: SafetyPolicy | None
 
     def set_policy(self, policy: SafetyPolicy) -> None: ...
-    def file_info(self, path: str) -> str: ...
     def read_file(self, path: str, offset: int = 0, limit: int = 2000, show_line_numbers: bool = False) -> str: ...
     def write_file(self, path: str, content: str) -> str: ...
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
@@ -261,12 +260,6 @@ class DeleteDirectoryInput(BaseModel):
         description="Workspace-relative directory path to delete.",
     )
     recursive: bool = Field(default=False, description="Delete non-empty directory recursively when true.")
-
-
-@tool("file_info")
-def file_info_tool(path: str) -> str:
-    """File metadata: size, lines, suggested read_file chunk."""
-    return _get_synced_backend().file_info(path)
 
 
 @tool("read_file")
@@ -553,7 +546,6 @@ __all__ = [
     "set_working_directory",
     "resolve_workspace_path",
     "max_filesystem_file_size",
-    "file_info_tool",
     "read_file_tool",
     "write_file_tool",
     "edit_file_tool",

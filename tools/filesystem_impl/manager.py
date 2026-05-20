@@ -462,42 +462,6 @@ class FilesystemManager:
         except Exception as exc:
             return format_error(ErrorType.EXECUTION, f"Error finding files: {exc}")
 
-    def file_info(self, path: str) -> str:
-        try:
-            target = self._resolve_path(path)
-            if not target.exists():
-                return format_error(ErrorType.NOT_FOUND, f"File '{path}' not found.")
-            if not target.is_file():
-                return format_error(ErrorType.VALIDATION, f"'{path}' is not a file or directory.")
-
-            stats = target.stat()
-            size_bytes = stats.st_size
-            is_binary = self._is_binary(target)
-            total_lines = self._count_lines(target) if not is_binary else None
-            char_budget = max(500, self._tool_limit() - 120)
-            avg_chars_per_line = round(size_bytes / total_lines) if total_lines and total_lines > 0 else None
-            suggested_limit = max(50, char_budget // max(1, avg_chars_per_line)) if avg_chars_per_line and not is_binary else None
-
-            lines = [
-                f"path:          {path}",
-                f"size:          {size_bytes} bytes ({size_bytes / 1024:.1f} KB)",
-                f"binary:        {'yes' if is_binary else 'no'}",
-            ]
-            if total_lines is not None:
-                lines.append(f"total_lines:   {total_lines}")
-            if avg_chars_per_line is not None:
-                lines.append(f"avg_line_len:  ~{avg_chars_per_line} chars")
-            if suggested_limit is not None:
-                lines.append(
-                    f"suggested_limit: {suggested_limit} lines per read_file() call "
-                    f"(fits within MAX_TOOL_OUTPUT at current settings)"
-                )
-            import time
-            lines.append(f"modified:      {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stats.st_mtime))}")
-            return "\n".join(lines)
-        except Exception as exc:
-            return format_error(ErrorType.EXECUTION, f"Error getting file info: {exc}")
-
     def list_files(self, path: str, include_hidden: bool = False) -> str:
         try:
             target = self._resolve_path(path)

@@ -151,6 +151,7 @@ class AgentConfig(BaseSettings):
     enable_process_tools: bool = Field(default=False, alias="ENABLE_PROCESS_TOOLS")
     enable_shell_tool: bool = Field(default=False, alias="ENABLE_SHELL_TOOL")
     enable_approvals: bool = Field(default=True, alias="ENABLE_APPROVALS")
+    enable_text_tool_call_recovery: bool = Field(default=False, alias="ENABLE_TEXT_TOOL_CALL_RECOVERY")
     allow_external_process_control: bool = Field(default=False, alias="ALLOW_EXTERNAL_PROCESS_CONTROL")
 
     # Tools Limits

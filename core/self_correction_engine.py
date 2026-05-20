@@ -35,7 +35,6 @@ _PATH_LIKE_FIELDS = frozenset({"path", "file_path", "dir_path", "source", "desti
 _EDIT_TARGET_FIELDS = frozenset({"old_string", "new_string"})
 _CANONICAL_PATH_TOOL_NAMES = frozenset(
     {
-        "file_info",
         "read_file",
         "write_file",
         "edit_file",
@@ -124,6 +123,18 @@ def _missing_required_fields(details: Dict[str, Any]) -> Tuple[str, ...]:
     return tuple(normalized)
 
 
+def _missing_required_fields_from_text(text: str) -> Tuple[str, ...]:
+    match = re.search(r"missing required field(?:\(s\))?:\s*([A-Za-z0-9_, .-]+)", str(text or ""), re.IGNORECASE)
+    if not match:
+        return ()
+    fields = [
+        item.strip(" .`'\"")
+        for item in re.split(r"[,/]", match.group(1))
+        if item.strip(" .`'\"")
+    ]
+    return tuple(sorted(set(fields)))
+
+
 def _choose_context_refresh_tool(
     tool_name: str,
     tool_args: Dict[str, Any],
@@ -140,7 +151,7 @@ def _choose_context_refresh_tool(
         path_known = bool(str(tool_args.get("path") or "").strip())
         return "read_file" if path_known else "find_file"
 
-    if tool_name in {"read_file", "write_file", "search_in_file", "file_info"}:
+    if tool_name in {"read_file", "write_file", "search_in_file"}:
         return "find_file"
 
     return tool_name
@@ -314,7 +325,9 @@ def build_repair_plan(
     summary = str(open_tool_issue.get("summary") or "").strip()
     error_type = str(open_tool_issue.get("error_type") or "").strip().upper()
     original_args = _normalize_args_dict(open_tool_issue.get("tool_args") or {})
-    missing_fields = _missing_required_fields(details)
+    explicit_missing_fields = _missing_required_fields(details)
+    inferred_missing_fields = _missing_required_fields_from_text(summary) if not explicit_missing_fields else ()
+    missing_fields = explicit_missing_fields or inferred_missing_fields
     patched_args, normalized_changes = normalize_tool_args(tool_name, original_args, current_task=current_task)
     fingerprint = str(open_tool_issue.get("fingerprint") or "").strip() or repair_fingerprint(
         tool_name,
@@ -454,6 +467,21 @@ def build_repair_plan(
             ),
         )
 
+    if error_type == "VALIDATION" and inferred_missing_fields and _has_path_like_gap(inferred_missing_fields):
+        return _repair_plan(
+            strategy="external_block",
+            reason="validation_missing_path",
+            fingerprint=fingerprint,
+            tool_name=tool_name,
+            suggested_tool_name=tool_name,
+            original_args=original_args,
+            patched_args=original_args,
+            notes="A required path-like field is missing; do not guess mutation targets.",
+            max_auto_repairs=max_auto_repairs,
+            terminal_reason="validation_missing_path",
+            needs_external_input=True,
+        )
+
     if error_type == "VALIDATION" and missing_fields:
         suggested_tool_name, notes = _build_recoverable_validation_notes(
             tool_name,
@@ -491,6 +519,25 @@ def build_repair_plan(
             notes=notes,
             max_auto_repairs=max_auto_repairs,
             llm_guidance="Inspect the latest context, repair the tool call or pick the better tool, then rerun and verify the result.",
+        )
+
+    if (
+        not bool(details.get("retryable"))
+        and bool(details.get("tool_mutating") or details.get("tool_destructive") or details.get("tool_requires_approval"))
+        and tool_name not in {"cli_exec", "edit_file", "write_file"}
+    ):
+        return _repair_plan(
+            strategy="external_block",
+            reason="non_retryable_mutating_tool_error",
+            fingerprint=fingerprint,
+            tool_name=tool_name,
+            suggested_tool_name=tool_name,
+            original_args=original_args,
+            patched_args=original_args,
+            notes="Non-retryable mutating tool failures should be handed off instead of retried automatically.",
+            max_auto_repairs=max_auto_repairs,
+            terminal_reason="non_retryable_mutating_tool_error",
+            needs_external_input=True,
         )
 
     if error_type in {"TIMEOUT", "NETWORK"}:
