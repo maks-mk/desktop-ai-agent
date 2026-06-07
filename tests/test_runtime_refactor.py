@@ -1092,6 +1092,28 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured["reasoning_effort"], "high")
 
+    def test_create_llm_for_aihubmix_glm_reasoning_model_uses_registry_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="glm-5",
+                    OPENAI_BASE_URL="https://aihubmix.com/v1",
+                    MODEL_REASONING_EFFORT="medium",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("extra_body", captured)
+        self.assertEqual(captured["reasoning_effort"], "medium")
+
     def test_create_llm_for_conservative_registry_entries_skips_reasoning_kwargs(self):
         for base_url in (
             "https://api-inference.modelscope.ai/v1",

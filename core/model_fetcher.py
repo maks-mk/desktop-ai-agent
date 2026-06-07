@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from typing import Protocol
+import json
 
 import httpx
 
@@ -58,6 +59,10 @@ class EmptyResultError(FetchError):
     pass
 
 
+class InvalidResponseError(FetchError):
+    pass
+
+
 def _normalize_model_id(raw_name: Any) -> str:
     return str(raw_name or "").strip().removeprefix("models/")
 
@@ -78,6 +83,17 @@ def _raise_for_status(response: httpx.Response) -> None:
     if 500 <= status_code <= 599:
         raise ServerError(f"Server failed with status {status_code}.")
     raise FetchError(f"Request failed with status {status_code}.")
+
+
+def _json_payload(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        content_type = str(response.headers.get("content-type") or "").strip()
+        detail = f" status={response.status_code}"
+        if content_type:
+            detail += f" content-type={content_type}"
+        raise InvalidResponseError(f"Models endpoint returned invalid JSON.{detail}") from exc
 
 
 def _coerce_methods(raw_value: Any) -> tuple[str, ...]:
@@ -108,7 +124,7 @@ class GeminiModelFetcher:
             raise NetworkError("Failed to reach Gemini models endpoint.") from exc
 
         _raise_for_status(response)
-        payload = response.json()
+        payload = _json_payload(response)
         entries: list[ModelEntry] = []
         for item in _coerce_items(payload, "models"):
             model_id = _normalize_model_id(item.get("name"))
@@ -145,7 +161,7 @@ class OpenAICompatibleModelFetcher:
             raise NetworkError("Failed to reach OpenAI-compatible models endpoint.") from exc
 
         _raise_for_status(response)
-        payload = response.json()
+        payload = _json_payload(response)
         all_entries: list[ModelEntry] = []
         for item in _coerce_items(payload, "data"):
             model_id = str(item.get("id") or "").strip()

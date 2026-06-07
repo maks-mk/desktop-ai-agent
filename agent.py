@@ -87,6 +87,7 @@ def _openai_model_supports_reasoning_controls(model_name: str | None) -> bool:
             "gemma",
             "qwen3",
             "qwq",
+            "glm-5",
             "grok-4",
             "mistral-small-latest",
             "mistral-medium-latest",

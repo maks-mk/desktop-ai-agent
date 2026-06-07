@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Final
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenuBar, QMessageBox, QVBoxLayout, QWidget
 
@@ -26,6 +26,7 @@ from ui.window_components.workspace_builder import WorkspaceBuilder
 logger = logging.getLogger("agent")
 APP_DISPLAY_NAME: Final[str] = "AI Agent"
 WINDOWS_APP_USER_MODEL_ID: Final[str] = "simple_ai_agent.ai_agent"
+ASSISTANT_DELTA_FLUSH_MS: Final[int] = 32
 
 
 def _configure_qt_logging() -> None:
@@ -91,7 +92,12 @@ class MainWindow(QMainWindow):
         self._last_rendered_elapsed_text = ""
         self._last_assistant_delta_sequence = 0
         self._last_assistant_delta_text = ""
+        self._pending_assistant_delta_payload: dict | None = None
         self._event_router: StreamEventRouter | None = None
+        self._assistant_delta_flush_timer = QTimer(self)
+        self._assistant_delta_flush_timer.setSingleShot(True)
+        self._assistant_delta_flush_timer.setInterval(ASSISTANT_DELTA_FLUSH_MS)
+        self._assistant_delta_flush_timer.timeout.connect(self._flush_pending_assistant_delta)
 
         self._menu_builder = MenuBuilder(self)
         self._workspace_builder = WorkspaceBuilder(self)
@@ -309,6 +315,9 @@ class MainWindow(QMainWindow):
         self.send_button.setIcon(_fa_icon("fa5s.arrow-up", color=icon_color, size=14))
 
     def _on_run_started(self, payload: dict) -> None:
+        if timer := getattr(self, "_assistant_delta_flush_timer", None):
+            timer.stop()
+        self._pending_assistant_delta_payload = None
         self._last_assistant_delta_sequence = 0
         self._last_assistant_delta_text = ""
         self._status_controller.on_run_started(payload)
@@ -340,6 +349,40 @@ class MainWindow(QMainWindow):
             return
 
         self._last_assistant_delta_text = full_text
+        self._queue_assistant_delta({"full_text": full_text})
+
+    def _queue_assistant_delta(self, payload: dict) -> None:
+        should_flush_now = self._should_flush_assistant_delta_immediately()
+        self._pending_assistant_delta_payload = dict(payload)
+        if should_flush_now:
+            self._flush_pending_assistant_delta()
+            return
+        timer = getattr(self, "_assistant_delta_flush_timer", None)
+        if timer is None:
+            self._flush_pending_assistant_delta()
+        elif not timer.isActive():
+            timer.start()
+
+    def _should_flush_assistant_delta_immediately(self) -> bool:
+        if self.current_turn is None:
+            return True
+        if not getattr(self, "_pending_assistant_delta_payload", None):
+            kinds = self.current_turn.block_kinds()
+            return not kinds or kinds[-1] != "assistant"
+        return False
+
+    def _flush_pending_assistant_delta(self) -> None:
+        pending_payload = getattr(self, "_pending_assistant_delta_payload", None)
+        if self.current_turn is None or not pending_payload:
+            self._pending_assistant_delta_payload = None
+            if timer := getattr(self, "_assistant_delta_flush_timer", None):
+                timer.stop()
+            return
+        payload = pending_payload
+        self._pending_assistant_delta_payload = None
+        if timer := getattr(self, "_assistant_delta_flush_timer", None):
+            timer.stop()
+        full_text = str(payload.get("full_text", "") or "")
         logger.debug(
             "Stream main_window_assistant_delta full_len=%s",
             len(full_text),
@@ -347,17 +390,22 @@ class MainWindow(QMainWindow):
         self.current_turn.set_assistant_markdown(
             full_text,
         )
+        self.current_turn.set_assistant_streaming(True)
         self.transcript.notify_content_changed()
 
     def _on_tool_started(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
         if self.current_turn is None:
             return
+        self.current_turn.set_assistant_streaming(False)
         self.current_turn.start_tool(payload)
         self.transcript.notify_content_changed()
 
     def _on_tool_finished(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
         if self.current_turn is None:
             return
+        self.current_turn.set_assistant_streaming(False)
         self.current_turn.finish_tool(payload)
         self.transcript.notify_content_changed()
 
@@ -368,6 +416,7 @@ class MainWindow(QMainWindow):
         self.transcript.notify_content_changed()
 
     def _on_summary_notice(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
         kind = str(payload.get("kind", "") or "")
         level = str(payload.get("level", "info") or "info")
         if kind == "auto_summary":
@@ -397,6 +446,7 @@ class MainWindow(QMainWindow):
         self.summary_progress_ring.set_summary_progress(payload)
 
     def _on_approval_resolved(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
         if self.current_turn is None:
             return
         auto_resolved = bool(payload.get("auto"))
@@ -413,12 +463,21 @@ class MainWindow(QMainWindow):
         self.transcript.notify_content_changed()
 
     def _on_run_finished(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
+        if self.current_turn is not None:
+            self.current_turn.set_assistant_streaming(False)
         self._status_controller.on_run_finished(payload)
 
     def _on_run_failed(self, payload: dict) -> None:
+        self._flush_pending_assistant_delta()
+        if self.current_turn is not None:
+            self.current_turn.set_assistant_streaming(False)
         self._status_controller.on_run_failed(payload)
 
     def _on_chat_reset(self, _payload: dict) -> None:
+        if timer := getattr(self, "_assistant_delta_flush_timer", None):
+            timer.stop()
+        self._pending_assistant_delta_payload = None
         self._last_assistant_delta_sequence = 0
         self._last_assistant_delta_text = ""
         self._status_controller.on_chat_reset()

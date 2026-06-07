@@ -1,5 +1,8 @@
 import os
+import shutil
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -9,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from ui.main_window_state import StreamEventRouter
 from ui.streaming import StreamEvent
 from ui.theme import build_stylesheet
+from ui.widgets.composer import ComposerTextEdit
 from ui.widgets.foundation import SummaryProgressRing
 
 
@@ -50,3 +54,22 @@ class UiHelperTests(unittest.TestCase):
         self.assertTrue(ring.isVisible())
         self.assertIn("1,600", ring.toolTip())
         self.assertIn("6,400 / 8,000", ring.toolTip())
+
+    def test_composer_file_index_refreshes_empty_mention_after_directory_change(self):
+        composer = ComposerTextEdit()
+        self.addCleanup(composer.deleteLater)
+        temp_root = Path.cwd() / ".tmp_tests" / f"composer-index-{time.time_ns()}"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: temp_root.exists() and shutil.rmtree(temp_root, ignore_errors=True))
+
+        with mock.patch("ui.widgets.composer.Path.cwd", return_value=temp_root):
+            (temp_root / "first.py").write_text("print('first')", encoding="utf-8")
+            composer._ensure_file_index(force_refresh=True)
+            self.assertEqual([row["relative"] for row in composer._filter_mention_candidates("")], ["first.py"])
+
+            (temp_root / "late.py").write_text("print('late')", encoding="utf-8")
+            composer._on_file_index_directory_changed(str(temp_root))
+            rows = composer._filter_mention_candidates("")
+
+        self.assertIn("first.py", [row["relative"] for row in rows])
+        self.assertIn("late.py", [row["relative"] for row in rows])

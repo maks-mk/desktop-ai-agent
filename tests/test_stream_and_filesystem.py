@@ -1230,10 +1230,75 @@ class StreamAndFilesystemTests(unittest.TestCase):
         )
 
         started = [event.payload for event in events if event.type == "tool_started"]
-        self.assertGreaterEqual(len(started), 2)
+        self.assertEqual(len(started), 1)
         self.assertEqual({payload["tool_id"] for payload in started}, {"call-stream"})
         self.assertEqual(started[-1]["args"], {"path": "demo.txt"})
-        self.assertTrue(started[-1].get("refresh"))
+        self.assertFalse(started[-1].get("refresh", False))
+
+    def test_stream_processor_delays_tool_started_until_streamed_args_are_parseable(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "read_file", "args": "", "id": "call-delayed", "index": 0}
+                ],
+            ),
+            source="messages",
+        )
+        self.assertEqual([event for event in events if event.type == "tool_started"], [])
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": None, "args": '{"path": "demo.txt"}', "id": None, "index": 0}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["tool_id"], "call-delayed")
+        self.assertEqual(started[0]["name"], "read_file")
+        self.assertEqual(started[0]["args"], {"path": "demo.txt"})
+
+    def test_stream_processor_starts_tool_from_result_when_streamed_args_never_arrive(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"name": "get_system_info", "args": "", "id": "call-no-args", "index": 0}
+                ],
+                chunk_position="last",
+            ),
+            source="messages",
+        )
+        self.assertEqual([event for event in events if event.type == "tool_started"], [])
+
+        processor._handle_tool_result(
+            ToolMessage(
+                tool_call_id="call-no-args",
+                name="get_system_info",
+                content="ok",
+            )
+        )
+
+        event_types = [event.type for event in events]
+        self.assertIn("tool_started", event_types)
+        self.assertIn("tool_finished", event_types)
+        self.assertLess(event_types.index("tool_started"), event_types.index("tool_finished"))
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertEqual(started[0]["tool_id"], "call-no-args")
+        self.assertEqual(started[0]["name"], "get_system_info")
+        self.assertEqual(started[0]["args"], {})
 
     def test_stream_processor_aliases_late_tool_call_chunk_id_to_preview_card(self):
         events = []
@@ -1985,26 +2050,86 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertTrue(window._is_stale_assistant_delta_without_sequence("Проверяю файлы."))
         self.assertFalse(window._is_stale_assistant_delta_without_sequence("Другая корректировка"))
 
-    def test_main_window_assistant_delta_ignores_older_sequence(self):
-        class _Turn:
-            def __init__(self):
-                self.markdown = ""
+    class _FakeAssistantDeltaTimer:
+        def __init__(self):
+            self.active = False
 
-            def set_assistant_markdown(self, markdown):
-                self.markdown = markdown
+        def isActive(self):
+            return self.active
 
-        class _Transcript:
-            def __init__(self):
-                self.notify_count = 0
+        def start(self):
+            self.active = True
 
-            def notify_content_changed(self):
-                self.notify_count += 1
+        def stop(self):
+            self.active = False
 
+    class _FakeTurn:
+        def __init__(self):
+            self.markdown = ""
+            self.streaming = False
+            self.tool_started = False
+            self._kinds = ["user"]
+
+        def block_kinds(self):
+            return list(self._kinds)
+
+        def set_assistant_markdown(self, markdown):
+            self.markdown = markdown
+            if self._kinds[-1] != "assistant":
+                self._kinds.append("assistant")
+
+        def set_assistant_streaming(self, active):
+            self.streaming = bool(active)
+
+        def start_tool(self, _payload):
+            self.tool_started = True
+            self._kinds.append("tool_group")
+
+    class _FakeTranscript:
+        def __init__(self):
+            self.notify_count = 0
+
+        def notify_content_changed(self):
+            self.notify_count += 1
+
+    def _make_lightweight_main_window(self):
         window = MainWindow.__new__(MainWindow)
-        window.current_turn = _Turn()
-        window.transcript = _Transcript()
+        window.current_turn = self._FakeTurn()
+        window.transcript = self._FakeTranscript()
         window._last_assistant_delta_sequence = 0
         window._last_assistant_delta_text = ""
+        window._pending_assistant_delta_payload = None
+        window._assistant_delta_flush_timer = self._FakeAssistantDeltaTimer()
+        return window
+
+    def test_main_window_coalesces_fast_assistant_delta_updates(self):
+        window = self._make_lightweight_main_window()
+
+        MainWindow._on_assistant_delta(window, {"full_text": "А", "sequence": 1})
+        self.assertEqual(window.current_turn.markdown, "А")
+        self.assertTrue(window.current_turn.streaming)
+
+        MainWindow._on_assistant_delta(window, {"full_text": "АБ", "sequence": 2})
+        self.assertEqual(window.current_turn.markdown, "А")
+        self.assertTrue(window._assistant_delta_flush_timer.isActive())
+
+        MainWindow._flush_pending_assistant_delta(window)
+        self.assertEqual(window.current_turn.markdown, "АБ")
+        self.assertFalse(window._assistant_delta_flush_timer.isActive())
+
+    def test_main_window_tool_start_flushes_pending_delta_and_stops_streaming(self):
+        window = self._make_lightweight_main_window()
+
+        MainWindow._on_assistant_delta(window, {"full_text": "П", "sequence": 1})
+        MainWindow._on_assistant_delta(window, {"full_text": "Проверю.", "sequence": 2})
+        MainWindow._on_tool_started(window, {"tool_id": "call-read", "name": "read_file", "args": {"path": "main.py"}})
+
+        self.assertEqual(window.current_turn.markdown, "Проверю.")
+        self.assertFalse(window.current_turn.streaming)
+        self.assertTrue(window.current_turn.tool_started)
+
+    def test_main_window_assistant_delta_ignores_older_sequence(self):
+        window = self._make_lightweight_main_window()
 
         MainWindow._on_assistant_delta(window, {"full_text": "Новый текст", "sequence": 2})
         MainWindow._on_assistant_delta(window, {"full_text": "Старый текст", "sequence": 1})

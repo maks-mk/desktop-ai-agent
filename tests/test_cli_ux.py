@@ -851,6 +851,38 @@ class GuiUxTests(unittest.TestCase):
         self.assertIn("late-dir/", items)
         self.assertIn("late-dir/late-file.txt", items)
 
+    def test_mention_popup_empty_query_refreshes_dirty_workspace_index(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window.show()
+        self._process_events()
+        temp_root = Path.cwd() / ".tmp_tests" / f"composer-mention-dirty-{time.time_ns()}"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: temp_root.exists() and shutil.rmtree(temp_root, ignore_errors=True))
+
+        with mock.patch("ui.widgets.composer.Path.cwd", return_value=temp_root):
+            (temp_root / "first.py").write_text("print('first')", encoding="utf-8")
+            self.window.composer._ensure_file_index(force_refresh=True)
+            self.window.composer.setPlainText("@")
+            self.window.composer.moveCursor(QTextCursor.MoveOperation.End)
+            self.window.composer._refresh_mention_popup()
+
+            (temp_root / "late.py").write_text("print('late')", encoding="utf-8")
+            self.window.composer._on_file_index_directory_changed(str(temp_root))
+            self.window.composer._refresh_mention_popup()
+
+        self.assertTrue(self.window.composer._mention_popup.isVisible())
+        items = [
+            str(
+                self.window.composer._mention_popup.list_widget.item(index).data(
+                    self.window.composer._mention_popup.DISPLAY_TEXT_ROLE
+                )
+                or ""
+            )
+            for index in range(self.window.composer._mention_popup.list_widget.count())
+        ]
+        self.assertIn("first.py", items)
+        self.assertIn("late.py", items)
+
     def test_mention_popup_closes_on_escape_no_matches_and_cursor_change(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window.show()

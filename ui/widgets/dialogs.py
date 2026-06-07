@@ -36,6 +36,7 @@ from core.model_fetcher import (
     EmptyResultError,
     FetchError,
     GeminiModelFetcher,
+    InvalidResponseError,
     ModelEntry,
     ModelFetcher,
     NetworkError,
@@ -81,6 +82,8 @@ def _fetch_error_message(error: FetchError) -> str:
         return "Нет соединения. Проверьте сеть."
     if isinstance(error, EmptyResultError):
         return "Нет доступных моделей для этого ключа."
+    if isinstance(error, InvalidResponseError):
+        return "Провайдер вернул не JSON. Проверьте Base URL и поддержку /models."
     return "Не удалось загрузить модели."
 
 
@@ -109,7 +112,7 @@ class ModelFetchWorker(QThread):
             self.failed.emit(self._request_id, _fetch_error_message(error))
             return
         except Exception:
-            self.failed.emit(self._fetch_request_id, "Не удалось загрузить модели.")
+            self.failed.emit(self._request_id, "Не удалось загрузить модели.")
             return
         self.fetched.emit(self._request_id, result)
 

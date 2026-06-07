@@ -8,11 +8,13 @@ from core.model_fetcher import (
     AuthError,
     EmptyResultError,
     GeminiModelFetcher,
+    InvalidResponseError,
     ModelEntry,
     NetworkError,
     OpenAICompatibleModelFetcher,
     RateLimitError,
 )
+from ui.widgets.dialogs import ModelFetchWorker
 
 
 class _FakeAsyncClient:
@@ -30,6 +32,11 @@ class _FakeAsyncClient:
         if self._error is not None:
             raise self._error
         return self._response
+
+
+class _FailingFetcher:
+    async def fetch(self, _api_key: str, _base_url: str = ""):
+        raise RuntimeError("boom")
 
 
 def _gemini_response(*models: dict, status_code: int = 200) -> httpx.Response:
@@ -169,6 +176,27 @@ class ModelFetcherTests(unittest.TestCase):
         with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(error=timeout_error)):
             with self.assertRaises(NetworkError):
                 self._run(GeminiModelFetcher().fetch("gm-key"))
+
+    def test_openai_invalid_json_raises_fetch_error(self):
+        response = httpx.Response(
+            200,
+            text="<html>not json</html>",
+            headers={"content-type": "text/html"},
+            request=httpx.Request("GET", "https://example.test/v1/models"),
+        )
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
+            with self.assertRaises(InvalidResponseError) as context:
+                self._run(OpenAICompatibleModelFetcher().fetch("sk-key", "https://example.test/v1"))
+        self.assertIn("invalid JSON", str(context.exception))
+
+    def test_model_fetch_worker_reports_unexpected_error_with_request_id(self):
+        worker = ModelFetchWorker(42, _FailingFetcher(), "sk-key", "https://example.test/v1")
+        captured = []
+        worker.failed.connect(lambda request_id, message: captured.append((request_id, message)))
+
+        worker.run()
+
+        self.assertEqual(captured, [(42, "Не удалось загрузить модели.")])
 
 
 if __name__ == "__main__":

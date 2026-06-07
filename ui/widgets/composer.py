@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, QMimeData, Qt, QTimer, Signal
+from PySide6.QtCore import QFileSystemWatcher, QPoint, QMimeData, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,6 +49,9 @@ class ComposerTextEdit(QPlainTextEdit):
         self._file_index_root = ""
         self._file_index_static = False
         self._file_index_last_scan_at = 0.0
+        self._file_index_dirty = True
+        self._file_index_watcher = QFileSystemWatcher(self)
+        self._file_index_watcher.directoryChanged.connect(self._on_file_index_directory_changed)
         self._mention_popup: _ComposerMentionPopup | None = None
         self.textChanged.connect(self._refresh_mention_popup)
         self.cursorPositionChanged.connect(self._refresh_mention_popup)
@@ -112,6 +115,8 @@ class ComposerTextEdit(QPlainTextEdit):
         root = Path.cwd()
         self._file_index_root = str(root)
         self._file_index_static = True
+        self._file_index_dirty = False
+        self._clear_file_index_watcher()
         rows: dict[str, dict[str, Any]] = {}
         for value in rel_paths:
             relative_path = Path(value)
@@ -305,6 +310,7 @@ class ComposerTextEdit(QPlainTextEdit):
         root_str = str(root)
         should_rescan = (
             force_refresh
+            or self._file_index_dirty
             or self._file_index_root != root_str
             or not self._file_index
         )
@@ -323,6 +329,8 @@ class ComposerTextEdit(QPlainTextEdit):
         self._file_index = sorted(rows.values(), key=lambda row: row["relative"])
         self._file_index_root = root_str
         self._file_index_last_scan_at = time.monotonic()
+        self._file_index_dirty = False
+        self._sync_file_index_watcher(root, self._file_index)
 
     @staticmethod
     def _add_index_row(rows: dict[str, dict[str, Any]], row: dict[str, Any]) -> None:
@@ -351,7 +359,11 @@ class ComposerTextEdit(QPlainTextEdit):
         }
 
     def _filter_mention_candidates(self, query_lower: str) -> list[dict[str, Any]]:
-        self._ensure_file_index()
+        force_refresh = not self._file_index_static and self._file_index and (
+            self._file_index_dirty
+            or (not query_lower and time.monotonic() - self._file_index_last_scan_at > 2.0)
+        )
+        self._ensure_file_index(force_refresh=force_refresh)
         if not self._file_index:
             return []
 
@@ -406,9 +418,33 @@ class ComposerTextEdit(QPlainTextEdit):
     def _warm_file_index(self) -> None:
         if self._file_index_static:
             return
-        if time.monotonic() - self._file_index_last_scan_at < 3.0 and self._file_index:
+        if not self._file_index_dirty and time.monotonic() - self._file_index_last_scan_at < 3.0 and self._file_index:
             return
         self._ensure_file_index()
+
+    def _on_file_index_directory_changed(self, _path: str) -> None:
+        if self._file_index_static:
+            return
+        self._file_index_dirty = True
+        if self._current_mention_token() is not None:
+            QTimer.singleShot(0, self._refresh_mention_popup)
+
+    def _clear_file_index_watcher(self) -> None:
+        watched = list(self._file_index_watcher.directories())
+        if watched:
+            self._file_index_watcher.removePaths(watched)
+
+    def _sync_file_index_watcher(self, root: Path, rows: list[dict[str, Any]]) -> None:
+        self._clear_file_index_watcher()
+        paths = {str(root)}
+        for row in rows:
+            if not row.get("is_dir"):
+                continue
+            relative = str(row.get("relative") or "").strip()
+            if not relative:
+                continue
+            paths.add(str(root / Path(relative)))
+        self._file_index_watcher.addPaths(sorted(paths))
 
     def _position_mention_popup(self) -> None:
         popup = self._mention_popup

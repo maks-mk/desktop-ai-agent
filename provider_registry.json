@@ -100,13 +100,13 @@
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
-        "path": "extra_body.reasoning.effort",
-        "allowed_values": ["low", "medium", "high"],
+        "path": "reasoning_effort",
+        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
         "value_map": {
-          "minimal": "low",
-          "xhigh": "high"
+          "none": "none"
         }
-      }
+      },
+      "notes": "AIHubMix unified OpenAI-compatible chat reasoning uses top-level reasoning_effort."
     },
     {
       "id": "mistral",
@@ -118,13 +118,15 @@
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["low", "medium", "high"],
+        "allowed_values": ["high"],
         "value_map": {
-          "minimal": "low",
+          "minimal": "high",
+          "low": "high",
+          "medium": "high",
           "xhigh": "high"
         }
       },
-      "notes": "Mistral adjustable reasoning for supported models; guarded by model name."
+      "notes": "Mistral adjustable reasoning currently documents high/none for supported models; none is handled globally by MODEL_REASONING_EFFORT=none."
     },
     {
       "id": "modelscope_global",

@@ -1681,6 +1681,14 @@ def build_stylesheet() -> str:
         font-size: 11.5pt;
     }}
 
+    QLabel#AssistantStreamCursor {{
+        color: {blend_hex(ACCENT_BLUE, TEXT_PRIMARY, 0.18)};
+        background: transparent;
+        padding: 0px 0px 2px 1px;
+        font-size: 12pt;
+        font-weight: 700;
+    }}
+
     QLabel#TranscriptMeta {{
         color: {TEXT_MUTED};
         font-size: 10pt;

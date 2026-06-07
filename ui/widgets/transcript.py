@@ -144,6 +144,11 @@ class ConversationTurnWidget(QWidget):
 
         self._assistant_markdown = markdown
 
+    def set_assistant_streaming(self, active: bool) -> None:
+        if not self.assistant_segments:
+            return
+        self.assistant_segments[-1].set_streaming(active)
+
     def add_notice(self, message: str, level: str = "info") -> None:
         self._append_block("notice", NoticeWidget(message, level=level, parent=self))
 
@@ -158,6 +163,7 @@ class ConversationTurnWidget(QWidget):
         return segment
 
     def start_tool(self, payload: dict[str, Any]) -> ToolCardWidget:
+        self.set_assistant_streaming(False)
         tool_id = payload.get("tool_id", "")
         card = self.tool_cards.get(tool_id)
         if card is None:

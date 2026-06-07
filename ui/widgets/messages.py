@@ -216,6 +216,10 @@ class AssistantMessageWidget(QFrame):
         self._layout.addWidget(self.content_widget, 1)
 
         self.parts_widgets = []
+        self.cursor_label = QLabel("▌", self.content_widget)
+        self.cursor_label.setObjectName("AssistantStreamCursor")
+        self.cursor_label.setVisible(False)
+        self.content_layout.addWidget(self.cursor_label, 0, Qt.AlignLeft)
 
     @staticmethod
     def _split_markdown_parts(markdown: str) -> list[tuple[str, str, str]]:
@@ -238,11 +242,10 @@ class AssistantMessageWidget(QFrame):
             is_code = parts[idx][0] == "code"
             if is_code:
                 w = CodeBlockWidget("", "", parent=self.content_widget)
-                self.content_layout.addWidget(w)
             else:
                 w = AutoTextBrowser(self.content_widget)
                 w.setObjectName("AssistantBody")
-                self.content_layout.addWidget(w)
+            self.content_layout.insertWidget(len(self.parts_widgets), w)
             self.parts_widgets.append(w)
 
         while len(self.parts_widgets) > len(parts):
@@ -268,6 +271,9 @@ class AssistantMessageWidget(QFrame):
 
     def set_markdown(self, markdown: str) -> None:
         self.set_content(markdown)
+
+    def set_streaming(self, active: bool) -> None:
+        self.cursor_label.setVisible(bool(active))
 
     def markdown(self) -> str:
         return self._markdown

@@ -895,9 +895,14 @@ class StreamProcessor:
                             for tool_call in tool_calls
                         ],
                         index_order=None,
+                        require_args_before_start=True,
                     )
                 if not processed_any:
-                    self._process_tool_calls(list(getattr(message, "tool_calls", []) or []), index_order=None)
+                    self._process_tool_calls(
+                        list(getattr(message, "tool_calls", []) or []),
+                        index_order=None,
+                        require_args_before_start=True,
+                    )
                 if getattr(message, "chunk_position", None) == "last":
                     self._tool_chunk_accumulators.pop(accumulator_key, None)
                 return
@@ -953,13 +958,19 @@ class StreamProcessor:
             tool_id = str(raw_id or "").strip()
             self._tool_id_for_index(index, tool_id, str(raw_name or "").strip())
 
-    def _process_tool_calls(self, tool_calls: list[Dict[str, Any]], *, index_order: list[int] | None) -> None:
+    def _process_tool_calls(
+        self,
+        tool_calls: list[Dict[str, Any]],
+        *,
+        index_order: list[int] | None,
+        require_args_before_start: bool = False,
+    ) -> None:
         for position, tool_call in enumerate(tool_calls):
             normalized = dict(tool_call)
             if index_order is not None and position < len(index_order):
                 normalized["index"] = index_order[position]
             self._remember_tool_call(normalized)
-            self._emit_tool_started(normalized)
+            self._emit_tool_started(normalized, require_args=require_args_before_start)
 
     def _resolve_tool_id(self, tool_id: Any) -> str:
         current = str(tool_id or "").strip()
@@ -1131,7 +1142,13 @@ class StreamProcessor:
 
         return merged
 
-    def _emit_tool_started(self, tool_call: Dict[str, Any]) -> None:
+    def _emit_tool_started(
+        self,
+        tool_call: Dict[str, Any],
+        *,
+        require_args: bool = False,
+        force: bool = False,
+    ) -> None:
         tool_id = self._normalize_tool_call_id(tool_call)
         if not tool_id or tool_id in self.printed_tool_ids or tool_id in self._completed_tool_ids:
             return
@@ -1143,6 +1160,9 @@ class StreamProcessor:
             or "unknown_tool"
         )
         tool_args = self._merge_tool_args(tool_info.get("args", {}), tool_call.get("args", {}))
+        if require_args and not force and not tool_args:
+            self.tool_buffer[tool_id] = {"name": tool_name, "args": tool_args}
+            return
         self.tool_buffer[tool_id] = {"name": tool_name, "args": tool_args}
 
         self.tool_start_times[tool_id] = time.perf_counter()
@@ -1184,7 +1204,7 @@ class StreamProcessor:
                 }
             )
         if tool_id in self.tool_buffer and tool_id not in self.printed_tool_ids:
-            self._emit_tool_started({"id": tool_id, **self.tool_buffer[tool_id]})
+            self._emit_tool_started({"id": tool_id, **self.tool_buffer[tool_id]}, force=True)
 
         tool_info = self.tool_buffer.get(tool_id, {})
         tool_name = (
