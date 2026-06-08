@@ -9,6 +9,9 @@
       "match": ["api.openai.com"],
       "match_type": "exact",
       "supports_reasoning": true,
+      "model_match": {
+        "prefix": ["gpt-5", "o1", "o3", "o4"]
+      },
       "validation": "map",
       "reasoning": {
         "path": "reasoning.effort",
@@ -107,6 +110,24 @@
         }
       },
       "notes": "AIHubMix unified OpenAI-compatible chat reasoning uses top-level reasoning_effort."
+    },
+    {
+      "id": "baai",
+      "enabled": true,
+      "priority": 70,
+      "match": ["api.b.ai"],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": ["low", "medium", "high"],
+        "value_map": {
+          "minimal": "low",
+          "xhigh": "high"
+        }
+      },
+      "notes": "Experimental: api.b.ai OpenAI-compatible models were observed streaming delta.reasoning/reasoning_content; top-level reasoning_effort is used conservatively."
     },
     {
       "id": "mistral",

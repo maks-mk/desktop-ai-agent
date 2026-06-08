@@ -491,6 +491,13 @@ class StreamProcessor:
             len(chunk or ""),
             _describe_thinking_signal(message),
         )
+        if chunk and self._is_reasoning_only_visible_text(message, chunk):
+            reasoning_logger.debug(
+                "suppressed reasoning-only visible chunk source=%s chunk_preview=%s",
+                source,
+                _clip_debug_text(chunk),
+            )
+            return
         if not chunk:
             logger.debug(
                 "Stream empty assistant chunk content_type=%s additional_kwargs=%s response_metadata=%s content_preview=%s",
@@ -799,6 +806,32 @@ class StreamProcessor:
         if isinstance(additional_kwargs, dict):
             return StreamProcessor._extract_text_content(additional_kwargs.get("content_blocks"))
         return ""
+
+    @staticmethod
+    def _is_reasoning_only_visible_text(message: AIMessage | AIMessageChunk, chunk: str) -> bool:
+        signal = _describe_thinking_signal(message)
+        if not signal:
+            return False
+        metadata = getattr(message, "additional_kwargs", {}) or {}
+        if not isinstance(metadata, dict):
+            return False
+        reasoning_values = []
+        for key in (
+            "reasoning_content",
+            "reasoning",
+            "reasoning_delta",
+            "analysis",
+            "analysis_content",
+            "thinking",
+            "thinking_content",
+        ):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                reasoning_values.append(value)
+        if not reasoning_values:
+            return False
+        normalized_chunk = str(chunk or "").strip()
+        return any(normalized_chunk == value.strip() for value in reasoning_values)
 
     @staticmethod
     def _has_thinking_content(content: Any) -> bool:

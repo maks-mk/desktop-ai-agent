@@ -9,6 +9,7 @@ from core.reasoning_debug import debug_event
 
 MATCH_TYPES = {"exact", "suffix"}
 VALIDATION_MODES = {"strict", "map", "passthrough"}
+MODEL_MATCH_FIELDS = {"exact", "prefix", "contains"}
 
 
 class ProviderValidationError(ValueError):
@@ -176,8 +177,27 @@ class ProviderRegistry:
             provider["validation"] = validation
             if provider["supports_reasoning"]:
                 _validate_reasoning_config(provider_id, provider)
+                _validate_model_match_config(provider_id, provider)
             providers.append(provider)
         return providers
+
+
+def _validate_model_match_config(provider_id: str, provider: dict[str, Any]) -> None:
+    model_match = provider.get("model_match")
+    if model_match is None:
+        return
+    if not isinstance(model_match, dict):
+        raise RegistryValidationError(f'model_match must be an object for provider "{provider_id}"')
+    unknown_fields = set(model_match) - MODEL_MATCH_FIELDS
+    if unknown_fields:
+        raise RegistryValidationError(
+            f'unsupported model_match field(s) for provider "{provider_id}": {", ".join(sorted(unknown_fields))}'
+        )
+    if not any(field in model_match for field in MODEL_MATCH_FIELDS):
+        raise RegistryValidationError(f'model_match must define at least one rule for provider "{provider_id}"')
+    for field in MODEL_MATCH_FIELDS:
+        if field in model_match:
+            _ensure_str_list(model_match.get(field), field=f"model_match.{field}", provider_id=provider_id)
 
 
 def _validate_reasoning_config(provider_id: str, provider: dict[str, Any]) -> None:
@@ -214,6 +234,28 @@ def _resolve_reasoning_value(config: Mapping[str, Any], effort_value: str) -> st
         if value not in allowed_values:
             raise ProviderValidationError(provider_id, effort_value, allowed_values)
     return value
+
+
+def provider_supports_reasoning_for_model(config: Mapping[str, Any] | None, model_name: str | None) -> bool:
+    if config is None or not bool(config.get("supports_reasoning", False)):
+        return False
+    model_match = config.get("model_match")
+    if model_match is None:
+        return True
+    if not isinstance(model_match, Mapping):
+        return False
+
+    normalized = _clean_text(model_name).lower()
+    if not normalized:
+        return False
+    exact = [_clean_text(value).lower() for value in model_match.get("exact", []) if _clean_text(value)]
+    if normalized in exact:
+        return True
+    prefixes = [_clean_text(value).lower() for value in model_match.get("prefix", []) if _clean_text(value)]
+    if any(normalized.startswith(prefix) for prefix in prefixes):
+        return True
+    markers = [_clean_text(value).lower() for value in model_match.get("contains", []) if _clean_text(value)]
+    return any(marker in normalized for marker in markers)
 
 
 def build_reasoning_kwargs(

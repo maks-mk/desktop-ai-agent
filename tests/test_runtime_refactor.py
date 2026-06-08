@@ -845,6 +845,8 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["api_key"], "sk-test")
         self.assertEqual(captured["max_retries"], 0)
         self.assertTrue(captured["stream_usage"])
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("reasoning_effort", captured)
 
     async def test_register_llm_cleanup_callback_closes_async_client(self):
         registry = ToolRegistry(self._make_config())
@@ -950,6 +952,28 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("reasoning", captured)
         self.assertEqual(captured["extra_body"], {"reasoning": {"effort": "high"}})
+
+    def test_create_llm_for_openai_compatible_provider_does_not_require_model_name_gate(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="new-provider-reasoning-model",
+                    OPENAI_BASE_URL="https://api.b.ai/v1",
+                    MODEL_REASONING_EFFORT="medium",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("extra_body", captured)
+        self.assertEqual(captured["reasoning_effort"], "medium")
 
     def test_openai_raw_reasoning_delta_is_extracted_from_compatible_stream_chunk(self):
         chunk = {
@@ -1113,6 +1137,28 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reasoning", captured)
         self.assertNotIn("extra_body", captured)
         self.assertEqual(captured["reasoning_effort"], "medium")
+
+    def test_create_llm_for_baai_minimax_reasoning_model_uses_registry_reasoning_effort(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="minimax-m3",
+                    OPENAI_BASE_URL="https://api.b.ai/v1",
+                    MODEL_REASONING_EFFORT="xhigh",
+                )
+            )
+
+        self.assertNotIn("reasoning", captured)
+        self.assertNotIn("extra_body", captured)
+        self.assertEqual(captured["reasoning_effort"], "high")
 
     def test_create_llm_for_conservative_registry_entries_skips_reasoning_kwargs(self):
         for base_url in (

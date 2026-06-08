@@ -494,6 +494,24 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(statuses[-1]["node"], "agent")
         self.assertEqual(statuses[-1]["label"], "Thinking...")
 
+    def test_stream_processor_suppresses_reasoning_only_content_duplicate(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessageChunk(content="Now", additional_kwargs={"reasoning_content": "Now"}),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+        self.assertEqual(deltas, [])
+
     def test_stream_processor_reports_agent_status_as_thinking_for_reasoning_details(self):
         events = []
         processor = StreamProcessor(events.append)

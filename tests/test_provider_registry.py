@@ -6,6 +6,7 @@ from core.provider_registry import (
     ProviderValidationError,
     RegistryValidationError,
     build_reasoning_kwargs,
+    provider_supports_reasoning_for_model,
     set_nested,
 )
 
@@ -72,6 +73,27 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIs(build_reasoning_kwargs(payload, None, "high"), payload)
         self.assertEqual(payload, {"model": "x"})
 
+    def test_provider_without_model_match_supports_reasoning_for_any_model(self):
+        config = ProviderRegistry(_registry(_provider())).match("https://openrouter.ai/api/v1")
+
+        self.assertTrue(provider_supports_reasoning_for_model(config, "any-new-provider-model"))
+
+    def test_provider_model_match_limits_strict_provider_models(self):
+        config = ProviderRegistry(
+            _registry(
+                _provider(
+                    id="openai",
+                    match=["api.openai.com"],
+                    match_type="exact",
+                    model_match={"prefix": ["gpt-5", "o1", "o3", "o4"]},
+                    reasoning={"path": "reasoning.effort", "allowed_values": ["medium"], "value_map": {}},
+                )
+            )
+        ).match("https://api.openai.com/v1")
+
+        self.assertTrue(provider_supports_reasoning_for_model(config, "gpt-5-mini"))
+        self.assertFalse(provider_supports_reasoning_for_model(config, "gpt-4o"))
+
     def test_build_reasoning_kwargs_maps_value_and_sets_nested_path(self):
         config = ProviderRegistry(_registry(_provider())).match("https://openrouter.ai/api/v1")
         payload = {"model": "x"}
@@ -79,6 +101,28 @@ class ProviderRegistryTests(unittest.TestCase):
         build_reasoning_kwargs(payload, config, "xhigh")
 
         self.assertEqual(payload, {"model": "x", "extra_body": {"reasoning": {"effort": "high"}}})
+
+    def test_baai_registry_entry_uses_top_level_reasoning_effort(self):
+        config = ProviderRegistry(
+            _registry(
+                _provider(
+                    id="baai",
+                    priority=70,
+                    match=["api.b.ai"],
+                    match_type="exact",
+                    reasoning={
+                        "path": "reasoning_effort",
+                        "allowed_values": ["low", "medium", "high"],
+                        "value_map": {"minimal": "low", "xhigh": "high"},
+                    },
+                )
+            )
+        ).match("https://api.b.ai/v1")
+        payload = {"model": "minimax-m3"}
+
+        build_reasoning_kwargs(payload, config, "xhigh")
+
+        self.assertEqual(payload, {"model": "minimax-m3", "reasoning_effort": "high"})
 
     def test_build_reasoning_kwargs_supports_extra_fields(self):
         config = ProviderRegistry(
@@ -160,6 +204,9 @@ class ProviderRegistryTests(unittest.TestCase):
             _provider(validation="bad"),
             _provider(validation="strict", reasoning={"path": "reasoning_effort", "allowed_values": []}),
             _provider(validation="map", reasoning={"path": "reasoning_effort", "allowed_values": ["low"]}),
+            _provider(model_match={}),
+            _provider(model_match={"regex": ["bad"]}),
+            _provider(model_match={"prefix": []}),
         ]
 
         for provider in invalid_cases:

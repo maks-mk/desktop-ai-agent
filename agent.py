@@ -16,7 +16,7 @@ from core.logging_config import setup_logging
 from core.model_profiles import ModelProfileStore, find_active_profile, find_profile_by_id
 from core.multimodal import extract_model_capabilities, resolve_model_capabilities
 from core.nodes import AgentNodes
-from core.provider_registry import ProviderRegistry, build_reasoning_kwargs
+from core.provider_registry import ProviderRegistry, build_reasoning_kwargs, provider_supports_reasoning_for_model
 from core.reasoning_debug import debug_event, elapsed_since, log_unknown_fields, now, preview_value
 from core.run_logger import JsonlRunLogger
 from core.state import AgentState
@@ -73,27 +73,6 @@ def _chat_model_accepts_kwarg(model_cls: type, name: str) -> bool:
     if isinstance(fields, dict):
         return name in fields
     return True
-
-
-def _openai_model_supports_reasoning_controls(model_name: str | None) -> bool:
-    normalized = _normalized_model_name(model_name)
-    return normalized.startswith(("gpt-5", "o1", "o3", "o4")) or any(
-        marker in normalized
-        for marker in (
-            "reason",
-            "thinking",
-            "deepseek-r1",
-            "gpt-oss",
-            "gemma",
-            "qwen3",
-            "qwq",
-            "glm-5",
-            "grok-4",
-            "mistral-small-latest",
-            "mistral-medium-latest",
-            "mistral-medium-3-5",
-        )
-    )
 
 
 def _normalized_reasoning_effort(value: str | None) -> str:
@@ -841,11 +820,11 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             "max_retries": 0,
             "stream_usage": True,
         }
-        if bool(getattr(config, "enable_model_reasoning", True)) and _openai_model_supports_reasoning_controls(
-            config.openai_model
-        ):
-            registry = ProviderRegistry.from_path(config.provider_registry_path)
-            provider_config = registry.match(config.openai_base_url)
+        registry = ProviderRegistry.from_path(config.provider_registry_path)
+        provider_config = registry.match(config.openai_base_url)
+        reasoning_enabled = bool(getattr(config, "enable_model_reasoning", True))
+        provider_model_supports_reasoning = provider_supports_reasoning_for_model(provider_config, config.openai_model)
+        if reasoning_enabled and provider_model_supports_reasoning:
             debug_event(
                 "reasoning_request",
                 provider=provider_config.get("id") if isinstance(provider_config, dict) else None,
@@ -855,11 +834,12 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
                 reasoning_effort=_normalized_reasoning_effort(getattr(config, "model_reasoning_effort", "medium")),
             )
             reasoning_logger.debug(
-                "openai reasoning registry match model=%s base_url=%s provider_id=%s supports_reasoning=%s validation=%s path=%s effort=%s",
+                "openai reasoning registry match model=%s base_url=%s provider_id=%s supports_reasoning=%s model_supported=%s validation=%s path=%s effort=%s",
                 config.openai_model,
                 config.openai_base_url,
                 provider_config.get("id") if isinstance(provider_config, dict) else None,
                 provider_config.get("supports_reasoning") if isinstance(provider_config, dict) else None,
+                provider_model_supports_reasoning,
                 provider_config.get("validation") if isinstance(provider_config, dict) else None,
                 (provider_config.get("reasoning") or {}).get("path") if isinstance(provider_config, dict) else None,
                 _normalized_reasoning_effort(getattr(config, "model_reasoning_effort", "medium")),
@@ -881,10 +861,13 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             )
         else:
             reasoning_logger.debug(
-                "openai reasoning skipped model=%s reasoning_enabled=%s model_supports_reasoning=%s",
+                "openai reasoning skipped model=%s base_url=%s provider_id=%s reasoning_enabled=%s provider_supports_reasoning=%s model_supported=%s",
                 config.openai_model,
-                bool(getattr(config, "enable_model_reasoning", True)),
-                _openai_model_supports_reasoning_controls(config.openai_model),
+                config.openai_base_url,
+                provider_config.get("id") if isinstance(provider_config, dict) else None,
+                reasoning_enabled,
+                provider_config.get("supports_reasoning") if isinstance(provider_config, dict) else None,
+                provider_model_supports_reasoning,
             )
         return ChatOpenAI(**openai_kwargs)
     raise ValueError(f"Unknown provider: {config.provider}")
