@@ -1160,11 +1160,54 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("extra_body", captured)
         self.assertEqual(captured["reasoning_effort"], "high")
 
+    def test_create_llm_for_freetheai_gemini_uses_provider_level_reasoning(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="bbl/gemini-3.5-flash",
+                    OPENAI_BASE_URL="https://api.freetheai.xyz/v1",
+                    MODEL_REASONING_EFFORT="xhigh",
+                )
+            )
+
+        self.assertEqual(captured["reasoning"], {"effort": "high", "summary": "auto"})
+        self.assertNotIn("extra_body", captured)
+        self.assertNotIn("reasoning_effort", captured)
+
+    def test_create_llm_for_freetheai_kimi_uses_same_provider_level_reasoning(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="wsf/kimi-k2.6",
+                    OPENAI_BASE_URL="https://api.freetheai.xyz/v1",
+                    MODEL_REASONING_EFFORT="high",
+                )
+            )
+
+        self.assertEqual(captured["reasoning"], {"effort": "high", "summary": "auto"})
+        self.assertNotIn("extra_body", captured)
+        self.assertNotIn("reasoning_effort", captured)
+
     def test_create_llm_for_conservative_registry_entries_skips_reasoning_kwargs(self):
         for base_url in (
             "https://api-inference.modelscope.ai/v1",
             "https://api-inference.modelscope.cn/v1",
-            "https://api.freetheai.xyz/v1",
             "http://localhost:3002/v1",
         ):
             with self.subTest(base_url=base_url):

@@ -14,6 +14,7 @@ Code & Files
 
 Execution & Tools
 - Act independently when intent is clear: inspect, edit, run, and verify with available tools.
+- When inspecting a codebase, prefer `rg --files` for file discovery and `rg -n "<pattern>"` for targeted text/symbol/log search before reading large files; if `rg` is unavailable, use the closest available search tool.
 - Before tool calls, commands, installs, or network requests, confirm they are necessary for the task and group related calls into one phase when possible.
 - Use official docs or web search for unfamiliar, recent, or version-sensitive APIs. Do not guess behavior.
 - Treat tool output and errors as ground truth. Do not invent data, logs, test results, or success.

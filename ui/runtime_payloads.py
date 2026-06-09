@@ -18,7 +18,7 @@ from core.session_store import (
     SessionStore,
     normalize_project_path,
 )
-from core.summarize_policy import estimate_tokens, should_summarize
+from core.summarize_policy import estimate_context_tokens, should_summarize
 from core.text_utils import build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
@@ -181,7 +181,8 @@ def build_summary_progress_payload(config: AgentConfig, state_values: dict[str, 
     values = state_values if isinstance(state_values, dict) else {}
     messages = list(values.get("messages", []) or [])
     threshold = max(0, _safe_int(getattr(config, "summary_threshold", 0), 0))
-    estimated_tokens = estimate_tokens(messages) if messages else 0
+    reserved_tokens = max(0, _safe_int(getattr(config, "summary_reserved_tokens", 0), 0))
+    estimated_tokens = estimate_context_tokens(messages, reserved_tokens=reserved_tokens)
     progress = (estimated_tokens / threshold) if threshold else 0.0
     has_summary = bool(str(values.get("summary") or "").strip())
     keep_last = _safe_int(getattr(config, "summary_keep_last", 0), 0)
@@ -190,11 +191,13 @@ def build_summary_progress_payload(config: AgentConfig, state_values: dict[str, 
         threshold=threshold,
         keep_last=keep_last,
         has_summary=has_summary,
+        reserved_tokens=reserved_tokens,
     ) if messages and threshold > 0 else False
     return {
         "estimated_tokens": estimated_tokens,
         "threshold": threshold,
         "remaining_tokens": max(0, threshold - estimated_tokens),
+        "reserved_tokens": reserved_tokens if messages else 0,
         "progress": max(0.0, min(1.0, progress)),
         "message_count": len(messages),
         "has_summary": has_summary,

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from core.summarize_policy import estimate_tokens, should_summarize
 from ui.runtime_payloads import (
     append_project_label,
     build_summary_progress_payload,
@@ -27,6 +28,40 @@ class RuntimePayloadTests(unittest.TestCase):
         self.assertGreaterEqual(payload["progress"], 0.0)
         self.assertLessEqual(payload["progress"], 1.0)
         self.assertFalse(payload["will_summarize"])
+
+    def test_build_summary_progress_payload_includes_reserved_context_tokens(self):
+        config = type(
+            "Config",
+            (),
+            {
+                "summary_threshold": 100,
+                "summary_keep_last": 4,
+                "summary_reserved_tokens": 25,
+            },
+        )()
+        messages = [HumanMessage(content="hello world")]
+
+        payload = build_summary_progress_payload(config, {"messages": messages, "summary": ""})
+
+        self.assertEqual(payload["reserved_tokens"], 25)
+        self.assertEqual(payload["estimated_tokens"], estimate_tokens(messages) + 25)
+        self.assertEqual(payload["remaining_tokens"], max(0, 100 - payload["estimated_tokens"]))
+
+    def test_should_summarize_uses_reserved_context_tokens(self):
+        messages = [
+            HumanMessage(content="old question"),
+            AIMessage(content="old answer"),
+            HumanMessage(content="new question"),
+        ]
+
+        self.assertTrue(
+            should_summarize(
+                messages,
+                threshold=50,
+                keep_last=1,
+                reserved_tokens=1000,
+            )
+        )
 
     def test_build_summary_progress_payload_marks_ready_to_summarize(self):
         config = type("Config", (), {"summary_threshold": 10, "summary_keep_last": 1})()

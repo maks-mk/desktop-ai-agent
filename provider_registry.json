@@ -193,11 +193,21 @@
       "id": "freetheai",
       "enabled": true,
       "priority": 60,
-      "match": ["freetheai.xyz"],
-      "match_type": "suffix",
-      "supports_reasoning": false,
-      "validation": "passthrough",
-      "notes": "Conservative default: do not send undocumented reasoning fields."
+      "match": ["api.freetheai.xyz"],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning.effort",
+        "allowed_values": ["minimal", "low", "medium", "high"],
+        "value_map": {
+          "xhigh": "high"
+        },
+        "extra_fields": {
+          "reasoning.summary": "auto"
+        }
+      },
+      "notes": "Experimental: OpenAI-style reasoning payload for FreeTheAI models; bbl/gemini-3.5-flash and wsf/kimi-k2.6 use the same provider-level reasoning format."
     }
   ]
 }

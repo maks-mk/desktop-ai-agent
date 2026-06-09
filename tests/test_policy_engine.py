@@ -34,6 +34,29 @@ class ToolApprovalPolicyTests(unittest.TestCase):
     def test_shell_approval_skips_read_only_commands(self):
         self.assertFalse(shell_command_requires_approval("ping google.com; curl -I https://ya.ru"))
 
+    def test_shell_approval_skips_plain_ripgrep_commands(self):
+        for command in (
+            "rg --files",
+            'rg -n "ProviderRegistry"',
+            r".\tools\rg.exe --files",
+            r'& ".\tools\rg.exe" -n "reasoning"',
+        ):
+            with self.subTest(command=command):
+                profile = classify_shell_command(command)
+                self.assertTrue(profile["inspect_only"], command)
+                self.assertFalse(profile["mutating"], command)
+                self.assertFalse(shell_command_requires_approval(command), command)
+
+    def test_shell_approval_requires_ripgrep_when_combined_with_shell_operators(self):
+        for command in (
+            "rg --files > files.txt",
+            "rg TODO | Set-Content hits.txt",
+            "rg TODO && Remove-Item demo.txt",
+            "rg TODO; New-Item demo.txt",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(shell_command_requires_approval(command), command)
+
     def test_shell_approval_requires_mutating_commands(self):
         self.assertTrue(shell_command_requires_approval("taskkill /IM node.exe /F"))
         self.assertTrue(shell_command_requires_approval("npm run dev"))
@@ -75,6 +98,7 @@ class ToolApprovalPolicyTests(unittest.TestCase):
 
     def test_cli_exec_approval_uses_command_profile(self):
         self.assertFalse(tool_requires_approval("cli_exec", {"command": "Get-Process"}))
+        self.assertFalse(tool_requires_approval("cli_exec", {"command": "rg --files"}))
         self.assertTrue(tool_requires_approval("cli_exec", {"command": "Remove-Item demo.txt"}))
         self.assertTrue(tool_requires_approval("cli_exec", {"command": ""}))
 

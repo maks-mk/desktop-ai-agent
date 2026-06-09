@@ -142,6 +142,7 @@ class AgentRunWorker(QObject):
         self._active_summary_estimated_tokens = 0
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
+        self._active_summary_reserved_tokens = 0
         self._coordinator = RuntimeSessionCoordinator(self)
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -324,6 +325,7 @@ class AgentRunWorker(QObject):
             "estimated_tokens": estimated,
             "threshold": threshold,
             "remaining_tokens": max(0, threshold - estimated),
+            "reserved_tokens": max(0, int(self._active_summary_reserved_tokens or 0)),
             "progress": max(0.0, min(1.0, (estimated / threshold) if threshold else 0.0)),
             "message_count": max(0, int(self._active_summary_message_count or 0)),
             "has_summary": bool(self._active_summary_has_summary),
@@ -336,6 +338,7 @@ class AgentRunWorker(QObject):
         self._active_summary_estimated_tokens = 0
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
+        self._active_summary_reserved_tokens = 0
         if self.config is None or self.agent_app is None or self.current_session is None:
             return
         try:
@@ -349,6 +352,7 @@ class AgentRunWorker(QObject):
         self._active_summary_estimated_tokens = max(0, int(progress.get("estimated_tokens", 0) or 0))
         self._active_summary_message_count = max(0, int(progress.get("message_count", 0) or 0))
         self._active_summary_has_summary = bool(progress.get("has_summary"))
+        self._active_summary_reserved_tokens = max(0, int(progress.get("reserved_tokens", 0) or 0))
 
     @Slot()
     def initialize(self) -> None:

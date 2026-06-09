@@ -6,7 +6,12 @@ from typing import List
 from langchain_core.messages import RemoveMessage
 
 from core.state import AgentState
-from core.summarize_policy import choose_summary_boundary, estimate_tokens, format_history_for_summary, should_summarize
+from core.summarize_policy import (
+    choose_summary_boundary,
+    estimate_context_tokens,
+    format_history_for_summary,
+    should_summarize,
+)
 from core import constants
 from core.text_utils import format_exception_friendly
 from core.errors import format_error
@@ -18,7 +23,10 @@ class SummarizeMixin:
     """Summarize node: compacts message history when it grows beyond the token threshold."""
 
     def _estimate_tokens(self, messages: List) -> int:
-        return estimate_tokens(messages)
+        return estimate_context_tokens(
+            messages,
+            reserved_tokens=getattr(self.config, "summary_reserved_tokens", 0),
+        )
 
     async def summarize_node(self, state: AgentState):
         messages = state["messages"]
@@ -44,6 +52,7 @@ class SummarizeMixin:
             threshold=self.config.summary_threshold,
             keep_last=self.config.summary_keep_last,
             has_summary=bool(summary),
+            reserved_tokens=getattr(self.config, "summary_reserved_tokens", 0),
         ):
             self._log_node_end(
                 state,

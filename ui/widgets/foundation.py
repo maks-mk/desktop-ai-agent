@@ -176,6 +176,7 @@ class SummaryProgressRing(QWidget):
         self._estimated_tokens = 0
         self._threshold = 0
         self._remaining_tokens = 0
+        self._reserved_tokens = 0
         self._will_summarize = False
         self.setObjectName("SummaryProgressRing")
         self.setFixedSize(18, 18)
@@ -192,11 +193,13 @@ class SummaryProgressRing(QWidget):
         threshold = max(0, int(data.get("threshold", 0) or 0))
         estimated = max(0, int(data.get("estimated_tokens", 0) or 0))
         remaining = max(0, int(data.get("remaining_tokens", max(0, threshold - estimated)) or 0))
+        reserved = max(0, int(data.get("reserved_tokens", 0) or 0))
         progress = float(data.get("progress", (estimated / threshold) if threshold else 0.0) or 0.0)
 
         self._threshold = threshold
         self._estimated_tokens = estimated
         self._remaining_tokens = remaining
+        self._reserved_tokens = reserved
         self._progress = max(0.0, min(1.0, progress))
         self._will_summarize = bool(data.get("will_summarize"))
         self.setVisible(threshold > 0)
@@ -206,15 +209,22 @@ class SummaryProgressRing(QWidget):
     def _build_tooltip(self) -> str:
         if self._threshold <= 0:
             return "Auto-summary is disabled."
+        reserve_line = (
+            f"\nIncludes ~{self._reserved_tokens:,} reserved tokens for prompts and tool schemas."
+            if self._reserved_tokens > 0
+            else ""
+        )
         if self._will_summarize:
             return (
                 "Auto-summary is ready for the next agent step.\n"
                 f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens."
+                f"{reserve_line}"
             )
         return (
             f"Auto-summary: {self._remaining_tokens:,} estimated tokens left.\n"
             f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens.\n"
             "A soft guard may delay compression until there is enough older context to summarize."
+            f"{reserve_line}"
         )
 
     def paintEvent(self, event) -> None:  # type: ignore[override]

@@ -92,6 +92,22 @@ def estimate_tokens(messages: List[BaseMessage]) -> int:
     return total
 
 
+def estimate_context_tokens(messages: List[BaseMessage], *, reserved_tokens: int = 0) -> int:
+    """Estimate the model context budget used by message history plus fixed runtime overhead.
+
+    The message list does not include system/developer prompts, tool schemas, and provider
+    wrapper fields. The reserve keeps auto-summary progress closer to provider-reported
+    prompt/input tokens without pretending to know every provider tokenizer exactly.
+    """
+    try:
+        reserve = max(0, int(reserved_tokens or 0))
+    except (TypeError, ValueError):
+        reserve = 0
+    if not messages:
+        return 0
+    return estimate_tokens(messages) + reserve
+
+
 # ---------------------------------------------------------------------------
 # The rest is unchanged
 # ---------------------------------------------------------------------------
@@ -109,12 +125,13 @@ def should_summarize(
     threshold: int,
     keep_last: int,
     has_summary: bool = False,
+    reserved_tokens: int = 0,
 ) -> bool:
     threshold = int(threshold or 0)
     if threshold <= 0:
         return False
 
-    estimated = estimate_tokens(messages)
+    estimated = estimate_context_tokens(messages, reserved_tokens=reserved_tokens)
     if estimated <= threshold:
         return False
 

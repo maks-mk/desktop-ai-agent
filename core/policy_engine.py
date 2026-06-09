@@ -79,6 +79,7 @@ _HTTP_WRITE_FLAG_PATTERNS = (
     re.compile(r"(^|[\s;|&])-(?:d|f|t)\b", re.IGNORECASE),
     re.compile(r"--(?:data(?:-raw|-binary|-ascii|-urlencode)?|form|string|upload-file|json)\b", re.IGNORECASE),
 )
+_RIPGREP_COMMAND_NAMES = {"rg", "rg.exe"}
 
 
 def _is_http_probe_command(command: str) -> bool:
@@ -91,6 +92,72 @@ def _is_http_write_command(command: str) -> bool:
     if _HTTP_WRITE_METHOD_RE.search(command):
         return True
     return any(pattern.search(command) for pattern in _HTTP_WRITE_FLAG_PATTERNS)
+
+
+def _has_unquoted_shell_operator(command: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if quote is not None:
+            continue
+        if char in (";", "|", "<", ">"):
+            return True
+        if char == "&":
+            stripped_before = command[:index].strip()
+            if stripped_before:
+                return True
+        if char == "`":
+            return True
+    return False
+
+
+def _first_command_token(command: str) -> str:
+    raw = command.strip()
+    if raw.startswith("&"):
+        raw = raw[1:].lstrip()
+    if not raw:
+        return ""
+
+    quote: str | None = None
+    token_chars: list[str] = []
+    for char in raw:
+        if char in ("'", '"'):
+            if quote == char:
+                quote = None
+                continue
+            if quote is None:
+                quote = char
+                continue
+        if quote is None and char.isspace():
+            break
+        token_chars.append(char)
+    return "".join(token_chars).strip()
+
+
+def _is_ripgrep_read_only_command(command: str) -> bool:
+    normalized = str(command or "").strip()
+    if not normalized or _has_unquoted_shell_operator(normalized):
+        return False
+    if "$(" in normalized or "%{" in normalized:
+        return False
+
+    token = _first_command_token(normalized).strip('"\'')
+    if not token:
+        return False
+    executable = token.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+    return executable in _RIPGREP_COMMAND_NAMES
 
 
 def classify_shell_command(command: str) -> Dict[str, Any]:
@@ -109,6 +176,7 @@ def classify_shell_command(command: str) -> Dict[str, Any]:
             any(pattern.search(normalized) for pattern in _INSPECT_ONLY_COMMAND_PATTERNS)
             or is_network_diagnostic
             or _is_http_probe_command(normalized)
+            or _is_ripgrep_read_only_command(normalized)
         )
     )
     return {

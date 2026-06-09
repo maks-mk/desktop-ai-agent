@@ -178,6 +178,11 @@ class AgentConfig(BaseSettings):
         alias="SESSION_SIZE",
         description="Estimated input context tokens before summarizing (~chars/2)",
     )
+    summary_reserved_tokens: int = Field(
+        default=3000,
+        alias="SUMMARY_RESERVED_TOKENS",
+        description="Estimated fixed context overhead for prompts, tool schemas, and provider wrappers",
+    )
     summary_keep_last: int = Field(default=4, alias="SUMMARY_KEEP_LAST")
 
     # Network / Retry
