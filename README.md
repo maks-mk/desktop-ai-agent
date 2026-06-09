@@ -225,7 +225,7 @@ START
 
 ### Добавление OpenAI-compatible агрегаторов
 
-Подробная инструкция по `provider_registry.json`, полям схемы, matching rules и добавлению новых агрегаторов находится в [`provider_registry_guide.md`](provider_registry_guide.md).
+Подробная инструкция по `provider_registry.json`, полям схемы, matching rules и добавлению новых агрегаторов находится в [`./docs/provider_registry_guide.md`](./docs/provider_registry_guide.md).
 
 ### Управление runtime
 
@@ -313,7 +313,7 @@ START
 ├── mcp.json               # Конфигурация MCP-серверов
 ├── env_example.txt        # Шаблон .env
 ├── provider_registry.json # Reasoning kwargs для OpenAI-compatible провайдеров
-├── provider_registry_guide.md
+├── ./docs/provider_registry_guide.md
 ├── build.bat              # Сборка portable .exe
 ├── requirements.txt
 ├── core/                  # Ядро агента: config, state, policies, recovery, provider registry
