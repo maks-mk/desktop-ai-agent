@@ -293,6 +293,7 @@ class AgentRunWorker(QObject):
 
     def _emit_stream_event(self, event: StreamEvent) -> None:
         self.event_emitted.emit(event)
+        self._maybe_reset_summary_progress_after_compaction(event)
         self._maybe_emit_live_summary_progress(event)
         if event.type in {"tool_args_missing"}:
             self._log_ui_run_event(
@@ -300,6 +301,28 @@ class AgentRunWorker(QObject):
                 thread_id=getattr(self.current_session, "thread_id", ""),
                 **dict(event.payload or {}),
             )
+
+    def _maybe_reset_summary_progress_after_compaction(self, event: StreamEvent) -> None:
+        if event.type != "summary_notice" or self.config is None:
+            return
+        payload = dict(event.payload or {})
+        if str(payload.get("kind", "") or "") != "auto_summary":
+            return
+
+        threshold = max(0, int(getattr(self.config, "summary_threshold", 0) or 0))
+        reserved = max(0, int(getattr(self.config, "summary_reserved_tokens", 0) or 0))
+        estimated = reserved if threshold > 0 else 0
+        self._active_summary_estimated_tokens = estimated
+        self._active_summary_message_count = max(1, int(getattr(self.config, "summary_keep_last", 0) or 0))
+        self._active_summary_has_summary = True
+        self._active_summary_reserved_tokens = reserved if estimated else 0
+        if self.current_session is not None:
+            self.current_session.last_run_stats = ""
+            try:
+                self.store.save_active_session(self.current_session, touch=False, set_active=True)
+            except Exception:
+                logger.debug("Failed to persist cleared run stats after auto-summary.", exc_info=True)
+        self.event_emitted.emit(StreamEvent("summary_progress", self._build_live_summary_progress_payload()))
 
     def _maybe_emit_live_summary_progress(self, event: StreamEvent) -> None:
         if event.type != "tool_finished" or self.config is None:

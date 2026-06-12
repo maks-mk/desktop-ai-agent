@@ -488,6 +488,33 @@ def build_stylesheet() -> str:
         color: {model_dialog_text};
     }}
 
+    QCheckBox#ModelSupportsImagesCheckbox::indicator {{
+        width: 15px;
+        height: 15px;
+        border-radius: 4px;
+        border: 1px solid {blend_hex(model_dialog_field_border, "#FFFFFF", 0.22)};
+        background: {model_dialog_field_bg};
+    }}
+
+    QCheckBox#ModelSupportsImagesCheckbox::indicator:hover {{
+        border: 1px solid {blend_hex(model_dialog_selected_border, "#FFFFFF", 0.18)};
+        background: {blend_hex(model_dialog_field_bg, "#FFFFFF", 0.08)};
+    }}
+
+    QCheckBox#ModelSupportsImagesCheckbox::indicator:checked {{
+        border: 1px solid {model_dialog_selected_border};
+        background: {model_dialog_selected};
+    }}
+
+    QCheckBox#ModelSupportsImagesCheckbox::indicator:checked:hover {{
+        background: {blend_hex(model_dialog_selected, "#FFFFFF", 0.10)};
+    }}
+
+    QCheckBox#ModelSupportsImagesCheckbox::indicator:disabled {{
+        border: 1px solid {blend_hex(model_dialog_field_border, model_dialog_bg, 0.45)};
+        background: {model_dialog_soft};
+    }}
+
     QDialog#ModelSettingsDialog QLineEdit,
     QDialog#ModelSettingsDialog QComboBox {{
         background: {model_dialog_field_bg};

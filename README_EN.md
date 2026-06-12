@@ -254,6 +254,8 @@ Detailed instructions for `provider_registry.json`, schema fields, matching rule
 | Variable | Description |
 |---|---|
 | `TEMPERATURE` | Model temperature |
+| `TOP_P` | Nucleus sampling, default `0.95`; set `none` or leave empty to skip sending it |
+| `TOP_K` | Candidate pool limit for Gemini/supported SDKs, default `40`; not sent to OpenAI-compatible providers |
 | `MAX_LOOPS` | Maximum steps for one request, default: 50 |
 | `TOOL_LOOP_WINDOW` | History window for duplicate tool-call detection |
 | `TOOL_LOOP_LIMIT_MUTATING` | Repeat limit for mutating tools |

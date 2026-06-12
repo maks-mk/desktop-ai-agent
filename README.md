@@ -252,6 +252,8 @@ START
 | Переменная | Описание |
 |---|---|
 | `TEMPERATURE` | Температура модели |
+| `TOP_P` | Nucleus sampling (`0.95` по умолчанию; `none`/пусто — не отправлять) |
+| `TOP_K` | Candidate pool limit для Gemini/поддерживаемых SDK (`40` по умолчанию; для OpenAI-compatible не отправляется) |
 | `MAX_LOOPS` | Максимум шагов на один запрос (default: 50) |
 | `TOOL_LOOP_WINDOW` | Окно истории для детекции дублей tool calls |
 | `TOOL_LOOP_LIMIT_MUTATING` | Лимит повторов для мутирующих инструментов |

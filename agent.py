@@ -430,6 +430,10 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             "temperature": config.temperature,
             "google_api_key": api_key,
         }
+        if getattr(config, "top_p", None) is not None and _chat_model_accepts_kwarg(GeminiChatModel, "top_p"):
+            gemini_kwargs["top_p"] = float(config.top_p)
+        if getattr(config, "top_k", None) is not None and _chat_model_accepts_kwarg(GeminiChatModel, "top_k"):
+            gemini_kwargs["top_k"] = int(config.top_k)
         gemini_thinking_enabled = False
         gemini_reasoning_mode = "disabled"
         if bool(getattr(config, "enable_model_reasoning", True)):
@@ -820,6 +824,8 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
             "max_retries": 0,
             "stream_usage": True,
         }
+        if getattr(config, "top_p", None) is not None:
+            openai_kwargs["top_p"] = float(config.top_p)
         registry = ProviderRegistry.from_path(config.provider_registry_path)
         provider_config = registry.match(config.openai_base_url)
         reasoning_enabled = bool(getattr(config, "enable_model_reasoning", True))

@@ -630,6 +630,27 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["google_api_key"], "gm-test")
         self.assertNotIn("convert_system_message_to_human", captured)
 
+    def test_create_llm_for_gemini_applies_sampling_controls(self):
+        captured = {}
+
+        class FakeChatGoogleGenerativeAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_google_genai": mock.Mock(ChatGoogleGenerativeAI=FakeChatGoogleGenerativeAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="gemini",
+                    GEMINI_API_KEY="gm-test",
+                    GEMINI_MODEL="gemini-2.5-flash",
+                    TOP_P=0.9,
+                    TOP_K=32,
+                )
+            )
+
+        self.assertEqual(captured["top_p"], 0.9)
+        self.assertEqual(captured["top_k"], 32)
+
     def test_create_llm_for_gemini_enables_thinking_budget_by_default_for_thinking_models(self):
         captured = {}
 
@@ -847,6 +868,28 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(captured["stream_usage"])
         self.assertNotIn("reasoning", captured)
         self.assertNotIn("reasoning_effort", captured)
+
+    def test_create_llm_for_openai_applies_top_p_but_not_top_k(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-4o",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                    TOP_P=0.9,
+                    TOP_K=32,
+                )
+            )
+
+        self.assertEqual(captured["top_p"], 0.9)
+        self.assertNotIn("top_k", captured)
 
     async def test_register_llm_cleanup_callback_closes_async_client(self):
         registry = ToolRegistry(self._make_config())
@@ -2573,6 +2616,33 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["estimated_tokens"], 10)
         self.assertEqual(payload["threshold"], 100)
         self.assertTrue(payload["live"])
+
+    def test_worker_resets_summary_progress_immediately_after_auto_summary(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.config = SimpleNamespace(
+            summary_threshold=40000,
+            summary_keep_last=4,
+            summary_reserved_tokens=3000,
+        )
+        worker.current_session = SimpleNamespace(last_run_stats="31.8s  ↓ 15921  ↑ 574")
+        worker.store = SimpleNamespace(save_active_session=lambda *_args, **_kwargs: None)
+        worker._active_summary_estimated_tokens = 57731
+        worker._active_summary_message_count = 40
+        worker._active_summary_has_summary = False
+        worker._active_summary_reserved_tokens = 3000
+        emitted = []
+        worker.event_emitted.connect(emitted.append)
+
+        worker._emit_stream_event(StreamEvent("summary_notice", {"kind": "auto_summary", "count": 12}))
+
+        progress_events = [event for event in emitted if event.type == "summary_progress"]
+        self.assertEqual(len(progress_events), 1)
+        payload = progress_events[0].payload
+        self.assertEqual(payload["estimated_tokens"], 3000)
+        self.assertEqual(payload["remaining_tokens"], 37000)
+        self.assertTrue(payload["has_summary"])
+        self.assertTrue(payload["live"])
+        self.assertEqual(worker.current_session.last_run_stats, "")
 
     def test_build_transcript_payload_restores_turns_and_summary_notice(self):
         payload = build_transcript_payload(

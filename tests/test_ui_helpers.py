@@ -37,6 +37,13 @@ class UiHelperTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertIn("QStatusBar", first)
 
+    def test_model_image_checkbox_indicator_has_visible_border(self):
+        stylesheet = build_stylesheet()
+
+        self.assertIn("QCheckBox#ModelSupportsImagesCheckbox::indicator", stylesheet)
+        self.assertIn("QCheckBox#ModelSupportsImagesCheckbox::indicator:checked", stylesheet)
+        self.assertIn("border: 1px solid", stylesheet)
+
     def test_summary_progress_ring_updates_tooltip_from_payload(self):
         ring = SummaryProgressRing()
         self.addCleanup(ring.deleteLater)
