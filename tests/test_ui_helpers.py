@@ -43,6 +43,7 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("QCheckBox#ModelSupportsImagesCheckbox::indicator", stylesheet)
         self.assertIn("QCheckBox#ModelSupportsImagesCheckbox::indicator:checked", stylesheet)
         self.assertIn("border: 1px solid", stylesheet)
+        self.assertNotIn("checkbox-check.svg", stylesheet)
 
     def test_summary_progress_ring_updates_tooltip_from_payload(self):
         ring = SummaryProgressRing()
