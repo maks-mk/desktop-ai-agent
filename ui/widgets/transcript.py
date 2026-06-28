@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import difflib
+import re
+
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt
@@ -38,6 +41,51 @@ class ConversationTurnWidget(QWidget):
         while index < limit and first[index] == second[index]:
             index += 1
         return index
+
+    @staticmethod
+    def _normalized_text(text: str) -> str:
+        return " ".join(str(text or "").split())
+
+    @classmethod
+    def _markdown_boundary_after_visible_prefix(cls, visible: str, incoming: str) -> int | None:
+        visible_normalized = cls._normalized_text(visible)
+        if not visible_normalized:
+            return None
+
+        best_index: int | None = None
+        for match in re.finditer(r"\S+", incoming):
+            prefix = incoming[: match.end()]
+            prefix_normalized = cls._normalized_text(prefix)
+            if not prefix_normalized:
+                continue
+            if visible_normalized.startswith(prefix_normalized):
+                best_index = match.end()
+                continue
+            if prefix_normalized.startswith(visible_normalized):
+                return best_index if best_index is not None else match.end()
+            if len(prefix_normalized) >= min(len(visible_normalized), 80):
+                similarity = difflib.SequenceMatcher(None, visible_normalized, prefix_normalized).quick_ratio()
+                if similarity >= 0.94:
+                    best_index = match.end()
+
+        return best_index
+
+    @classmethod
+    def _assistant_resume_text(cls, visible: str, incoming: str) -> str:
+        prefix_len = cls._common_prefix_length(visible, incoming)
+        exact_prefix = incoming.startswith(visible)
+        significant_prefix = bool(visible) and (
+            prefix_len >= min(len(visible), 48)
+            or prefix_len >= int(len(visible) * 0.8)
+        )
+        if prefix_len > 0 and (exact_prefix or significant_prefix):
+            return incoming[prefix_len:].lstrip()
+
+        boundary = cls._markdown_boundary_after_visible_prefix(visible, incoming)
+        if boundary is not None:
+            return incoming[boundary:].lstrip()
+
+        return incoming
 
     def _append_block(self, kind: str, widget: QWidget) -> QWidget:
         if kind in {"assistant", "tool", "tool_group", "notice", "stats"}:
@@ -115,23 +163,20 @@ class ConversationTurnWidget(QWidget):
 
         starts_new_assistant_block = not self._timeline or self._timeline[-1][0] != "assistant"
         resumes_after_tool_group = self.tool_group is not None and starts_new_assistant_block
+        if resumes_after_tool_group and self._assistant_markdown:
+            segment_text = self._assistant_resume_text(self._assistant_markdown, markdown)
+            if not segment_text:
+                self._assistant_markdown = markdown
+                return
+            self.tool_group.collapse()
+            segment = self._ensure_assistant_segment()
+            segment.set_content(segment_text)
+            self._assistant_markdown = markdown
+            return
         if resumes_after_tool_group:
             self.tool_group.collapse()
 
         segment = self._ensure_assistant_segment()
-        if resumes_after_tool_group and self._assistant_markdown:
-            prefix_len = self._common_prefix_length(self._assistant_markdown, markdown)
-            exact_prefix = markdown.startswith(self._assistant_markdown)
-            significant_prefix = bool(self._assistant_markdown) and (
-                prefix_len >= min(len(self._assistant_markdown), 48)
-                or prefix_len >= int(len(self._assistant_markdown) * 0.8)
-            )
-            if prefix_len > 0 and (exact_prefix or significant_prefix):
-                segment_text = markdown[prefix_len:].lstrip("\n")
-                if segment_text:
-                    segment.set_content(segment_text)
-                self._assistant_markdown = markdown
-                return
 
         if not self._assistant_markdown:
             segment.set_content(markdown)

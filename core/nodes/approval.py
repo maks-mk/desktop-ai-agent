@@ -119,4 +119,7 @@ class ApprovalMixin:
                 return bool(decision.get("approved"))
             action = str(decision.get("action", "")).strip().lower()
             return action in {"approve", "approved", "yes", "y"}
-        return bool(decision)
+        # Неизвестный формат (строка, число, None и т.п.) — отказ.
+        # Для approval дефолт должен быть безопасным; угадывание интента
+        # свободного текста недопустимо (bool("no") == True и т.п.).
+        return False

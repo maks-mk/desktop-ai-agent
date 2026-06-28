@@ -21,6 +21,7 @@ from core.reasoning_debug import debug_event, elapsed_since, log_unknown_fields,
 from core.run_logger import JsonlRunLogger
 from core.state import AgentState
 from core.turn_outcomes import (
+    TURN_OUTCOME_CONTINUE_AGENT,
     TURN_OUTCOME_RECOVER_AGENT,
     TURN_OUTCOME_RUN_TOOLS,
     normalize_turn_outcome,
@@ -987,7 +988,8 @@ def create_agent_workflow(
         return "update_step"
 
     def route_after_recovery(state: AgentState):
-        if normalize_turn_outcome(state.get("turn_outcome")) == TURN_OUTCOME_RECOVER_AGENT:
+        normalized = normalize_turn_outcome(state.get("turn_outcome"))
+        if normalized in (TURN_OUTCOME_RECOVER_AGENT, TURN_OUTCOME_CONTINUE_AGENT):
             return "update_step"
         return END
 

@@ -19,17 +19,29 @@ class ToolsMixin:
     async def tools_node(self, state: AgentState):
         return await self.tool_batch.run(state)
 
-    def _can_parallelize_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> bool:
-        if len(tool_calls) < 2:
-            return False
+    def _tool_call_is_parallel_safe(self, tool_call: Dict[str, Any]) -> bool:
+        """Check a single tool call against the double-gate: metadata read-only AND whitelist."""
+        name = tool_call.get("name") or "unknown_tool"
+        return self._tool_is_read_only(name) and name in self.PARALLEL_SAFE_TOOL_NAMES
 
-        # Both conditions required: metadata says read-only AND name is on the explicit whitelist.
-        # The whitelist acts as a second safety gate — unknown / newly-added tools default to sequential.
-        return all(
-            self._tool_is_read_only(tc.get("name") or "unknown_tool")
-            and (tc.get("name") or "") in self.PARALLEL_SAFE_TOOL_NAMES
-            for tc in tool_calls
-        )
+    def _partition_tool_calls(
+        self,
+        tool_calls: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split tool calls into (parallel_safe, sequential) groups.
+
+        Each call is independently classified.  The original ordering within
+        each group is preserved, enabling mixed-mode batch execution where
+        read-only calls run concurrently while mutating calls run sequentially.
+        """
+        parallel: List[Dict[str, Any]] = []
+        sequential: List[Dict[str, Any]] = []
+        for tc in tool_calls:
+            if self._tool_call_is_parallel_safe(tc):
+                parallel.append(tc)
+            else:
+                sequential.append(tc)
+        return parallel, sequential
 
     def _tool_is_allowed_for_turn(
         self,

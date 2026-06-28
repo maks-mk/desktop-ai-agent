@@ -138,6 +138,8 @@ class AgentConfig(BaseSettings):
 
     # Common Logic
     temperature: float = Field(default=0.2, alias="TEMPERATURE")
+    top_p: Optional[float] = Field(default=0.95, alias="TOP_P")
+    top_k: Optional[int] = Field(default=40, alias="TOP_K")
     max_loops: int = Field(default=50, alias="MAX_LOOPS", description="Limit steps per request")
     tool_loop_window: Optional[int] = Field(default=None, alias="TOOL_LOOP_WINDOW")
     tool_loop_limit_mutating: Optional[int] = Field(default=None, alias="TOOL_LOOP_LIMIT_MUTATING")
@@ -221,6 +223,35 @@ class AgentConfig(BaseSettings):
 
         if value < 1:
             raise ValueError("MAX_FILE_SIZE must be greater than 0.")
+        return value
+
+    @field_validator("top_p", "top_k", mode="before")
+    @classmethod
+    def parse_optional_sampling_value(cls, v: Union[int, float, str, None]) -> Union[int, float, str, None]:
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip().lower() in {"", "none", "null", "default"}:
+            return None
+        return v
+
+    @field_validator("top_p")
+    @classmethod
+    def validate_top_p(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        value = float(v)
+        if value <= 0 or value > 1:
+            raise ValueError("TOP_P must be greater than 0 and less than or equal to 1.")
+        return value
+
+    @field_validator("top_k")
+    @classmethod
+    def validate_top_k(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return None
+        value = int(v)
+        if value < 1:
+            raise ValueError("TOP_K must be greater than or equal to 1.")
         return value
 
     @field_validator(

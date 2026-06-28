@@ -192,6 +192,7 @@ class StreamProcessor:
         "_visible_full_text",
         "_deferred_assistant_delta",
         "_assistant_delta_sequence",
+        "_messages_replay_cursor",
     )
 
     def __init__(
@@ -234,6 +235,7 @@ class StreamProcessor:
         self._visible_full_text = ""
         self._deferred_assistant_delta = False
         self._assistant_delta_sequence = 0
+        self._messages_replay_cursor: int | None = None
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -510,13 +512,21 @@ class StreamProcessor:
         chunk = self._filter_visible_text_tool_call_chunk(chunk)
         if not chunk:
             return
-        if source == "updates_agent" and self._messages_text_seen and (
-            not self._updates_agent_text_has_new_visible_content(chunk)
-            or (message_has_tool_calls and self._is_replay_of_visible_text(chunk))
+        if source == "messages" and self._consume_messages_replay_chunk(chunk):
+            logger.debug(
+                "Stream suppressed messages replay after updates_agent chunk_len=%s preview=%s",
+                len(chunk),
+                _clip_debug_text(chunk),
+            )
+            return
+        if self._messages_text_seen and (
+            (source == "updates_agent" and not self._updates_agent_text_has_new_visible_content(chunk))
+            or (message_has_tool_calls and not self._updates_agent_text_has_new_visible_content(chunk))
         ):
             logger.debug(
-                "Stream suppressed updates_agent text replay chunk_len=%s tool_calls=%s preview=%s",
+                "Stream suppressed assistant text replay chunk_len=%s source=%s tool_calls=%s preview=%s",
                 len(chunk),
+                source,
                 message_has_tool_calls,
                 _clip_debug_text(chunk),
             )
@@ -529,6 +539,7 @@ class StreamProcessor:
             return
         if source == "messages":
             self._messages_text_seen = True
+            self._messages_replay_cursor = None
 
         self.full_text = merged_text
         self.clean_full = self.full_text
@@ -574,6 +585,27 @@ class StreamProcessor:
         self._visible_full_text = self.full_text
         self._deferred_assistant_delta = False
 
+    def _consume_messages_replay_chunk(self, incoming_text: str) -> bool:
+        if self._messages_text_seen or not self.full_text:
+            self._messages_replay_cursor = None
+            return False
+
+        text = str(incoming_text or "")
+        if not text:
+            return False
+
+        current = self.full_text
+        if self._messages_replay_cursor is None:
+            self._messages_replay_cursor = 0
+
+        cursor = self._messages_replay_cursor
+        if cursor < len(current) and current.startswith(text, cursor):
+            self._messages_replay_cursor = cursor + len(text)
+            return True
+
+        self._messages_replay_cursor = None
+        return False
+
     def _flush_deferred_assistant_delta(self) -> None:
         if not self._deferred_assistant_delta or self.tool_start_times:
             return
@@ -598,7 +630,7 @@ class StreamProcessor:
 
     def _is_replay_of_visible_text(self, incoming_text: str) -> bool:
         incoming = str(incoming_text or "").strip()
-        visible = str(self._visible_full_text or self.full_text or "").strip()
+        visible = str(self._visible_full_text or "").strip()
         if not incoming or not visible:
             return False
         if visible.endswith(incoming):
@@ -610,11 +642,20 @@ class StreamProcessor:
         incoming = str(incoming_text or "").strip()
         if not incoming:
             return False
-        visible = str(self._visible_full_text or self.full_text or "").strip()
+        # Compare against _visible_full_text only (text actually emitted to the UI),
+        # NOT full_text — full_text may contain deferred text that was never shown.
+        # Using full_text as fallback would falsely suppress updates_agent text
+        # that duplicates deferred-but-not-yet-visible messages text.
+        visible = str(self._visible_full_text or "").strip()
         if not visible:
             return True
         if incoming == visible or incoming.startswith(visible) or visible.startswith(incoming):
             return False
+        if incoming in visible or self._normalized_text(incoming) in self._normalized_text(visible):
+            return False
+        for paragraph in self._nonempty_paragraphs(visible):
+            if self._texts_are_same_replay(paragraph, incoming):
+                return False
         if min(len(incoming), len(visible)) >= 120:
             similarity = difflib.SequenceMatcher(None, visible, incoming).quick_ratio()
             if similarity >= 0.92:
@@ -639,7 +680,12 @@ class StreamProcessor:
             return text
 
         if text == current or text.strip() == current.strip():
-            return None
+            # If the text was never emitted to the UI (deferred), allow re-emission
+            # so updates_agent with tool_calls can show it. Only suppress if it's
+            # already visible.
+            if self._visible_full_text and self._visible_full_text.strip() == current.strip():
+                return None
+            return current
 
         if text.startswith(current):
             merged = self._merge_current_prefix_replay(current, text)
@@ -653,7 +699,7 @@ class StreamProcessor:
             return current + text
 
         if source == "updates_agent":
-            return text
+            return self._append_distinct_assistant_text(current, text)
 
         return current + text
 
@@ -706,11 +752,22 @@ class StreamProcessor:
             return None
 
         tail = self._last_nonempty_paragraph(current_trimmed)
-        if not tail or not incoming_left.startswith(tail):
+        if not tail:
             return None
 
-        remainder = incoming_left[len(tail) :]
+        if incoming_left.startswith(tail):
+            remainder = incoming_left[len(tail) :]
+        else:
+            boundary = self._similar_prefix_boundary(tail, incoming_left)
+            if boundary is None:
+                return None
+            remainder = incoming_left[boundary:]
+
         if not remainder.strip():
+            logger.debug(
+                "Stream suppressed assistant text replay matching last paragraph incoming_len=%s",
+                len(incoming),
+            )
             return None
 
         logger.debug(
@@ -720,10 +777,63 @@ class StreamProcessor:
         )
         return current + remainder
 
+    @classmethod
+    def _similar_prefix_boundary(cls, current_tail: str, incoming: str) -> int | None:
+        tail_normalized = cls._normalized_text(current_tail)
+        if len(tail_normalized) < 24:
+            return None
+
+        best_index: int | None = None
+        for match in re.finditer(r"\S+", incoming):
+            prefix = incoming[: match.end()]
+            prefix_normalized = cls._normalized_text(prefix)
+            if not prefix_normalized:
+                continue
+            if tail_normalized.startswith(prefix_normalized):
+                best_index = match.end()
+                continue
+            if prefix_normalized.startswith(tail_normalized):
+                return best_index if best_index is not None else match.end()
+            if len(prefix_normalized) >= min(len(tail_normalized), 80):
+                similarity = difflib.SequenceMatcher(None, tail_normalized, prefix_normalized).quick_ratio()
+                if similarity >= 0.94:
+                    best_index = match.end()
+
+        return best_index
+
     @staticmethod
     def _last_nonempty_paragraph(text: str) -> str:
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        paragraphs = StreamProcessor._nonempty_paragraphs(text)
         return paragraphs[-1] if paragraphs else ""
+
+    @staticmethod
+    def _nonempty_paragraphs(text: str) -> list[str]:
+        return [part.strip() for part in re.split(r"\n\s*\n", str(text or "")) if part.strip()]
+
+    @staticmethod
+    def _normalized_text(text: str) -> str:
+        return " ".join(str(text or "").split())
+
+    @staticmethod
+    def _texts_are_same_replay(current: str, incoming: str) -> bool:
+        current_normalized = StreamProcessor._normalized_text(current)
+        incoming_normalized = StreamProcessor._normalized_text(incoming)
+        if not current_normalized or not incoming_normalized:
+            return False
+        if current_normalized == incoming_normalized:
+            return True
+        if incoming_normalized in current_normalized:
+            return True
+        if min(len(current_normalized), len(incoming_normalized)) < 80:
+            return False
+        return difflib.SequenceMatcher(None, current_normalized, incoming_normalized).quick_ratio() >= 0.94
+
+    @staticmethod
+    def _append_distinct_assistant_text(current: str, incoming: str) -> str:
+        if not current:
+            return incoming
+        separator = "" if current.endswith(("\n", " ")) or incoming.startswith(("\n", " ")) else "\n\n"
+        return current + separator + incoming
 
     @staticmethod
     def _suffix_prefix_overlap(current: str, incoming: str) -> int:

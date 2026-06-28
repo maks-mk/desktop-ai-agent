@@ -35,7 +35,9 @@
 ## Возможности
 
 - Графовый runtime на `LangGraph` с bounded recovery и self-correction
+- Mixed-mode parallel tool batch: read-only инструменты запускаются параллельно через `asyncio.gather`, остальные — последовательно; результаты собираются в исходном порядке
 - GUI: история чатов, streaming transcript, tool cards, approvals, вложения
+- Fuzzy replay suppression: повторный префейс модели после tool-вызова подавляется даже при минимальных расхождениях текста (опечатки, пунктуация)
 - Инструменты: filesystem, shell, web search, system info, process management, MCP
 - Approval-паузы перед мутирующими и деструктивными действиями
 - Автосуммаризация контекста при длинных сессиях
@@ -78,7 +80,7 @@ START
   → agent            # LLM решает: ответить / вызвать tool / recovery
      → approval      # пауза перед мутирующим действием
         → tools
-     → tools         # исполнить tool calls
+     → tools         # исполнить tool calls (read-only — параллельно, остальные — последовательно)
         → recovery   # если tool вернул ошибку
         → update_step
      → recovery      # если агент вернул protocol error или loop
@@ -95,7 +97,7 @@ START
 
 ## GUI
 
-**Transcript** — streaming-ответы, tool cards с аргументами и результатами, summary-сообщения, статусные notice.
+**Transcript** — streaming-ответы, tool cards с аргументами и результатами, summary-сообщения, статусные notice. Повторный префейс модели после выполнения инструментов подавляется с учётом нечёткого совпадения (fuzzy matching), чтобы избежать дублирования текста при минимальных расхождениях.
 
 **Composer:**
 - Вставка файлов через `Add files…`, drag-and-drop или clipboard paste
@@ -356,7 +358,7 @@ START
 
 ## Тесты
 
-20 тестовых файлов:
+21 тестовый файл:
 
 | Файл | Что покрывает |
 |---|---|
@@ -366,6 +368,7 @@ START
 | `test_stream_and_filesystem.py` | Streaming events, filesystem tools, tool output, cli_exec |
 | `test_runtime_refactor.py` | Runtime payloads, transcript restore, tool group logic, run lifecycle |
 | `test_critic_graph.py` | LangGraph workflow, node orchestration, tool batching |
+| `test_mixed_parallel_tools.py` | Mixed-mode parallel batch: partition, ordering, edge cases (all-parallel, all-sequential, mixed, empty groups, duplicate ids) |
 | `test_self_correction_engine.py` | Recovery strategies, fingerprinting, loop detection |
 | `test_policy_engine.py` | Shell command classification, tool metadata, approval rules |
 | `test_model_profiles.py` | Profile CRUD, switching, validation, serialization |

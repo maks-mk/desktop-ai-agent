@@ -22,6 +22,7 @@ from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD,
 from ui.widgets.composer import _ComposerMentionItemWidget
 from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
 from ui.widgets.messages import AssistantMessageWidget
+from ui.widgets.transcript import ConversationTurnWidget
 from ui.widgets.tool_group import ToolGroupWidget
 
 
@@ -141,6 +142,40 @@ class GuiUxTests(unittest.TestCase):
     def _wait_for_gui(self, ms: int):
         QTest.qWait(ms)
         self._process_events()
+
+    def test_transcript_does_not_duplicate_preface_after_tool_group_with_minor_text_drift(self):
+        turn = ConversationTurnWidget("user", parent=self.window)
+        preface = (
+            "Поиск по коду не нашёл прямого использования `StateGraph` в `.py` файлах — только логи. "
+            "Поищу шире: файлы графа, импорты `langgraph`, и параллельно запрошу документацию."
+        )
+
+        turn.set_assistant_markdown(preface)
+        turn.start_tool({"tool_id": "search-graph", "name": "search_in_directory", "args": {"pattern": "StateGraph"}})
+        turn.set_assistant_markdown(
+            "Поиск по коду не нашёл прямого использования `StateGraph` в `.py` файлах — только логи. "
+            "Поищу шире: файлы графа, импорты `langgraph`, и параллельно запрошу документацию. "
+            "Нашёл — граф строится в `agent.py`, а узлы лежат в `nodes/`."
+        )
+
+        self.assertEqual(len(turn.assistant_segments), 2)
+        self.assertEqual(turn.assistant_segments[0].markdown(), preface)
+        self.assertEqual(
+            turn.assistant_segments[1].markdown(),
+            "Нашёл — граф строится в `agent.py`, а узлы лежат в `nodes/`.",
+        )
+
+    def test_transcript_ignores_same_preface_replay_after_tool_group(self):
+        turn = ConversationTurnWidget("user", parent=self.window)
+        preface = "Посмотрю конфигурацию лимитов и логику self-correction."
+
+        turn.set_assistant_markdown(preface)
+        turn.start_tool({"tool_id": "search-config", "name": "search_in_directory", "args": {"pattern": "self_correction"}})
+        turn.set_assistant_markdown(preface)
+
+        self.assertEqual(turn.block_kinds(), ["user", "assistant", "tool_group"])
+        self.assertEqual(len(turn.assistant_segments), 1)
+        self.assertEqual(turn.assistant_segments[0].markdown(), preface)
 
     def _press_composer_key(self, key: int, text: str = "", modifiers: Qt.KeyboardModifier = Qt.NoModifier):
         self.window.composer.setFocus()
@@ -335,6 +370,19 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsInstance(widget.parts_widgets[1], CodeBlockWidget)
         self.assertEqual(widget.parts_widgets[1].editor.toPlainText(), "print('hi')")
         self.assertEqual(widget.parts_widgets[1].title_label.text(), "PYTHON")
+
+    def test_assistant_message_widget_replaces_part_widget_when_stream_opens_code_block(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("```python")
+        self._process_events()
+        widget.set_content("```python\nprint('hi')")
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 1)
+        self.assertIsInstance(widget.parts_widgets[0], CodeBlockWidget)
+        self.assertEqual(widget.parts_widgets[0].editor.toPlainText(), "print('hi')")
 
     def test_assistant_message_widget_has_no_thought_panel(self):
         widget = AssistantMessageWidget()

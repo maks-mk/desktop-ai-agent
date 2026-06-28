@@ -34,6 +34,7 @@ from core.state import AgentState
 from core.summarize_policy import format_history_for_summary, should_summarize
 from core.tool_policy import ToolMetadata
 from core.turn_outcomes import (
+    TURN_OUTCOME_CONTINUE_AGENT,
     TURN_OUTCOME_FINISH_TURN,
     TURN_OUTCOME_RECOVER_AGENT,
     TURN_OUTCOME_RUN_TOOLS,
@@ -2344,6 +2345,33 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["self_correction_retry_count"], 3)
         self.assertIsNotNone(result["open_tool_issue"])
         self.assertEqual(result["recovery_state"]["active_strategy"]["strategy"], "llm_replan")
+
+    async def test_recovery_node_propagates_continue_agent_when_tool_result_ready(self):
+        """Recovery with no open issue and a trailing ToolMessage must yield continue_agent
+        so route_after_recovery sends the turn back to the agent instead of END."""
+        agent_llm = FakeLLM([])
+        read_tool = FakeTool("read_file", "ignored")
+        nodes = AgentNodes(
+            config=self._make_config(),
+            llm=agent_llm,
+            tools=[read_tool],
+            llm_with_tools=agent_llm,
+        )
+
+        state = self._initial_state("Прочитай README.md")
+        state["messages"] = [
+            HumanMessage(content="Прочитай README.md"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read_file", "args": {"path": "README.md"}, "id": "tc-ok"}],
+            ),
+            ToolMessage(tool_call_id="tc-ok", name="read_file", content="Success: file contents"),
+        ]
+
+        result = await nodes.recovery_node(state)
+
+        self.assertEqual(result["turn_outcome"], TURN_OUTCOME_CONTINUE_AGENT)
+        self.assertIsNone(result["open_tool_issue"])
 
     async def test_run_logger_writes_structured_tool_failure_event(self):
         tmp = self._workspace_tempdir()

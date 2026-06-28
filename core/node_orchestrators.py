@@ -15,6 +15,7 @@ from core.self_correction_engine import normalize_tool_args
 from core.tool_args import canonicalize_tool_args, inspect_tool_args_payload
 from core.tool_results import parse_tool_execution_result
 from core.turn_outcomes import (
+    TURN_OUTCOME_CONTINUE_AGENT,
     TURN_OUTCOME_FINISH_TURN,
     TURN_OUTCOME_RECOVER_AGENT,
     TURN_OUTCOME_RUN_TOOLS,
@@ -352,6 +353,8 @@ class RecoveryTurnOrchestrator:
                 strategy=str((active_strategy or {}).get("strategy") or ""),
                 suggested_tool=str((active_strategy or {}).get("suggested_tool_name") or ""),
             )
+        elif result["turn_outcome"] == TURN_OUTCOME_CONTINUE_AGENT:
+            turn_outcome = TURN_OUTCOME_CONTINUE_AGENT
 
         owner._log_run_event(
             state,
@@ -443,7 +446,8 @@ class ToolBatchCoordinator:
 
         tool_calls = list(last_msg.tool_calls)
 
-        parallel_mode = owner._can_parallelize_tool_calls(tool_calls)
+        parallel_calls, sequential_calls = owner._partition_tool_calls(tool_calls)
+        parallel_mode = self._parallel_mode_label(parallel_calls, sequential_calls)
         owner._log_run_event(
             state,
             "tools_node_start",
@@ -451,9 +455,19 @@ class ToolBatchCoordinator:
             tool_call_count=len(tool_calls),
             tool_names=[(tool_call.get("name") or "unknown_tool") for tool_call in tool_calls],
             parallel_mode=parallel_mode,
+            parallel_count=len(parallel_calls),
+            sequential_count=len(sequential_calls),
         )
         try:
-            if parallel_mode:
+            # Results are collected positionally, then re-assembled in the
+            # original tool_calls order so that the LLM receives ToolMessages
+            # in the same sequence it emitted tool_calls.
+            results: list[tuple[ToolMessage, bool, dict[str, Any] | None]] = [None] * len(tool_calls)  # type: ignore[list-item]
+            index_by_identity: dict[int, int] = {
+                id(tc): i for i, tc in enumerate(tool_calls)
+            }
+
+            if parallel_calls:
                 processed = await asyncio.gather(
                     *(
                         owner._process_tool_call(
@@ -464,11 +478,11 @@ class ToolBatchCoordinator:
                             current_turn_id,
                             active_tool_names,
                         )
-                        for tool_call in tool_calls
+                        for tool_call in parallel_calls
                     ),
                     return_exceptions=True,
                 )
-                for tool_call, processed_item in zip(tool_calls, processed):
+                for tool_call, processed_item in zip(parallel_calls, processed):
                     if isinstance(processed_item, (asyncio.CancelledError, GraphInterrupt)):
                         raise processed_item
                     if isinstance(processed_item, Exception):
@@ -480,34 +494,31 @@ class ToolBatchCoordinator:
                         )
                     else:
                         tool_msg, had_error, issue = processed_item
-                    final_messages.append(tool_msg)
-                    has_error = has_error or had_error
-                    if issue:
-                        tool_issues.append(issue)
-                    parsed = parse_tool_execution_result(tool_msg.content)
-                    if parsed.ok:
-                        last_result = parsed.message
-                    else:
-                        last_error = parsed.message
-            else:
-                for tool_call in tool_calls:
-                    tool_msg, had_error, issue = await owner._process_tool_call(
-                        tool_call,
-                        recent_calls,
-                        state,
-                        approval_state,
-                        current_turn_id,
-                        active_tool_names,
-                    )
-                    final_messages.append(tool_msg)
-                    has_error = has_error or had_error
-                    if issue:
-                        tool_issues.append(issue)
-                    parsed = parse_tool_execution_result(tool_msg.content)
-                    if parsed.ok:
-                        last_result = parsed.message
-                    else:
-                        last_error = parsed.message
+                    results[index_by_identity[id(tool_call)]] = (tool_msg, had_error, issue)
+
+            for tool_call in sequential_calls:
+                tool_msg, had_error, issue = await owner._process_tool_call(
+                    tool_call,
+                    recent_calls,
+                    state,
+                    approval_state,
+                    current_turn_id,
+                    active_tool_names,
+                )
+                results[index_by_identity[id(tool_call)]] = (tool_msg, had_error, issue)
+
+            # Re-assemble in original order.
+            for item in results:
+                tool_msg, had_error, issue = item
+                final_messages.append(tool_msg)
+                has_error = has_error or had_error
+                if issue:
+                    tool_issues.append(issue)
+                parsed = parse_tool_execution_result(tool_msg.content)
+                if parsed.ok:
+                    last_result = parsed.message
+                else:
+                    last_error = parsed.message
 
             merged_issue = owner._merge_open_tool_issues(tool_issues, current_turn_id)
             owner._log_run_event(
@@ -563,6 +574,23 @@ class ToolBatchCoordinator:
                 parallel_mode=parallel_mode,
             )
             raise
+
+    @staticmethod
+    def _parallel_mode_label(
+        parallel_calls: list[dict[str, Any]],
+        sequential_calls: list[dict[str, Any]],
+    ) -> str:
+        """Return a human-readable execution mode for logging.
+
+        - ``"all"``       — every call is parallel-safe (concurrent gather)
+        - ``"mixed"``     — some calls parallel, some sequential
+        - ``"sequential"`` — no parallel-safe calls, all run one-by-one
+        """
+        if parallel_calls and not sequential_calls:
+            return "all"
+        if parallel_calls and sequential_calls:
+            return "mixed"
+        return "sequential"
 
     def _build_exception_result(
         self,

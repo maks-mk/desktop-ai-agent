@@ -231,6 +231,28 @@ class AssistantMessageWidget(QFrame):
                 parts.append(("markdown", segment.text, ""))
         return parts
 
+    def _make_part_widget(self, kind: str) -> QWidget:
+        if kind == "code":
+            return CodeBlockWidget("", "", parent=self.content_widget)
+        widget = AutoTextBrowser(self.content_widget)
+        widget.setObjectName("AssistantBody")
+        return widget
+
+    @staticmethod
+    def _part_widget_matches_kind(widget: QWidget, kind: str) -> bool:
+        if kind == "code":
+            return isinstance(widget, CodeBlockWidget)
+        return isinstance(widget, AutoTextBrowser)
+
+    def _replace_part_widget(self, index: int, kind: str) -> QWidget:
+        old_widget = self.parts_widgets[index]
+        widget = self._make_part_widget(kind)
+        self.content_layout.insertWidget(index, widget)
+        self.content_layout.removeWidget(old_widget)
+        old_widget.deleteLater()
+        self.parts_widgets[index] = widget
+        return widget
+
     def set_content(self, markdown: str) -> None:
         self._markdown = markdown
         text = markdown.strip()
@@ -239,12 +261,7 @@ class AssistantMessageWidget(QFrame):
 
         while len(self.parts_widgets) < len(parts):
             idx = len(self.parts_widgets)
-            is_code = parts[idx][0] == "code"
-            if is_code:
-                w = CodeBlockWidget("", "", parent=self.content_widget)
-            else:
-                w = AutoTextBrowser(self.content_widget)
-                w.setObjectName("AssistantBody")
+            w = self._make_part_widget(parts[idx][0])
             self.content_layout.insertWidget(len(self.parts_widgets), w)
             self.parts_widgets.append(w)
 
@@ -257,6 +274,8 @@ class AssistantMessageWidget(QFrame):
             w = self.parts_widgets[idx]
             part_kind, part_text, part_language = part
             is_code = part_kind == "code"
+            if not self._part_widget_matches_kind(w, part_kind):
+                w = self._replace_part_widget(idx, part_kind)
 
             if is_code:
                 title = part_language.upper() if part_language else "CODE"

@@ -141,7 +141,7 @@ class WorkspaceBuilder:
         pill_layout.addWidget(composer_notice_label)
 
         composer = ComposerTextEdit()
-        composer.setPlaceholderText("Ask the agent, Attach images, or @ -Add files…")
+        composer.setPlaceholderText("Describe your task, attach context, or type @ to add files…")
         composer.setAccessibleName("Composer")
         composer.setAccessibleDescription("Write a request for the agent")
         line_spacing = max(14, composer.fontMetrics().lineSpacing())

@@ -5,8 +5,8 @@ import json
 from enum import Enum
 from typing import Any
 
-from PySide6.QtCore import QPoint, QSize, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QStandardItem
+from PySide6.QtCore import QPoint, QPointF, QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStyle,
+    QStyleOptionButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -69,6 +71,39 @@ class ModelLoadState(str, Enum):
     LOADED = "loaded"
     FALLBACK = "fallback"
     ERROR = "error"
+
+
+class ImageSupportCheckBox(QCheckBox):
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator_rect = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator,
+            option,
+            self,
+        )
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(TEXT_PRIMARY if self.isEnabled() else TEXT_MUTED))
+        pen.setWidthF(1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        x = indicator_rect.x()
+        y = indicator_rect.y()
+        width = indicator_rect.width()
+        height = indicator_rect.height()
+        first = QPointF(x + width * 0.24, y + height * 0.56)
+        middle = QPointF(x + width * 0.44, y + height * 0.74)
+        last = QPointF(x + width * 0.78, y + height * 0.32)
+        painter.drawLine(first, middle)
+        painter.drawLine(middle, last)
 
 
 def _fetch_error_message(error: FetchError) -> str:
@@ -420,7 +455,7 @@ class ModelSettingsDialog(QDialog):
         self.base_url_edit.setClearButtonEnabled(True)
         self.base_url_edit.setAccessibleName("Base URL")
 
-        self.supports_images_checkbox = QCheckBox("Image input support")
+        self.supports_images_checkbox = ImageSupportCheckBox("Image input support")
         self.supports_images_checkbox.setObjectName("ModelSupportsImagesCheckbox")
         self.supports_images_checkbox.setToolTip("Allow image attachments for this profile.")
         self.supports_images_checkbox.setAccessibleName("Image input support")
@@ -802,7 +837,15 @@ class ModelSettingsDialog(QDialog):
             return str(self.model_combo.currentText() or "").strip()
         return str(self.model_text_edit.text() or "").strip()
 
+    def _selected_profile_enabled(self) -> bool:
+        row = self._current_row()
+        if row < 0 or row >= len(self._profiles):
+            return False
+        return bool(self._profiles[row].get("enabled", True))
+
     def _current_fetch_inputs(self) -> tuple[str, str, str, ModelFetcher, tuple[str, ...]] | None:
+        if not self._selected_profile_enabled():
+            return None
         provider = self._normalized_provider()
         api_key = str(self.api_key_edit.text() or "").strip()
         if not api_key:

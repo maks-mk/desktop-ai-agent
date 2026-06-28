@@ -928,7 +928,7 @@ def main() -> int:
     app.setWindowIcon(app_icon)
     window = MainWindow()
     window.setWindowIcon(app_icon)
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 

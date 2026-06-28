@@ -798,6 +798,25 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(processor.full_text, "Открою официальные страницы.")
         self.assertIn("call-fetch", processor.tool_start_times)
 
+    def test_stream_processor_suppresses_messages_tool_preface_after_message_stream(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Открою официальные страницы."), source="messages")
+        processor._handle_agent_message(
+            AIMessage(
+                content="\nОткрою официальные страницы.\n",
+                tool_calls=[{"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://example.com"]}}],
+            ),
+            source="messages",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Открою официальные страницы.")
+        self.assertEqual(processor.full_text, "Открою официальные страницы.")
+        self.assertIn("call-fetch", processor.tool_start_times)
+
     def test_stream_processor_suppresses_last_paragraph_replay_while_tool_is_active(self):
         events = []
         processor = StreamProcessor(events.append)
@@ -825,6 +844,59 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(deltas[-1]["full_text"].count("Открою официальные страницы Zhipu AI."), 1)
         self.assertEqual(processor.full_text.count("Открою официальные страницы Zhipu AI."), 1)
 
+    def test_stream_processor_suppresses_messages_tool_preface_after_updates_agent_preface(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessage(
+                content="Проверю файл.",
+                tool_calls=[{"id": "call-read", "name": "read_file", "args": {"path": "index.html"}}],
+            ),
+            source="updates_agent",
+        )
+        processor._handle_agent_message(AIMessageChunk(content="Проверю "), source="messages")
+        processor._handle_agent_message(AIMessageChunk(content="файл."), source="messages")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Проверю файл.")
+        self.assertEqual(processor.full_text, "Проверю файл.")
+
+    def test_stream_processor_suppresses_updates_agent_replay_when_messages_text_was_deferred(self):
+        """Text streamed via messages while tools are active is deferred (not emitted,
+        so _visible_full_text is stale). When updates_agent arrives with the same text
+        plus tool_calls, it must NOT emit a duplicate assistant_delta."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        # Simulate: tool already active (e.g. from a prior tool_call in the same turn)
+        processor._emit_tool_started(
+            {"id": "call-search", "name": "web_search", "args": {"query": "test"}}
+        )
+        # Text streamed via messages while tool is active → deferred, _visible_full_text stays ""
+        processor._handle_agent_message(
+            AIMessageChunk(content="Проверю информацию в источниках."),
+            source="messages",
+        )
+        # The deferred text was NOT emitted yet (tool still active)
+        deferred_deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deferred_deltas), 0)
+        # Now updates_agent arrives with the SAME text + tool_calls
+        processor._handle_agent_message(
+            AIMessage(
+                content="Проверю информацию в источниках.",
+                tool_calls=[{"id": "call-fetch", "name": "fetch_content", "args": {"urls": ["https://example.com"]}}],
+            ),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        # Should emit exactly ONE delta (the text is new to the visible UI, not a replay)
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], "Проверю информацию в источниках.")
+        self.assertEqual(processor.full_text, "Проверю информацию в источниках.")
+
     def test_stream_processor_merges_post_tool_answer_without_repeating_last_preface(self):
         events = []
         processor = StreamProcessor(events.append)
@@ -850,6 +922,35 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(deltas[-1]["full_text"].count("Открою официальные страницы."), 1)
         self.assertEqual(processor.full_text.count("Открою официальные страницы."), 1)
         self.assertIn("Вот полная информация.", deltas[-1]["full_text"])
+
+    def test_stream_processor_suppresses_similar_replayed_preface_before_more_text(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(
+            AIMessageChunk(content="Посмотрю конфигурацию лимитов и логику self-corection."),
+            source="messages",
+        )
+        processor._emit_tool_started(
+            {"id": "call-search", "name": "search_in_directory", "args": {"pattern": "self_correction"}}
+        )
+        processor._handle_tool_result(
+            ToolMessage(content="ok", name="search_in_directory", tool_call_id="call-search")
+        )
+        processor._handle_agent_message(
+            AIMessageChunk(
+                content=(
+                    "Посмотрю конфигурацию лимитов и логику self-correction. "
+                    "Нашёл настройки в `core/config.py`."
+                )
+            ),
+            source="messages",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(processor.full_text.count("Посмотрю конфигурацию лимитов"), 1)
+        self.assertEqual(deltas[-1]["full_text"].count("Посмотрю конфигурацию лимитов"), 1)
+        self.assertIn("Нашёл настройки в `core/config.py`.", deltas[-1]["full_text"])
 
     def test_stream_processor_ignores_reasoning_only_update_without_text_chunk(self):
         events = []
@@ -2067,6 +2168,30 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertTrue(window._is_stale_assistant_delta_without_sequence("Проверяю файлы."))
         self.assertFalse(window._is_stale_assistant_delta_without_sequence("Другая корректировка"))
+
+    def test_stream_processor_suppresses_updates_agent_replay_after_messages_segment(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверяю файлы."), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "main.py"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+        processor._handle_agent_message(AIMessage(content="Проверяю файлы."), source="updates_agent")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual([payload["full_text"] for payload in deltas], ["Проверяю файлы."])
+
+    def test_stream_processor_appends_distinct_updates_agent_text_after_tool(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверяю файлы."), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "main.py"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+        processor._handle_agent_message(AIMessage(content="Готово."), source="updates_agent")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(deltas[-1]["full_text"], "Проверяю файлы.\n\nГотово.")
 
     class _FakeAssistantDeltaTimer:
         def __init__(self):
