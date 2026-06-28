@@ -12,10 +12,15 @@
 - `requirements.txt` - Python-зависимости.
 - `env_example.txt` - пример переменных окружения.
 - `provider_registry.json` - registry OpenAI-compatible провайдеров и их reasoning kwargs.
-- `provider_registry_guide.md` - подробная инструкция по `provider_registry.json`.
-- `README.md` - пользовательская и эксплуатационная документация.
+- `README.md` - пользовательская и эксплуатационная документация (RU).
+- `README_EN.md` - английская версия документации.
 - `build.bat` - вспомогательный build-скрипт для Windows.
 - `icon.ico` - иконка приложения.
+
+## Директория `docs/`
+
+- `PROJECT_STRUCTURE.md` - данный документ: карта модулей и архитектура.
+- `provider_registry_guide.md` - подробная инструкция по `provider_registry.json`.
 
 ## Runtime-данные
 
@@ -51,8 +56,9 @@
 
 ### Узлы и оркестрация графа
 
-- `node_orchestrators.py` - высокоуровневые оркестраторы хода агента и tools.
+- `node_orchestrators.py` - высокоуровневые оркестраторы хода агента и tools, `ToolBatchCoordinator` для mixed-mode parallel batch.
 - `node_errors.py` - классификация ошибок узлов.
+- `turn_outcomes.py` - константы исходов хода (`run_tools`, `recover_agent`, `finish_turn`, `continue_agent`) для routing-логики.
 - `recovery_manager.py` - управление попытками восстановления после сбоев.
 - `self_correction_engine.py` - построение repair-планов для tool/protocol ошибок.
 - `summarize_policy.py` - правила сжатия истории.
@@ -89,7 +95,7 @@
 - `llm.py` - LLM turn orchestration.
 - `agent.py` - обработка ответа LLM, tool calls, Gemini thought signatures и protocol checks.
 - `tool_preflight.py` - предварительная проверка tool calls перед выполнением.
-- `tools.py` - выполнение tool calls и сбор `ToolMessage`.
+- `tools.py` - выполнение tool calls, mixed-mode parallel batch (read-only — параллельно, остальные — последовательно) и сбор `ToolMessage`.
 - `approval.py` - interrupt/approval flow для действий, требующих подтверждения.
 - `recovery.py` - узел восстановления после tool/protocol ошибок.
 - `protocol.py` - protocol guard logic.
@@ -160,7 +166,7 @@ GUI на PySide6 и слой выполнения агента в отдельн
 - `test_tooling_refactor.py`, `test_policy_engine.py`, `test_api_key_rotation.py` - tools, policies и ключи.
 - `test_model_profiles.py`, `test_model_fetcher.py` - профили и загрузка моделей.
 - `test_cli_ux.py`, `test_main_window_facade.py`, `test_ui_helpers.py` - UI и UX.
-- `test_refactor_services.py`, `test_self_correction_engine.py`, `test_critic_graph.py`, `test_intent_engine.py`, `test_input_sanitizer.py`, `test_logging_config.py`, `test_session_utils.py` - сервисы ядра и вспомогательная логика.
+- `test_refactor_services.py`, `test_self_correction_engine.py`, `test_critic_graph.py`, `test_mixed_parallel_tools.py`, `test_intent_engine.py`, `test_input_sanitizer.py`, `test_logging_config.py`, `test_session_utils.py` - сервисы ядра и вспомогательная логика.
 
 ## Основной поток выполнения
 
