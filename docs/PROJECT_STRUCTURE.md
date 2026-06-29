@@ -5,7 +5,7 @@
 ## Корень проекта
 
 - `main.py` - точка входа GUI, создает `QApplication` и открывает главное окно.
-- `agent.py` - сборка LangGraph-агента, создание LLM, настройка reasoning/thinking, регистрация tools и компиляция графа.
+- `agent.py` - сборка LangGraph-агента: компиляция графа, routing, tool binding и checkpointing. Provider-адаптеры вынесены в `core/providers/`.
 - `prompt.txt` - общий системный промпт агента.
 - `prompt_dev.txt` - дополнительный dev/devops-промпт.
 - `mcp.json` - конфигурация MCP-серверов.
@@ -53,6 +53,16 @@
 - `reasoning_debug.py` - отдельное debug-логирование reasoning/thinking и status-сигналов.
 - `run_logger.py` - JSONL-логирование отдельных запусков агента.
 - `logging_config.py` - настройка логирования приложения.
+
+### `core/providers/`
+
+Provider-адаптеры, вынесенные из `agent.py`. Изолируют provider-specific private-method overrides от graph runtime.
+
+- `__init__.py` - реэкспорт публичного API: `create_llm`, `create_runtime_llm`, `prepare_llm_with_tools`, хелперы.
+- `base.py` - общие хелперы: нормализация model-name, reasoning-effort, проверка pydantic-field kwargs.
+- `gemini.py` - Gemini thought-signature adapter (override `_prepare_request`/`_generate`/`_agenerate`), retry-kwargs monkey-patch, фабрика `create_gemini_chat_model()`.
+- `openai_reasoning.py` - `ReasoningDebugChatOpenAI` (override `_stream`/`_astream` для reasoning-debug), `extract_openai_reasoning_delta()`, фабрика `create_openai_chat_model()`.
+- `factory.py` - тонкий оркестратор `create_llm()` (dispatch по provider), `create_runtime_llm()` (API-key rotation), `prepare_llm_with_tools()`.
 
 ### Узлы и оркестрация графа
 

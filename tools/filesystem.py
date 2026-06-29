@@ -43,7 +43,6 @@ class FilesystemBackend(Protocol):
         max_files: int = 200,
         max_depth: Optional[int] = None,
     ) -> str: ...
-    def tail_file(self, path: str, lines: int = 50, show_line_numbers: bool = True) -> str: ...
     def delete_file(self, path: str) -> str: ...
     def delete_directory(self, path: str, recursive: bool = False) -> str: ...
     def find_files(self, path: str, name_pattern: str, max_results: int = 200, max_depth: Optional[int] = None) -> str: ...
@@ -150,32 +149,23 @@ class EditFileInput(BaseModel):
 
     path: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="File path.",
     )
-    file_path: str | None = Field(default=None, description="File path alias.")
-    filepath: str | None = Field(default=None, description="File path alias.")
     old_string: str | None = Field(
         default=None,
+        validation_alias=AliasChoices(
+            "old_string", "old_text", "search_text", "find_text", "target_text", "old", "before", "from_", "from"
+        ),
         description="Exact text to replace.",
     )
-    old_text: str | None = Field(default=None, description="Alias for old_string.")
-    search_text: str | None = Field(default=None, description="Alias for old_string.")
-    find_text: str | None = Field(default=None, description="Alias for old_string.")
-    target_text: str | None = Field(default=None, description="Alias for old_string.")
-    old: str | None = Field(default=None, description="Alias for old_string.")
-    before: str | None = Field(default=None, description="Alias for old_string.")
-    from_: str | None = Field(default=None, validation_alias=AliasChoices("from_", "from"), description="Alias for old_string.")
     new_string: str | None = Field(
         default=None,
+        validation_alias=AliasChoices(
+            "new_string", "new_text", "replace_text", "replacement", "replace_with", "new", "after", "to"
+        ),
         description="Replacement text.",
     )
-    new_text: str | None = Field(default=None, description="Alias for new_string.")
-    replace_text: str | None = Field(default=None, description="Alias for new_string.")
-    replacement: str | None = Field(default=None, description="Alias for new_string.")
-    replace_with: str | None = Field(default=None, description="Alias for new_string.")
-    new: str | None = Field(default=None, description="Alias for new_string.")
-    after: str | None = Field(default=None, description="Alias for new_string.")
-    to: str | None = Field(default=None, description="Alias for new_string.")
 
     @model_validator(mode="before")
     @classmethod
@@ -210,20 +200,17 @@ class WriteFileInput(BaseModel):
 
     path: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("path", "file_path", "filepath"),
         description="Workspace-relative file path to create or overwrite.",
     )
-    file_path: str | None = Field(default=None, description="File path alias.")
-    filepath: str | None = Field(default=None, description="File path alias.")
     content: str = Field(
         default="",
+        validation_alias=AliasChoices("content", "text", "body", "contents"),
         description=(
             "Complete final file contents to write. Provide the full body of the file, "
             "not a summary, placeholder, or filename."
         ),
     )
-    text: str | None = Field(default=None, description="Alias for content.")
-    body: str | None = Field(default=None, description="Alias for content.")
-    contents: str | None = Field(default=None, description="Alias for content.")
 
     @model_validator(mode="before")
     @classmethod
@@ -296,7 +283,7 @@ def write_file_tool(
             },
             ("content", *_WRITE_FILE_CONTENT_ALIASES),
         )
-    if content is None:
+    if content is None or not str(content).strip():
         return format_error(ErrorType.VALIDATION, "Missing required field: content.")
     return _get_synced_backend().write_file(resolved_path, str(content))
 
@@ -407,12 +394,6 @@ def search_in_directory_tool(
         max_files,
         max_depth,
     )
-
-
-@tool("tail_file")
-def tail_file_tool(path: str, lines: int = 50, show_line_numbers: bool = True) -> str:
-    """Read the last N lines of a file."""
-    return _get_synced_backend().tail_file(path, lines, show_line_numbers)
 
 
 @tool("safe_delete_file", args_schema=DeleteFileInput)
@@ -552,7 +533,6 @@ __all__ = [
     "list_directory_tool",
     "search_in_file_tool",
     "search_in_directory_tool",
-    "tail_file_tool",
     "safe_delete_file",
     "safe_delete_directory",
     "download_file",

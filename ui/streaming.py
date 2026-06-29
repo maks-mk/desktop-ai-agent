@@ -656,14 +656,35 @@ class StreamProcessor:
         for paragraph in self._nonempty_paragraphs(visible):
             if self._texts_are_same_replay(paragraph, incoming):
                 return False
-        if min(len(incoming), len(visible)) >= 120:
+        if min(len(incoming), len(visible)) >= 20:
             similarity = difflib.SequenceMatcher(None, visible, incoming).quick_ratio()
             if similarity >= 0.92:
                 return False
+        if self._is_fuzzy_substring_of(incoming, visible):
+            return False
         replay_merge = self._merge_with_replay_guard(visible, incoming)
         if replay_merge is not None:
             return replay_merge.strip() != visible
         return True
+
+    @staticmethod
+    def _is_fuzzy_substring_of(incoming: str, visible: str) -> bool:
+        """Check if *incoming* is approximately contained within *visible*.
+
+        This catches the case where ``updates_agent`` replays only a portion of
+        the already-visible ``messages`` text with minor typos.  The overall
+        ``quick_ratio`` is too low in this scenario because *visible* is much
+        longer than *incoming*, so we measure the **containment ratio** instead:
+        what fraction of *incoming*'s characters appear (in order) inside
+        *visible*.
+        """
+        incoming_norm = StreamProcessor._normalized_text(incoming)
+        visible_norm = StreamProcessor._normalized_text(visible)
+        if len(incoming_norm) < 80 or len(visible_norm) <= len(incoming_norm):
+            return False
+        matcher = difflib.SequenceMatcher(None, visible_norm, incoming_norm, autojunk=False)
+        total_matched = sum(block.size for block in matcher.get_matching_blocks())
+        return total_matched / len(incoming_norm) >= 0.85
 
     def _merge_assistant_text(
         self,

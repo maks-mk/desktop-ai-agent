@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
@@ -17,6 +18,12 @@ from .foundation import (
     _collapsed_user_message_text,
     _fa_icon,
     format_approval_detail_text,
+)
+
+_TEXT_LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+_CODE_LIKE_RE = re.compile(
+    r"(^|\s)(def|class|import|from|return|if|else|elif|for|while|try|except|with|function|const|let|var)\b"
+    r"|[{};]|=>|==|!=|:=|::|->|\w+\([^)]*\)"
 )
 
 class NoticeWidget(QFrame):
@@ -222,11 +229,24 @@ class AssistantMessageWidget(QFrame):
         self.content_layout.addWidget(self.cursor_label, 0, Qt.AlignLeft)
 
     @staticmethod
-    def _split_markdown_parts(markdown: str) -> list[tuple[str, str, str]]:
+    def _looks_like_plain_text_unclosed_fence(text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        if _CODE_LIKE_RE.search(stripped):
+            return False
+        letters = len(_TEXT_LETTER_RE.findall(stripped))
+        return letters >= 8 and any(char in stripped for char in " .,!?;:—–-«»()")
+
+    @classmethod
+    def _split_markdown_parts(cls, markdown: str) -> list[tuple[str, str, str]]:
         parts: list[tuple[str, str, str]] = []
         for segment in split_markdown_segments(markdown):
             if segment.kind == "code":
-                parts.append(("code", segment.text, segment.language))
+                if not segment.closed and not segment.language and cls._looks_like_plain_text_unclosed_fence(segment.text):
+                    parts.append(("markdown", f"```\n{segment.text}", ""))
+                else:
+                    parts.append(("code", segment.text, segment.language))
             elif segment.text.strip() or not parts:
                 parts.append(("markdown", segment.text, ""))
         return parts

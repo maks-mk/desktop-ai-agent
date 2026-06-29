@@ -276,7 +276,7 @@ def _format_url_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
 
 
 DISPLAY_RULES: tuple[tuple[set[str], Callable[[str, Dict[str, Any]], str | None]], ...] = (
-    ({"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace", "tail_file"}, _format_path_tool),
+    ({"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace"}, _format_path_tool),
     ({"web_search", "WebSearch"}, _format_query_tool),
     ({"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}, _format_pattern_tool),
     ({"execute", "RunCommand", "cli_exec"}, _format_command_tool),
@@ -303,7 +303,7 @@ def classify_tool_args_state(tool_name: str, tool_args: Dict[str, Any]) -> str:
         return "pending"
 
     anchor_keys: tuple[str, ...] = ()
-    if tool_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace", "tail_file"}:
+    if tool_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace"}:
         anchor_keys = ("path", "file_path")
     elif tool_name in {"web_search", "WebSearch"}:
         anchor_keys = ("query",)
@@ -339,7 +339,7 @@ def tool_target_summary(tool_name: str, tool_args: Dict[str, Any]) -> str:
     args = dict(tool_args or {})
     normalized_name = str(tool_name or "").strip()
 
-    if normalized_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace", "tail_file"}:
+    if normalized_name in {"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace"}:
         path_value = args.get("file_path") or args.get("path")
         return abbreviate_path(str(path_value)) if path_value else ""
     if normalized_name in {"ls", "LS", "list_directory"}:
@@ -374,7 +374,6 @@ def build_tool_ui_labels(
 
     action_map = {
         "read_file": "Reading file",
-        "tail_file": "Reading file",
         "write_file": "Writing file",
         "edit_file": "Editing file",
         "Read": "Reading file",
@@ -402,7 +401,6 @@ def build_tool_ui_labels(
     }
     preparing_map = {
         "read_file": "Preparing file read",
-        "tail_file": "Preparing file read",
         "write_file": "Preparing file write",
         "edit_file": "Preparing edit",
         "Read": "Preparing file read",

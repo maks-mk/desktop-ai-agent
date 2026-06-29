@@ -54,6 +54,7 @@ class AgentNodes(
         "agent_turn",
         "recovery_turn",
         "tool_batch",
+        "_required_fields_cache",
     )
 
     # Only these tools are allowed to run in parallel in a single tool-call batch.
@@ -64,7 +65,6 @@ class AgentNodes(
             "list_directory",
             "search_in_file",
             "search_in_directory",
-            "tail_file",
             "find_file",
             "web_search",
             "fetch_content",
@@ -82,7 +82,6 @@ class AgentNodes(
             "read_file",
             "search_in_file",
             "search_in_directory",
-            "tail_file",
             "find_file",
             "list_directory",
             "web_search",
@@ -113,6 +112,11 @@ class AgentNodes(
         self.tool_metadata = tool_metadata or {}
         self.model_capabilities = dict(model_capabilities or {})
         self.run_logger = run_logger
+
+        # Cache: tool_name -> tuple of required field names.
+        # Tool schemas are immutable after registration, so this is safe for
+        # the lifetime of this AgentNodes instance.
+        self._required_fields_cache: Dict[str, tuple[str, ...]] = {}
 
         # Lazy initialization of helpers (mixins may define these)
         self._init_nodes()

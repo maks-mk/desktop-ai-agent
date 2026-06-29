@@ -118,7 +118,6 @@ class ToolRegistry:
                     "download_file",
                     "search_in_file_tool",
                     "search_in_directory_tool",
-                    "tail_file_tool",
                     "find_file_tool",
                 ),
                 configure=self._configure_safety,
@@ -153,7 +152,6 @@ class ToolRegistry:
                     "search_in_directory_tool": ToolMetadata(
                         name="search_in_directory", read_only=True
                     ),
-                    "tail_file_tool": ToolMetadata(name="tail_file", read_only=True),
                     "find_file_tool": ToolMetadata(name="find_file", read_only=True),
                 },
             ),

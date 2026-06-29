@@ -41,7 +41,6 @@ _CANONICAL_PATH_TOOL_NAMES = frozenset(
         "list_directory",
         "search_in_file",
         "search_in_directory",
-        "tail_file",
         "find_file",
         "safe_delete_file",
         "safe_delete_directory",

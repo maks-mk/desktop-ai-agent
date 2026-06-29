@@ -66,28 +66,69 @@ def _count_tokens_fallback(text: str) -> int:
     return max(1, len(text) // 3)
 
 
+# ---------------------------------------------------------------------------
+# Per-message token cache.
+#
+# Messages are immutable after creation (LangChain guarantees this for
+# AIMessage, HumanMessage, ToolMessage).  The cache key combines the message
+# id with a cheap hash of the stringified content + tool_calls, so that even
+# if a message is replaced with a new instance bearing the same id (e.g. after
+# recovery rewriting), the cache will miss and recompute correctly.
+#
+# The cache is bounded to avoid unbounded memory growth in very long sessions.
+# ---------------------------------------------------------------------------
+
+_MESSAGE_TOKEN_CACHE: dict[tuple[str | None, int], int] = {}
+_MESSAGE_TOKEN_CACHE_LIMIT = 512
+
+
+def _message_cache_key(message: BaseMessage) -> tuple[str | None, int]:
+    content_str = stringify_content(message.content)
+    tool_calls = getattr(message, "tool_calls", None) or []
+    tool_calls_str = str(tool_calls) if tool_calls else ""
+    combined = content_str + "\x00" + tool_calls_str
+    return (getattr(message, "id", None), hash(combined))
+
+
+def _count_single_message_tokens(message: BaseMessage, *, use_tiktoken: bool) -> int:
+    key = _message_cache_key(message)
+    cached = _MESSAGE_TOKEN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    count_fn = _count_tokens_tiktoken if use_tiktoken else _count_tokens_fallback
+    total = 0
+    content = stringify_content(message.content)
+    total += count_fn(content)
+
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if tool_calls:
+        total += count_fn(str(tool_calls))
+
+    if use_tiktoken:
+        total += _MESSAGE_OVERHEAD_TOKENS
+
+    if len(_MESSAGE_TOKEN_CACHE) >= _MESSAGE_TOKEN_CACHE_LIMIT:
+        # Evict oldest entry (dict preserves insertion order in Python 3.7+).
+        _MESSAGE_TOKEN_CACHE.pop(next(iter(_MESSAGE_TOKEN_CACHE)))
+    _MESSAGE_TOKEN_CACHE[key] = total
+    return total
+
+
 def estimate_tokens(messages: List[BaseMessage]) -> int:
     """Estimate the total token count for a list of messages.
 
     Algorithm:
     - If tiktoken is available, use cl100k_base + per-message overhead.
     - Otherwise, use a character heuristic with a divisor of 3.
+    - Per-message results are cached to avoid recomputation for unchanged
+      messages across turns.
     """
     use_tiktoken = _get_encoder() is not None
-    count_fn = _count_tokens_tiktoken if use_tiktoken else _count_tokens_fallback
 
     total = 0
     for message in messages:
-        content = stringify_content(message.content)
-        total += count_fn(content)
-
-        tool_calls = getattr(message, "tool_calls", None) or []
-        if tool_calls:
-            tool_calls_text = str(tool_calls)
-            total += count_fn(tool_calls_text)
-
-        if use_tiktoken:
-            total += _MESSAGE_OVERHEAD_TOKENS
+        total += _count_single_message_tokens(message, use_tiktoken=use_tiktoken)
 
     return total
 

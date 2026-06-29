@@ -1220,14 +1220,14 @@ class StreamAndFilesystemTests(unittest.TestCase):
         events = []
         processor = StreamProcessor(events.append)
         processor.tool_buffer["call-late"] = {
-            "name": "tail_file",
-            "args": {"path": "service.log", "lines": 20},
+            "name": "read_file",
+            "args": {"path": "service.log", "offset": 0, "limit": 20},
         }
 
         processor._handle_tool_result(
             ToolMessage(
                 tool_call_id="call-late",
-                name="tail_file",
+                name="read_file",
                 content="Last 20 line(s)...",
             )
         )
@@ -1235,9 +1235,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
         started = [event.payload for event in events if event.type == "tool_started"]
         finished = [event.payload for event in events if event.type == "tool_finished"]
         self.assertEqual(len(started), 1)
-        self.assertEqual(started[0]["args"], {"path": "service.log", "lines": 20})
+        self.assertEqual(started[0]["args"], {"path": "service.log", "offset": 0, "limit": 20})
         self.assertEqual(len(finished), 1)
-        self.assertEqual(finished[0]["args"], {"path": "service.log", "lines": 20})
+        self.assertEqual(finished[0]["args"], {"path": "service.log", "offset": 0, "limit": 20})
 
     def test_stream_processor_recovers_args_from_tool_message_metadata(self):
         events = []
@@ -1815,6 +1815,29 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("ERROR[VALIDATION]", result)
         self.assertIn("new_string", result)
 
+    def test_write_file_missing_content_returns_validation_error(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        result = filesystem.write_file_tool.invoke({"path": "empty.txt"})
+
+        self.assertIn("ERROR[VALIDATION]", result)
+        self.assertIn("content", result)
+        self.assertFalse((tmp / "empty.txt").exists())
+
+    def test_write_file_whitespace_only_content_returns_validation_error(self):
+        tmp = self._workspace_tempdir()
+        original_cwd = filesystem.fs_manager.cwd
+        self.addCleanup(lambda: setattr(filesystem.fs_manager, "cwd", original_cwd))
+        filesystem.set_working_directory(str(tmp))
+
+        result = filesystem.write_file_tool.invoke({"path": "ws.txt", "content": "   \n  "})
+
+        self.assertIn("ERROR[VALIDATION]", result)
+        self.assertIn("content", result)
+
     def test_edit_file_path_sanitizer_strips_browser_user_agent_tail(self):
         tmp = self._workspace_tempdir()
         original_cwd = filesystem.fs_manager.cwd
@@ -2192,6 +2215,60 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
         self.assertEqual(deltas[-1]["full_text"], "Проверяю файлы.\n\nГотово.")
+
+    def test_stream_processor_suppresses_fuzzy_substring_replay_with_typo(self):
+        """updates_agent replays a portion of the visible messages text with a
+        minor typo fix (e.g. «патерн» → «паттерн»).  The overall quick_ratio is
+        too low because visible is much longer, but the containment ratio is
+        high — the text must be suppressed to avoid a temporary duplicate."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        visible_text = (
+            "Получу документацию по LangGraph и asyncio для коректной реализации, "
+            "параллельно перечитывая полный ToolBatchCoordinator.run."
+            "Документация подтверждает: asyncio.gather с return_exceptions=True "
+            "— правильный патерн для параллельных tool-вызовов в кастомном узле. "
+            "Теперь изучу импорты и начало файла, чтобы спланировать чистую реализацию."
+        )
+        processor._handle_agent_message(AIMessageChunk(content=visible_text), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "tools.py"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+
+        replay_text = (
+            "Документация подтверждает: asyncio.gather с return_exceptions=True "
+            "— правильный паттерн для параллельных tool-вызовов в кастомном узле. "
+            "Теперь изучу импорты и начало файла, чтобы спланировать чистую реализацию."
+        )
+        processor._handle_agent_message(AIMessage(content=replay_text), source="updates_agent")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        # Only the messages-stream delta should be emitted; the fuzzy replay
+        # must be suppressed.
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], visible_text)
+        self.assertEqual(processor.full_text, visible_text)
+
+    def test_stream_processor_suppresses_short_fuzzy_replay_with_added_word(self):
+        """updates_agent replays a short visible text with a minor addition
+        (e.g. «...синтаксис импорт.» → «...синтаксис и импорт.»).  The texts are
+        short (< 120 chars) but quick_ratio is high — the replay must be
+        suppressed."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        visible_text = "Теперь проверю синтаксис импорт."
+        processor._handle_agent_message(AIMessageChunk(content=visible_text), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "tools.py"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+
+        replay_text = "Теперь проверю синтаксис и импорт."
+        processor._handle_agent_message(AIMessage(content=replay_text), source="updates_agent")
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0]["full_text"], visible_text)
+        self.assertEqual(processor.full_text, visible_text)
 
     class _FakeAssistantDeltaTimer:
         def __init__(self):

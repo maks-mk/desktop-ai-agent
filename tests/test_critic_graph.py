@@ -629,9 +629,9 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["open_tool_issue"])
         self.assertIn("повторный запуск", str(result["messages"][-1].content).lower())
 
-    async def test_tail_file_not_found_can_fallback_to_direct_verification(self):
+    async def test_read_file_not_found_can_fallback_to_direct_verification(self):
         bg_tool = FakeTool("run_background_process", "Success: Process started with PID 4321.")
-        tail_tool = FakeTool("tail_file", "ERROR[NOT_FOUND]: File 'demo.output' not found.")
+        read_tool = FakeTool("read_file", "ERROR[NOT_FOUND]: File 'demo.output' not found.")
         cli_tool = FakeTool("cli_exec", "stdout: service healthy")
         app, _agent_llm = self._build_app(
             agent_responses=[
@@ -641,7 +641,7 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 AIMessage(
                     content="",
-                    tool_calls=[{"name": "tail_file", "args": {"path": "demo.output"}, "id": "tc-tail-1"}],
+                    tool_calls=[{"name": "read_file", "args": {"path": "demo.output"}, "id": "tc-read-1"}],
                 ),
                 AIMessage(
                     content="",
@@ -649,21 +649,21 @@ class StabilityGraphTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 AIMessage(content="Файл вывода не появился, поэтому состояние проверено напрямую через процесс."),
             ],
-            tools=[bg_tool, tail_tool, cli_tool],
+            tools=[bg_tool, read_tool, cli_tool],
             tool_metadata={
                 "run_background_process": ToolMetadata(name="run_background_process", mutating=True),
-                "tail_file": ToolMetadata(name="tail_file", read_only=True),
+                "read_file": ToolMetadata(name="read_file", read_only=True),
                 "cli_exec": ToolMetadata(name="cli_exec", mutating=True),
             },
         )
 
         result = await app.ainvoke(
             self._initial_state("Запусти процесс и проверь результат даже если output-файл не появится"),
-            config={"configurable": {"thread_id": "tail-fallback"}, "recursion_limit": 64},
+            config={"configurable": {"thread_id": "read-fallback"}, "recursion_limit": 64},
         )
 
         self.assertEqual(len(bg_tool.calls), 1)
-        self.assertEqual(len(tail_tool.calls), 1)
+        self.assertEqual(len(read_tool.calls), 1)
         self.assertEqual(len(cli_tool.calls), 1)
         self.assertEqual(result["turn_outcome"], "finish_turn")
         self.assertIsNone(result["open_tool_issue"])

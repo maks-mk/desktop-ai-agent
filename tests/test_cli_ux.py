@@ -371,6 +371,16 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(widget.parts_widgets[1].editor.toPlainText(), "print('hi')")
         self.assertEqual(widget.parts_widgets[1].title_label.text(), "PYTHON")
 
+    def test_assistant_message_widget_keeps_plain_text_unclosed_fence_as_markdown(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_markdown("```\nТеперь проверю, есть ли тесты для validation_missing_write_content через mock:\n")
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 1)
+        self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+
     def test_assistant_message_widget_replaces_part_widget_when_stream_opens_code_block(self):
         widget = AssistantMessageWidget()
         self.addCleanup(widget.deleteLater)

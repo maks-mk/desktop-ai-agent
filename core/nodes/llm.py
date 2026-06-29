@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Any, List
 
 from langchain_core.language_models import BaseChatModel
@@ -141,7 +142,10 @@ class LLMMixin:
                     )
                     raise
 
-                await asyncio.sleep(retry_delay)
+                # Exponential backoff with jitter: delay = base * 2^attempt + random(0, base)
+                # This avoids thundering-herd on rate limits and transient errors.
+                backoff_delay = retry_delay * (2 ** attempt) + random.uniform(0, retry_delay)
+                await asyncio.sleep(backoff_delay)
 
         raise RuntimeError("LLM retry loop exited unexpectedly without a response.")
 

@@ -366,47 +366,6 @@ class FilesystemManager:
         except Exception as exc:
             return format_error(ErrorType.EXECUTION, f"Error searching in directory: {exc}")
 
-    def tail_file(self, path: str, lines: int = 50, show_line_numbers: bool = True) -> str:
-        try:
-            target = self._resolve_path(path)
-            if not target.exists():
-                return format_error(ErrorType.NOT_FOUND, f"File '{path}' not found.")
-            if not target.is_file():
-                return format_error(ErrorType.VALIDATION, f"'{path}' is not a file.")
-
-            policy_limit = self.safety_policy.max_read_lines if self.safety_policy else DEFAULT_READ_LIMIT
-            lines = min(lines, policy_limit)
-            collected: list[bytes] = []
-            newlines_found = 0
-            with open(target, "rb") as file_obj:
-                file_obj.seek(0, 2)
-                remaining = file_obj.tell()
-                while newlines_found <= lines and remaining > 0:
-                    step = min(8192, remaining)
-                    remaining -= step
-                    file_obj.seek(remaining)
-                    chunk = file_obj.read(step)
-                    collected.append(chunk)
-                    newlines_found += chunk.count(b"\n")
-
-            raw = b"".join(reversed(collected))
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("utf-8", errors="replace")
-
-            all_lines = text.splitlines()
-            if all_lines and all_lines[-1] == "":
-                all_lines = all_lines[:-1]
-            selected = all_lines[-lines:] if len(all_lines) > lines else all_lines
-            if show_line_numbers:
-                result = "\n".join(f"tail-{index + 1:02}  {line}" for index, line in enumerate(selected))
-            else:
-                result = "\n".join(selected)
-            return f"Last {len(selected)} line(s) of '{path}':\n\n{result}"
-        except Exception as exc:
-            return format_error(ErrorType.EXECUTION, f"Error reading tail of file: {exc}")
-
     def find_files(self, path: str, name_pattern: str, max_results: int = 200, max_depth: Optional[int] = None) -> str:
         try:
             target = self._resolve_path(path)

@@ -331,7 +331,7 @@ START
 ```text
 .
 ├── main.py                # Точка входа GUI
-├── agent.py               # Сборка LLM, tools и LangGraph workflow
+├── agent.py               # Сборка графа LangGraph: routing, tool binding, checkpointing
 ├── prompt.txt             # Основной системный промпт
 ├── prompt_dev.txt         # Дополнительный dev/devops-промпт
 ├── mcp.json               # Конфигурация MCP-серверов
@@ -341,7 +341,8 @@ START
 ├── build.bat              # Сборка portable .exe
 ├── requirements.txt
 ├── core/                  # Ядро агента: config, state, policies, recovery, provider registry
-│   └── nodes/             # Узлы LangGraph: context, llm, agent, tools, approval, recovery
+│   ├── nodes/             # Узлы LangGraph: context, llm, agent, tools, approval, recovery
+│   └── providers/         # Provider-адаптеры (gemini, openai_reasoning, factory), вынесены из agent.py
 ├── tools/                 # Filesystem, shell, search, system, process, user input, MCP registry
 │   └── filesystem_impl/   # Низкоуровневые filesystem helpers
 ├── ui/                    # PySide6 GUI, runtime worker, streaming/status handling
@@ -358,7 +359,7 @@ START
 
 ## Тесты
 
-21 тестовый файл:
+22 тестовых файла:
 
 | Файл | Что покрывает |
 |---|---|
@@ -376,6 +377,7 @@ START
 | `test_runtime_session_coordination.py` | Session state coordination, load/save |
 | `test_tooling_refactor.py` | Tool registry, MCP loading, tool metadata |
 | `test_provider_registry.py` | Matching OpenAI-compatible провайдеров и reasoning kwargs |
+| `test_provider_adapters.py` | Provider adapters: Gemini thought-signature adapter, OpenAI reasoning-debug override, factory dispatch, back-compat re-exports |
 | `test_input_sanitizer.py` | Input sanitization, truncation, control chars |
 | `test_logging_config.py` | Log configuration, sensitive data filtering |
 | `test_intent_engine.py` | Intent parsing, routing |

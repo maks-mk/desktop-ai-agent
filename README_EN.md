@@ -333,7 +333,7 @@ A detailed module map is available in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT
 ```text
 .
 |-- main.py                # GUI entry point
-|-- agent.py               # LLM, tools, and LangGraph workflow assembly
+|-- agent.py               # LangGraph graph assembly: routing, tool binding, checkpointing
 |-- prompt.txt             # Main system prompt
 |-- prompt_dev.txt         # Additional dev/devops prompt
 |-- mcp.json               # MCP server configuration
@@ -343,7 +343,8 @@ A detailed module map is available in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT
 |-- build.bat              # Portable .exe build
 |-- requirements.txt
 |-- core/                  # Agent core: config, state, policies, recovery, provider registry
-|   `-- nodes/             # LangGraph nodes: context, llm, agent, tools, approval, recovery
+|   |-- nodes/             # LangGraph nodes: context, llm, agent, tools, approval, recovery
+|   `-- providers/         # Provider adapters (gemini, openai_reasoning, factory), extracted from agent.py
 |-- tools/                 # Filesystem, shell, search, system, process, user input, MCP registry
 |   `-- filesystem_impl/   # Low-level filesystem helpers
 |-- ui/                    # PySide6 GUI, runtime worker, streaming/status handling
@@ -360,7 +361,7 @@ A detailed module map is available in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT
 
 ## Tests
 
-21 test files:
+22 test files:
 
 | File | Coverage |
 |---|---|
@@ -378,6 +379,7 @@ A detailed module map is available in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT
 | `test_runtime_session_coordination.py` | Session state coordination, load/save |
 | `test_tooling_refactor.py` | Tool registry, MCP loading, tool metadata |
 | `test_provider_registry.py` | OpenAI-compatible provider matching and reasoning kwargs |
+| `test_provider_adapters.py` | Provider adapters: Gemini thought-signature adapter, OpenAI reasoning-debug override, factory dispatch, back-compat re-exports |
 | `test_input_sanitizer.py` | Input sanitization, truncation, control chars |
 | `test_logging_config.py` | Log configuration, sensitive data filtering |
 | `test_intent_engine.py` | Intent parsing, routing |

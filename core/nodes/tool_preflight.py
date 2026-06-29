@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
@@ -9,6 +10,11 @@ from core.tool_args import canonicalize_tool_args, inspect_tool_args_payload
 from core.tool_issues import build_tool_issue
 from core.policy_engine import classify_shell_command, shell_command_requires_approval, tool_requires_approval
 from core.self_correction_engine import normalize_tool_args, repair_fingerprint
+
+logger = logging.getLogger("agent")
+
+# Sentinel for "tool not found" in the required-fields cache.
+_REQUIRED_FIELDS_NOT_FOUND: tuple[str, ...] = ()
 
 
 class ToolPreflightMixin:
@@ -68,38 +74,53 @@ class ToolPreflightMixin:
         return None
 
     def _required_tool_fields(self, tool_name: str) -> List[str]:
+        cached = self._required_fields_cache.get(tool_name)
+        if cached is not None:
+            return list(cached)
+
         tool = self.tools_map.get(tool_name)
         if not tool:
+            self._required_fields_cache[tool_name] = _REQUIRED_FIELDS_NOT_FOUND
             return []
         try:
             schema = tool.get_input_schema()
         except Exception:
+            logger.debug("Failed to get input schema for tool '%s'.", tool_name, exc_info=True)
+            self._required_fields_cache[tool_name] = _REQUIRED_FIELDS_NOT_FOUND
             return []
 
         try:
             json_schema = schema.model_json_schema()
         except Exception:
+            logger.debug("Failed to serialize JSON schema for tool '%s'.", tool_name, exc_info=True)
             json_schema = {}
 
         object_schema = self._top_level_object_json_schema(json_schema)
         if isinstance(object_schema, dict):
             required_fields = object_schema.get("required")
             if isinstance(required_fields, list):
-                return [str(field_name) for field_name in required_fields if str(field_name).strip()]
+                result = tuple(str(field_name) for field_name in required_fields if str(field_name).strip())
+                self._required_fields_cache[tool_name] = result
+                return list(result)
+            self._required_fields_cache[tool_name] = _REQUIRED_FIELDS_NOT_FOUND
             return []
 
         if getattr(schema, "__pydantic_root_model__", False):
+            self._required_fields_cache[tool_name] = _REQUIRED_FIELDS_NOT_FOUND
             return []
 
         fields = getattr(schema, "model_fields", {}) or {}
-        required: List[str] = []
+        required_list: List[str] = []
         for field_name, field_info in fields.items():
             try:
                 if field_info.is_required():
-                    required.append(str(field_name))
+                    required_list.append(str(field_name))
             except Exception:
+                logger.debug("Failed to check field '%s' on tool '%s'.", field_name, tool_name, exc_info=True)
                 continue
-        return required
+        result = tuple(required_list)
+        self._required_fields_cache[tool_name] = result
+        return list(result)
 
     def _missing_required_tool_fields(self, tool_name: str, tool_args: Dict[str, Any]) -> List[str]:
         normalized_args = canonicalize_tool_args(tool_args)
