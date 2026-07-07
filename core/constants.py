@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 # Agent version (single source of truth)
-AGENT_VERSION = "v0.67.72.1b"
+AGENT_VERSION = "v0.67.73.10b"
 
 # Determine the project root directory
 if getattr(sys, 'frozen', False):
@@ -42,11 +42,6 @@ UNRESOLVED_TOOL_ERROR_PROMPT_TEMPLATE = (
     "or clearly explain the blocker to the user."
 )
 
-RECOVERY_CONTINUE_PROMPT_TEMPLATE = (
-    "Continue the current task: {current_task}. "
-    "Use tools or another verifiable step instead of stopping."
-)
-
 TOOL_ISSUE_NOT_FOUND_TEXT = "Unable to continue: the active tool issue could not be found."
 
 TOOL_ISSUE_APPROVAL_DENIED_TEXT = (
@@ -72,11 +67,6 @@ TOOL_ISSUE_STAGNATION_TEMPLATE = (
 LOOP_BUDGET_HANDOFF_TEMPLATE = (
     "Unable to continue recovery for task {task_hint}{tool_hint}: the internal step limit has been reached.\n"
     "In the current context, automatic strategies have been exhausted."
-)
-
-SUCCESSFUL_TOOL_STAGNATION_HANDOFF_TEMPLATE = (
-    "Paused the task for {task_hint}{tool_hint}: the same confirmed result repeated {repeat_count} times in a row.\n"
-    "Continuing now risks going in circles without making progress."
 )
 
 DEFAULT_INTERNAL_UI_NOTICE = "Paused at this step. You can continue with a new message."

@@ -600,13 +600,6 @@ class ToolRegistry:
     def register_cleanup_callback(self, callback: Callable[[], Any]) -> None:
         self._cleanup_callbacks.append(callback)
 
-    def get_runtime_status(self) -> Dict[str, Any]:
-        return {
-            "checkpoint": self.checkpoint_info,
-            "loaders": list(self.loader_status),
-            "mcp_servers": list(self.mcp_server_status),
-        }
-
     def get_runtime_status_lines(self) -> List[str]:
         lines: List[str] = []
         checkpoint = self.checkpoint_info or {}
@@ -654,10 +647,9 @@ class ToolRegistry:
             try:
                 close_method = getattr(client, "aclose", None) or getattr(client, "close", None)
                 if callable(close_method):
-                    if inspect.iscoroutinefunction(close_method):
-                        await close_method()
-                    else:
-                        close_method()
+                    result = close_method()
+                    if inspect.isawaitable(result):
+                        await result
                 elif hasattr(client, "__aexit__"):
                     try:
                         await client.__aexit__(None, None, None)

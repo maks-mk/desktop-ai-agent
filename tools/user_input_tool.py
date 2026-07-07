@@ -37,6 +37,12 @@ class RequestUserInputInput(BaseModel):
             "Leave empty if there is no clear best option."
         ),
     )
+    choice_type: str = Field(
+        default="clarification",
+        description=(
+            "Machine-readable reason for the choice prompt: clarification, plan_approval, or plan_revision."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -76,6 +82,7 @@ class RequestUserInputInput(BaseModel):
             option_map = {str(option).casefold(): str(option) for option in data["options"]}
             recommended = option_map.get(recommended.casefold(), recommended)
         data["recommended"] = recommended
+        data["choice_type"] = _normalize_choice_text(data.get("choice_type")) or "clarification"
         return data
 
     @model_validator(mode="after")
@@ -89,6 +96,9 @@ class RequestUserInputInput(BaseModel):
         if self.recommended and self.recommended not in self.options:
             raise ValueError("recommended must match one of the options exactly.")
 
+        if self.choice_type not in {"clarification", "plan_approval", "plan_revision"}:
+            raise ValueError("choice_type must be clarification, plan_approval, or plan_revision.")
+
         return self
 
 
@@ -97,6 +107,7 @@ def request_user_input(
     question: str,
     options: List[str],
     recommended: str = "",
+    choice_type: str = "clarification",
 ) -> str:
     """Pause the turn and ask the user to choose exactly one option.
 
@@ -115,6 +126,7 @@ def request_user_input(
     result = interrupt(
         {
             "kind": "user_choice",
+            "choice_type": str(choice_type or "clarification"),
             "question": question,
             "options": [str(option) for option in options],
             "recommended": str(recommended or ""),

@@ -16,7 +16,6 @@ SURFACE_BG = "#1E1D1B"          # Main background (nearly neutral, slightly warm
 SURFACE_CARD = "#282623"        # Card surface, slightly warmer than the main background
 SURFACE_ALT = "#38352F"         # Buttons and highlighted surfaces
 BORDER = "#38352F"
-SEPARATOR = "#282623"
 
 AMBER_WARNING = "#D97706"
 ERROR_RED = "#EF4444"
@@ -36,7 +35,6 @@ MONO_FONT_FAMILY = "Cascadia Mono"
 SOFT_RADIUS_XS = 2
 SOFT_RADIUS_SM = 4
 SOFT_RADIUS_MD = 6
-SOFT_RADIUS_LG = 15
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     value = value.lstrip("#")
@@ -66,15 +64,11 @@ def _build_theme_palette() -> dict[str, str]:
     tool_toggle_text = blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.26)
     return {
         "transcript_panel_bg": transcript_panel_bg,
-        "transcript_panel_border": blend_hex(BORDER, "#FFFFFF", 0.08),
-        "transcript_panel_hover": blend_hex(SURFACE_CARD, SURFACE_ALT, 0.32),
         "tool_panel_bg": tool_panel_bg,
-        "tool_panel_border": blend_hex(tool_panel_bg, "#FFFFFF", 0.04),
         "tool_panel_hover": blend_hex(tool_panel_bg, "#FFFFFF", 0.05),
         "tool_code_bg": blend_hex(SURFACE_CARD, "#FFFFFF", 0.07),
         "tool_toggle_text": tool_toggle_text,
         "tool_toggle_hover_text": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.52),
-        "tool_call_idle": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.18),
         "tool_call_hover": blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.42),
     }
 
@@ -83,15 +77,11 @@ def _build_theme_palette() -> dict[str, str]:
 def build_stylesheet() -> str:
     palette = _build_theme_palette()
     transcript_panel_bg = palette["transcript_panel_bg"]
-    transcript_panel_border = palette["transcript_panel_border"]
-    transcript_panel_hover = palette["transcript_panel_hover"]
     tool_panel_bg = palette["tool_panel_bg"]
-    tool_panel_border = palette["tool_panel_border"]
     tool_panel_hover = palette["tool_panel_hover"]
     tool_code_bg = palette["tool_code_bg"]
     tool_toggle_text = palette["tool_toggle_text"]
     tool_toggle_hover_text = palette["tool_toggle_hover_text"]
-    tool_call_idle = palette["tool_call_idle"]
     tool_call_hover = palette["tool_call_hover"]
     model_dialog_bg = blend_hex(SURFACE_BG, "#FFFFFF", 0.03)
     model_dialog_card = blend_hex(SURFACE_CARD, "#FFFFFF", 0.03)
@@ -790,7 +780,10 @@ def build_stylesheet() -> str:
         background: transparent;
     }}
 
-    QFrame#UserChoiceCard {{
+    QFrame#UserChoiceCard,
+    QFrame#PlanCard,
+    QFrame#InlinePlanWidget,
+    QFrame#PlanProgressPanel {{
         background: {blend_hex(SURFACE_CARD, "#FFFFFF", 0.04)};
         border: none;
         border-radius: {SOFT_RADIUS_MD}px;
@@ -826,19 +819,6 @@ def build_stylesheet() -> str:
         font-weight: 600;
         font-size: 11pt;
         padding-left: 2px;
-    }}
-
-    QLineEdit#SidebarSearchField {{
-        background: {blend_hex(SURFACE_CARD, "#FFFFFF", 0.03)};
-        border: 1px solid transparent;
-        border-radius: {SOFT_RADIUS_MD}px;
-        padding: 7px 10px;
-        color: {TEXT_PRIMARY};
-        selection-background-color: {blend_hex(ACCENT_BLUE_SOFT, ACCENT_BLUE, 0.25)};
-    }}
-
-    QLineEdit#SidebarSearchField:focus {{
-        border: 1px solid {blend_hex(ACCENT_BLUE, "#FFFFFF", 0.08)};
     }}
 
     QLabel#SidebarEmptyState {{
@@ -895,21 +875,316 @@ def build_stylesheet() -> str:
     }}
 
     QLabel#UserChoiceCardTitle {{
-        color: {TEXT_PRIMARY};
-        font-size: 10.2pt;
-        font-weight: 700;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.30)};
+        font-size: 8.8pt;
+        font-weight: 650;
         background: transparent;
     }}
 
     QLabel#UserChoiceCardQuestion {{
-        color: {TEXT_PRIMARY};
-        font-size: 10pt;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.44)};
+        font-size: 9pt;
         background: transparent;
     }}
 
     QLabel#UserChoiceCardHint {{
         color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.34)};
         font-size: 8.8pt;
+        background: transparent;
+    }}
+
+    QScrollArea#PlanReviewScroll,
+    QScrollArea#PlanProgressScroll {{
+        background: transparent;
+        border: none;
+    }}
+
+    QScrollArea#PlanReviewScroll > QWidget > QWidget,
+    QScrollArea#PlanProgressScroll > QWidget > QWidget {{
+        background: transparent;
+    }}
+
+    QTextBrowser#PlanCardMarkdown {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 2px 0px 0px 0px;
+        color: {TEXT_PRIMARY};
+        font-size: 10pt;
+    }}
+
+    QFrame#InlinePlanWidget QTextBrowser#PlanCardMarkdown,
+    QFrame#PlanProgressPanel QTextBrowser#PlanCardMarkdown,
+    QFrame#PlanProgressPanel QScrollArea#PlanProgressScroll,
+    QFrame#PlanProgressPanel QScrollArea#PlanProgressScroll > QWidget,
+    QFrame#PlanProgressPanel QScrollArea#PlanProgressScroll > QWidget > QWidget,
+    QFrame#PlanProgressPanel QFrame#PlanCard {{
+        background-color: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.70)};
+        border: none;
+    }}
+
+    QFrame#InlinePlanWidget QTextBrowser#PlanCardMarkdown {{
+        padding-right: 6px;
+    }}
+
+    QFrame#InlinePlanWidget,
+    QFrame#PlanProgressPanel {{
+        background-color: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.62)};
+        border: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.64)};
+        border-radius: {SOFT_RADIUS_MD + 4}px;
+    }}
+
+    QFrame#InlinePlanWidget QWidget,
+    QFrame#PlanProgressPanel QWidget {{
+        background-color: transparent;
+        border: none;
+    }}
+
+    QFrame#InlinePlanHeader,
+    QFrame#PlanProgressHeader {{
+        background-color: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.78)};
+        border-bottom: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.60)};
+        border-top-left-radius: {SOFT_RADIUS_MD + 4}px;
+        border-top-right-radius: {SOFT_RADIUS_MD + 4}px;
+        border-bottom-left-radius: 0px;
+        border-bottom-right-radius: 0px;
+        padding: 8px 10px;
+    }}
+
+    QFrame#InlinePlanAccent {{
+        background: {blend_hex(ACCENT_BLUE, "#8B5CF6", 0.28)};
+        border: none;
+        border-radius: 2px;
+    }}
+
+    QLabel#InlinePlanIcon {{
+        background: transparent;
+        padding: 0px;
+    }}
+
+    QFrame#PlanCard {{
+        background: transparent;
+        border: none;
+    }}
+
+    QFrame#PlanSummaryCard {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.82)};
+        border: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.66)};
+        border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+
+    QLabel#PlanProgressTitle {{
+        color: {TEXT_PRIMARY};
+        font-size: 11.4pt;
+        font-weight: 750;
+        background: transparent;
+    }}
+
+    QLabel#PlanProgressHint,
+    QLabel#PlanProgressEmpty {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.32)};
+        font-size: 9pt;
+        background: transparent;
+    }}
+
+    QLabel#PlanProgressEmpty {{
+        padding: 24px 12px;
+    }}
+
+    QPushButton#PlanProgressCancelButton {{
+        background: transparent;
+        border-top: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.62)};
+        border-radius: 0px;
+        padding: 8px 12px;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
+        font-size: 9pt;
+        font-weight: 500;
+    }}
+
+    QPushButton#PlanProgressCancelButton:hover {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.76)};
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.34)};
+    }}
+
+    QPushButton#PlanProgressCancelButton:pressed {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.86)};
+        color: {TEXT_PRIMARY};
+    }}
+
+    QToolButton#InlinePlanToggle {{
+        color: {TEXT_PRIMARY};
+        background: transparent;
+        border: none;
+        padding: 2px 0px;
+        font-size: 11.2pt;
+        font-weight: 750;
+        text-align: left;
+    }}
+
+    QToolButton#InlinePlanToggle:hover {{
+        color: {blend_hex(TEXT_PRIMARY, "#FFFFFF", 0.08)};
+    }}
+
+    QLabel#PlanCardTitle {{
+        color: {TEXT_PRIMARY};
+        font-size: 10.7pt;
+        font-weight: 750;
+        background: transparent;
+    }}
+
+    QLabel#PlanCardStatus {{
+        color: {blend_hex(ACCENT_BLUE, TEXT_PRIMARY, 0.16)};
+        background: {blend_hex(ACCENT_BLUE_SOFT, SURFACE_ALT, 0.58)};
+        border: none;
+        border-radius: {SOFT_RADIUS_SM}px;
+        padding: 3px 7px;
+        font-size: 8.4pt;
+        font-weight: 700;
+    }}
+
+    QFrame#PlanProgressPanel QLabel#PlanCardStatus {{
+        color: {blend_hex(ACCENT_BLUE, TEXT_PRIMARY, 0.18)};
+        background: {blend_hex(ACCENT_BLUE_SOFT, SURFACE_ALT, 0.66)};
+        border: 1px solid {blend_hex(ACCENT_BLUE_SOFT, SURFACE_ALT, 0.42)};
+        border-radius: {SOFT_RADIUS_SM}px;
+        padding: 3px 8px;
+    }}
+
+    QLabel#PlanCardSectionTitle {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.46)};
+        font-size: 8.8pt;
+        font-weight: 700;
+        background: transparent;
+        padding-top: 0px;
+    }}
+
+    QLabel#PlanCardSummary {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.58)};
+        font-size: 9.2pt;
+        line-height: 135%;
+        background: transparent;
+    }}
+
+    QWidget#PlanStepsList,
+    QWidget#PlanMetaList {{
+        background: transparent;
+        border: none;
+    }}
+
+    QFrame#PlanStepRow {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.76)};
+        border: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.70)};
+        border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+    QFrame#PlanStepRow[stepStatus="active"] {{
+        background: {blend_hex(ACCENT_BLUE_SOFT, SURFACE_CARD, 0.38)};
+        border: 1px solid {blend_hex(ACCENT_BLUE, SURFACE_CARD, 0.54)};
+    }}
+
+    QFrame#PlanStepRow[stepStatus="completed"],
+    QFrame#PlanStepRow[stepStatus="skipped"] {{
+        background: {blend_hex(SURFACE_CARD, SUCCESS_GREEN, 0.10)};
+        border: 1px solid {blend_hex(BORDER, SUCCESS_GREEN, 0.34)};
+    }}
+
+    QFrame#PlanStepRow[stepStatus="pending"] {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.54)};
+        border: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.76)};
+    }}
+
+    QLabel#PlanStepIcon {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
+        font-size: 10pt;
+        font-weight: 750;
+        background: transparent;
+    }}
+
+    QLabel#PlanStepIcon[stepStatus="active"] {{
+        color: {blend_hex(ACCENT_BLUE, TEXT_PRIMARY, 0.14)};
+    }}
+
+    QLabel#PlanStepIcon[stepStatus="completed"],
+    QLabel#PlanStepIcon[stepStatus="skipped"] {{
+        color: {SUCCESS_GREEN};
+    }}
+
+    QLabel#PlanStepIcon[stepStatus="failed"],
+    QLabel#PlanStepIcon[stepStatus="blocked"] {{
+        color: {ERROR_RED};
+    }}
+
+    QLabel#PlanStepTitle {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.42)};
+        font-size: 9.1pt;
+        font-weight: 650;
+        background: transparent;
+    }}
+
+    QLabel#PlanStepTitle[stepStatus="active"] {{
+        color: {TEXT_PRIMARY};
+        font-weight: 750;
+    }}
+
+    QLabel#PlanStepTitle[stepStatus="completed"],
+    QLabel#PlanStepTitle[stepStatus="skipped"] {{
+        color: {blend_hex(TEXT_SECONDARY, TEXT_PRIMARY, 0.68)};
+    }}
+
+    QLabel#PlanStepTitle[stepStatus="pending"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.16)};
+    }}
+
+    QLabel#PlanStepTitle[stepStatus="failed"],
+    QLabel#PlanStepTitle[stepStatus="blocked"] {{
+        color: {blend_hex(ERROR_RED, TEXT_PRIMARY, 0.14)};
+    }}
+
+    QLabel#PlanStepDescription {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.32)};
+        font-size: 8.5pt;
+        line-height: 125%;
+        background: transparent;
+    }}
+
+    QLabel#PlanStepDescription[stepStatus="active"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.52)};
+    }}
+
+    QLabel#PlanStepDescription[stepStatus="completed"],
+    QLabel#PlanStepDescription[stepStatus="skipped"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.46)};
+    }}
+
+    QLabel#PlanStepDescription[stepStatus="failed"],
+    QLabel#PlanStepDescription[stepStatus="blocked"] {{
+        color: {blend_hex(ERROR_RED, TEXT_PRIMARY, 0.12)};
+    }}
+
+    QLabel#PlanCardMeta {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
+        font-size: 8.7pt;
+        background: transparent;
+        padding-top: 2px;
+    }}
+
+    QFrame#PlanMetaCard {{
+        background: {blend_hex(SURFACE_CARD, SURFACE_ALT, 0.62)};
+        border: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.70)};
+        border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+    QLabel#PlanMetaTitle {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.38)};
+        font-size: 8.3pt;
+        font-weight: 750;
+        background: transparent;
+    }}
+
+    QLabel#PlanMetaBody {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.28)};
+        font-size: 8.3pt;
         background: transparent;
     }}
 
@@ -1200,9 +1475,16 @@ def build_stylesheet() -> str:
         padding: 0px;
     }}
 
+    QFrame#ToolExpandablePanel[variant="diff"] {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 2px 0px 0px 0px;
+    }}
+
     QFrame#CliExecPanel {{
         background: {tool_panel_bg};
-        border: none;
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.04)};
         border-radius: {SOFT_RADIUS_MD}px;
     }}
 
@@ -1220,6 +1502,30 @@ def build_stylesheet() -> str:
         font-size: 8.9pt;
         padding-left: 13px;
         padding-bottom: 1px;
+    }}
+
+    QLabel#ToolActionLabel {{
+        background: transparent;
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.18)};
+        font-size: 10.15pt;
+        font-weight: 500;
+        padding: 1px 0px;
+    }}
+
+    QLabel#ToolActionLabel[toolRole="edit"] {{
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.08)};
+    }}
+
+    QLabel#ToolActionLabel[phase="active"] {{
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.12)};
+    }}
+
+    QLabel#ToolActionLabel[phase="success"] {{
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.22)};
+    }}
+
+    QLabel#ToolActionLabel[phase="error"] {{
+        color: {blend_hex(ERROR_RED, TEXT_PRIMARY, 0.18)};
     }}
 
     QLabel#ToolPhaseBadge {{
@@ -1257,7 +1563,7 @@ def build_stylesheet() -> str:
     }}
 
     QPlainTextEdit#CliExecOutput {{
-        background: {tool_code_bg};
+        background: {tool_panel_bg};
         color: {CODE_TEXT};
         border: none;
         border-radius: {SOFT_RADIUS_SM}px;
@@ -1267,16 +1573,22 @@ def build_stylesheet() -> str:
     }}
 
     QFrame#DiffPanel {{
-        background: {tool_code_bg};
-        border: none;
+        background: {tool_panel_bg};
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.05)};
         border-radius: {SOFT_RADIUS_SM}px;
+    }}
+
+    QWidget#DiffHeaderRow {{
+        background: {tool_panel_bg};
+        border-top-left-radius: {SOFT_RADIUS_SM}px;
+        border-top-right-radius: {SOFT_RADIUS_SM}px;
     }}
 
     QLabel#DiffHeaderPath {{
         background: transparent;
-        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.08)};
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.14)};
         font-family: "{MONO_FONT_FAMILY}";
-        font-size: 9.2pt;
+        font-size: 9.05pt;
         font-weight: 500;
     }}
 
@@ -1297,11 +1609,11 @@ def build_stylesheet() -> str:
     }}
 
     QPlainTextEdit#DiffCodeView {{
-        background: transparent;
+        background: {tool_panel_bg};
         color: {CODE_TEXT};
         border: none;
         border-radius: {SOFT_RADIUS_SM}px;
-        padding: 6px 10px 8px 10px;
+        padding: 6px 10px 9px 10px;
         font-family: "{MONO_FONT_FAMILY}";
         font-size: 9pt;
     }}
@@ -1312,6 +1624,11 @@ def build_stylesheet() -> str:
     }}
 
     QWidget#ToolExpandableContent[variant="thoughts"] {{
+        background: transparent;
+        border: none;
+    }}
+
+    QWidget#ToolExpandableContent[variant="diff"] {{
         background: transparent;
         border: none;
     }}
@@ -1356,6 +1673,24 @@ def build_stylesheet() -> str:
         color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.24)};
     }}
 
+    QPushButton#ToolExpandableToggle[variant="diff"] {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 3px 0px 4px 0px;
+        min-height: 18px;
+        font-size: 9.2pt;
+        font-weight: 500;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.32)};
+        text-align: left;
+    }}
+
+    QPushButton#ToolExpandableToggle[variant="diff"]:hover,
+    QPushButton#ToolExpandableToggle[variant="diff"]:checked {{
+        background: transparent;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.48)};
+    }}
+
     QToolButton#CodeCopyButton {{
         background: transparent;
         border: none;
@@ -1398,29 +1733,48 @@ def build_stylesheet() -> str:
 
     QPushButton#UserChoiceOptionButton,
     QPushButton#UserChoiceCustomButton {{
-        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.03)};
-        border: none;
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.08)};
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.10)};
         border-radius: {SOFT_RADIUS_SM}px;
-        padding: 10px 12px;
+        padding: 7px 10px;
         color: {TEXT_PRIMARY};
-        text-align: left;
-        font-size: 9.6pt;
-        font-weight: 500;
+        text-align: center;
+        font-size: 9.1pt;
+        font-weight: 650;
     }}
 
     QPushButton#UserChoiceOptionButton:hover,
     QPushButton#UserChoiceCustomButton:hover {{
-        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.09)};
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.15)};
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.20)};
     }}
 
     QPushButton#UserChoiceOptionButton:pressed,
     QPushButton#UserChoiceCustomButton:pressed {{
-        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.14)};
+        background: {blend_hex(SURFACE_ALT, "#FFFFFF", 0.19)};
     }}
 
     QPushButton#UserChoiceOptionButton[recommended="true"] {{
-        background: {blend_hex(SURFACE_ALT, ACCENT_BLUE, 0.18)};
+        background: {blend_hex(ACCENT_BLUE, SURFACE_ALT, 0.28)};
         color: {TEXT_PRIMARY};
+        border: 1px solid {blend_hex(ACCENT_BLUE, "#FFFFFF", 0.10)};
+    }}
+
+    QWidget#InlinePlanActions {{
+        background: transparent;
+        border-top: 1px solid {blend_hex(BORDER, SURFACE_CARD, 0.55)};
+        padding-top: 6px;
+    }}
+
+    QFrame#InlinePlanWidget QPushButton#UserChoiceOptionButton[recommended="true"] {{
+        background: {blend_hex(ACCENT_BLUE, "#FFFFFF", 0.04)};
+        color: #FFFFFF;
+        border: 1px solid {blend_hex(ACCENT_BLUE, "#FFFFFF", 0.18)};
+    }}
+
+    QFrame#InlinePlanWidget QPushButton#UserChoiceOptionButton[planAction="cancel"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.28)};
+        background: {blend_hex(SURFACE_ALT, SURFACE_CARD, 0.28)};
     }}
 
     QPushButton#UserChoiceOptionButton:disabled,
@@ -1577,6 +1931,15 @@ def build_stylesheet() -> str:
         border: 1px solid {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.3)};
     }}
 
+    QCheckBox#ComposerPlanModeButton {{
+        background: transparent;
+        border: none;
+        padding: 0px;
+    }}
+
+
+
+
     QToolButton#ComposerGhostButton {{
         background: transparent;
         border: 1px solid transparent;
@@ -1729,12 +2092,16 @@ def build_stylesheet() -> str:
     QPushButton#ToolCallButton {{
         background: transparent;
         border: none;
-        border-radius: {SOFT_RADIUS_SM}px;
+        border-radius: {SOFT_RADIUS_XS}px;
         padding: 0px;
-        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.06)};
-        font-size: 10.7pt;
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.20)};
+        font-size: 10.35pt;
         font-weight: 500;
         text-align: left;
+    }}
+
+    QPushButton#ToolCallButton[toolRole="edit"] {{
+        color: {blend_hex(TEXT_PRIMARY, TEXT_MUTED, 0.10)};
     }}
 
     QPushButton#ToolCallButton:hover {{
@@ -1754,10 +2121,22 @@ def build_stylesheet() -> str:
         border: none;
         border-radius: {SOFT_RADIUS_SM}px;
         padding: 2px 0px;
-        color: {tool_toggle_text};
-        font-size: 10.2pt;
-        font-weight: 600;
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.28)};
+        font-size: 10pt;
+        font-weight: 500;
         text-align: left;
+    }}
+
+    QPushButton#ToolGroupHeaderButton[state="active"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.46)};
+    }}
+
+    QPushButton#ToolGroupHeaderButton[state="complete"] {{
+        color: {blend_hex(TEXT_MUTED, TEXT_PRIMARY, 0.38)};
+    }}
+
+    QPushButton#ToolGroupHeaderButton[state="error"] {{
+        color: {blend_hex(ERROR_RED, TEXT_PRIMARY, 0.22)};
     }}
 
     QPushButton#ToolGroupHeaderButton:hover {{
@@ -1776,7 +2155,7 @@ def build_stylesheet() -> str:
     QPlainTextEdit#InlineCodeView {{
         background: {tool_code_bg};
         color: {CODE_TEXT};
-        border: none;
+        border: 1px solid {blend_hex(BORDER, "#FFFFFF", 0.04)};
         border-radius: {SOFT_RADIUS_SM}px;
         font-family: "{MONO_FONT_FAMILY}";
         font-size: 9pt;
@@ -1977,4 +2356,3 @@ def build_stylesheet() -> str:
         padding-left: 2px;
     }}
     """
-

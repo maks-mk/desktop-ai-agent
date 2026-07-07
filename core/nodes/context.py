@@ -44,12 +44,6 @@ class ContextMixin:
     def _message_role_for_provider(self, message: BaseMessage) -> str:
         return self.context_builder._message_role_for_provider(message)
 
-    def _message_is_provider_system(self, message: BaseMessage) -> bool:
-        return self.context_builder.message_is_provider_system(message)
-
-    def _is_provider_safe_tool_call_id(self, tool_call_id: str) -> bool:
-        return bool(self.PROVIDER_SAFE_TOOL_CALL_ID_RE.fullmatch(str(tool_call_id or "").strip()))
-
     def _normalize_tool_call_id_for_provider(self, tool_call_id: str, *, used_ids: set[str]) -> str:
         return self.context_builder._normalize_tool_call_id_for_provider(tool_call_id, used_ids=used_ids)
 
@@ -59,9 +53,6 @@ class ContextMixin:
         state: AgentState | None = None,
     ) -> List[BaseMessage]:
         return self.context_builder.sanitize_messages(messages, state=state)
-
-    def _get_last_model_visible_message(self, context: List[BaseMessage]) -> BaseMessage | None:
-        return self.context_builder.get_last_model_visible_message(context)
 
     def _assert_provider_safe_agent_context(
         self,

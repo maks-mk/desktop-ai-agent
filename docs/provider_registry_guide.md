@@ -152,6 +152,8 @@ Registry матчится по hostname из `OPENAI_BASE_URL`.
 | OpenAI SDK `extra_body` | `extra_body.reasoning.effort` | OpenRouter |
 | Top-level Chat Completions field | `reasoning_effort` | Ollama Cloud, Fireworks, NVIDIA NIM, Mistral |
 
+> **NVIDIA NIM** дополнительно поддерживает `max` как максимальный уровень reasoning effort.
+
 Не угадывай поле по названию модели. Один и тот же model id через разные gateways может требовать разные параметры.
 
 ## Model Match
@@ -292,3 +294,17 @@ Registry матчится по hostname из `OPENAI_BASE_URL`.
 - Добавлять `localhost` в registry. Локальные OpenAI-compatible серверы слишком разные; лучше не слать им provider-specific поля по умолчанию.
 - Делать `suffix` слишком широким, например `ai` или `com`.
 - Добавлять hardcoded model gate в Python-код. Provider-level поведение должно жить в `provider_registry.json`; для строгих API используй `model_match`.
+
+## NVIDIA NIM: особенности reasoning
+
+NVIDIA NIM hosted API (`integrate.api.nvidia.com`) имеет ряд особенностей:
+
+1. **Top-level `reasoning_effort`** — принимается API, но не все модели возвращают `reasoning_content` в streaming-чанках. Это известное ограничение (NVIDIA forum issue #346808).
+
+2. **Vocabulary**: `low`, `medium`, `high`, `max`. Значение `max` — самое глубокое reasoning.
+
+3. **`chat_template_kwargs`** — некоторые модели (DeepSeek V4, GLM-5, Qwen3) требуют `chat_template_kwargs` для включения thinking mode, но NVIDIA NIM **hosted API не поддерживает** этот параметр напрямую. Он работает только на self-hosted NIM через vLLM.
+
+4. **Reasoning в streaming** — модель может возвращать reasoning через нестандартные top-level поля в delta: `delta.reasoning`, `delta.reasoning_content`, `delta.thinking`. Наш `extract_openai_reasoning_delta` уже проверяет эти поля.
+
+5. **`reasoning_detected=false`** — если модель не возвращает reasoning content в потоке, это не значит, что `reasoning_effort` не был передан. Параметр влияет на поведение модели, но reasoning tokens могут не возвращаться клиенту.

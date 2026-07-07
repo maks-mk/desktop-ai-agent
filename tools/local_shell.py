@@ -103,6 +103,16 @@ _DESTRUCTIVE_COMMAND_PATTERNS = (
     re.compile(r"\bdel\b"),
     re.compile(r"\brmdir\b"),
 )
+# Commands that use a non-zero exit code as part of their normal protocol
+# (e.g. grep/rg return 1 when no matches found, vulture returns 1 when dead
+# code is found, pytest returns 1 on test failures).  For these, a non-zero
+# exit code does NOT indicate an execution error — the output itself is the
+# result the agent needs.
+_EXIT_CODE_NEUTRAL_COMMAND_RE = re.compile(
+    r"(?:^|[;&|()\s])(?:vulture|grep|rg|findstr|select-string|diff|pytest)(?=$|[;&|()\s])",
+    re.IGNORECASE,
+)
+
 _LONG_RUNNING_SERVICE_PATTERNS = (
     re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+-m\s+http\.server\b"),
     re.compile(r"\bhttp-server\b"),
@@ -450,6 +460,18 @@ async def cli_exec(command: str) -> str:
             )
         
         if process.returncode != 0:
+            # Some commands use a non-zero exit code as part of their normal
+            # protocol (grep/rg → 1 = no matches, vulture → 1 = dead code found,
+            # pytest → 1 = test failures, diff → 1 = files differ).  For these,
+            # the output is the result — do NOT mark it as an error.
+            if _EXIT_CODE_NEUTRAL_COMMAND_RE.search(normalized_command):
+                neutral_parts = [f"Exit Code: {process.returncode}"]
+                if output:
+                    neutral_parts.append(output)
+                result = "\n".join(neutral_parts)
+                limit = _SAFETY_POLICY.max_tool_output if _SAFETY_POLICY else 5000
+                return truncate_output(result, limit, source="shell")
+
             error_msg = f"Command failed with Exit Code {process.returncode}."
             cmd_hint = _get_windows_command_hint(command, stderr)
             if os.name == "nt" and "<< was unexpected at this time." in stderr:

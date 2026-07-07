@@ -825,6 +825,118 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertEqual(result["recovery_state"]["active_strategy"]["strategy"], "llm_replan")
         self.assertEqual(result["recovery_state"]["attempts_by_strategy"]["fp-protocol::llm_replan"], 3)
 
+    def test_sanitize_strips_openai_reasoning_content_blocks_for_gemini(self):
+        """OpenAI Responses API reasoning blocks (type=reasoning, summary=[...])
+        must be stripped so they don't cause KeyError in langchain-google-genai."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="gemini"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Thinking..."}], "id": "rs_001"},
+                {"type": "text", "text": "Ответ модели"},
+            ],
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([HumanMessage(content="Вопрос"), ai_msg])
+
+        self.assertEqual(len(sanitized), 2)
+        self.assertIsInstance(sanitized[1], AIMessage)
+        # reasoning block removed, text block preserved
+        self.assertEqual(len(sanitized[1].content), 1)
+        self.assertEqual(sanitized[1].content[0]["type"], "text")
+        self.assertEqual(sanitized[1].content[0]["text"], "Ответ модели")
+
+    def test_sanitize_strips_openai_reasoning_from_additional_kwargs_for_gemini(self):
+        """When output_version='v0', langchain-openai moves reasoning into
+        additional_kwargs['reasoning'] as a dict with 'summary'. This must be
+        stripped for non-OpenAI providers."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="gemini"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[{"type": "text", "text": "Ответ"}],
+            additional_kwargs={
+                "reasoning": {"summary": [{"type": "summary_text", "text": "Hidden thought"}]},
+            },
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([ai_msg])
+
+        self.assertEqual(len(sanitized), 1)
+        self.assertNotIn("reasoning", sanitized[0].additional_kwargs)
+
+    def test_sanitize_preserves_gemini_native_reasoning_blocks(self):
+        """Gemini's own reasoning blocks have a 'reasoning' string key and must
+        NOT be stripped — they are needed for multi-turn tool-calling."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="gemini"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "reasoning", "reasoning": "My thought process", "extras": {"signature": "abc123"}},
+                {"type": "text", "text": "Ответ"},
+            ],
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([ai_msg])
+
+        self.assertEqual(len(sanitized), 1)
+        # Both blocks preserved — Gemini reasoning has 'reasoning' key
+        self.assertEqual(len(sanitized[0].content), 2)
+        self.assertEqual(sanitized[0].content[0]["type"], "reasoning")
+        self.assertIn("reasoning", sanitized[0].content[0])
+
+    def test_sanitize_strips_reasoning_blocks_for_openai_too(self):
+        """Reasoning is ephemeral — strip from history even for OpenAI to keep
+        cross-provider replay clean and avoid stale reasoning accumulation."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="openai"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Thinking..."}]},
+                {"type": "text", "text": "Ответ"},
+            ],
+            additional_kwargs={"reasoning": {"summary": [{"text": "thought"}]}},
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([ai_msg])
+
+        self.assertEqual(len(sanitized), 1)
+        # OpenAI provider stringifies content lists — reasoning block stripped,
+        # text block becomes a plain string.
+        self.assertEqual(sanitized[0].content, "Ответ")
+        self.assertNotIn("reasoning", sanitized[0].additional_kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

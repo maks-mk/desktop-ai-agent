@@ -209,6 +209,17 @@ class BaseMixin:
                 for tool in active_tools
                 if self._normalize_tool_name(tool.name) != "request_user_input"
             ]
+
+        # In plan mode, restrict to read-only tools, request_user_input, and
+        # cli_exec for inspect-only commands such as rg (validated per call).
+        turn_mode = str((state or {}).get("turn_mode", "") or "").strip().lower()
+        if turn_mode == "plan":
+            active_tools = [
+                tool
+                for tool in active_tools
+                if self._tool_name_available_in_plan_mode(tool.name)
+            ]
+
         return active_tools, [tool.name for tool in active_tools]
 
     def _current_turn_has_completed_user_choice(self, messages: List[BaseMessage]) -> bool:

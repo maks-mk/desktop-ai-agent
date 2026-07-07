@@ -3,24 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-import qtawesome as qta
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListView,
     QMenu,
     QStyle,
     QStyleOptionViewItem,
     QStyledItemDelegate,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ui.theme import SURFACE_ALT, TEXT_MUTED, TEXT_PRIMARY
+from .foundation import _fa_icon
 
 
 def _format_sidebar_time(value: str) -> str:
@@ -34,21 +32,21 @@ def _format_sidebar_time(value: str) -> str:
     now = datetime.now(local_dt.tzinfo or timezone.utc)
     delta = now - local_dt
     if delta.total_seconds() < 0:
-        return "now"
+        return "сейчас"
     minutes = int(delta.total_seconds() // 60)
     if minutes < 1:
-        return "now"
+        return "сейчас"
     if minutes < 60:
-        return f"{minutes}m"
+        return f"{minutes}м"
     hours = minutes // 60
     if hours < 24:
-        return f"{hours}h"
+        return f"{hours}ч"
     days = hours // 24
     if days < 7:
-        return f"{days}d"
+        return f"{days}д"
     weeks = days // 7
     if weeks < 5:
-        return f"{weeks}w"
+        return f"{weeks}н"
     return local_dt.strftime("%d %b")
 
 
@@ -90,12 +88,15 @@ class SessionListModel(QAbstractListModel):
     ProjectPathRole = Qt.UserRole + 5
     ProjectTitleRole = Qt.UserRole + 6
     PreviewRole = Qt.UserRole + 7
+    ActiveProjectRole = Qt.UserRole + 8
 
     def __init__(self) -> None:
         super().__init__()
         self._items: list[dict[str, str]] = []
         self._source_sessions: list[dict[str, str]] = []
-        self._filter_text = ""
+        self._expanded_projects: set[str] = set()
+        self._project_visible_limit = 5
+        self._active_project_path = ""
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # type: ignore[override]
         if parent.isValid():
@@ -108,6 +109,8 @@ class SessionListModel(QAbstractListModel):
         kind = str(self.data(index, self.KindRole) or "session")
         if kind == "group":
             return Qt.ItemIsEnabled
+        if kind == "more":
+            return Qt.ItemIsEnabled | Qt.ItemIsSelectable
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:  # type: ignore[override]
@@ -130,39 +133,37 @@ class SessionListModel(QAbstractListModel):
             return item.get("project_title", "")
         if role == self.PreviewRole:
             return item.get("preview", "")
+        if role == self.ActiveProjectRole:
+            return bool(item.get("active_project", False))
         return None
 
-    def set_sessions(self, sessions: list[dict[str, str]]) -> None:
+    def set_sessions(self, sessions: list[dict[str, str]], active_session_id: str = "") -> None:
         self._source_sessions = [dict(row) for row in sessions]
+        self._active_project_path = ""
+        if active_session_id:
+            for row in self._source_sessions:
+                if str(row.get("session_id", "") or "") == active_session_id:
+                    self._active_project_path = str(row.get("project_path", "") or "").strip()
+                    break
         self._rebuild_items()
 
-    def set_filter_text(self, value: str) -> None:
-        text = str(value or "").strip().lower()
-        if text == self._filter_text:
-            return
-        self._filter_text = text
+    def toggle_project_expansion(self, project_path: str) -> None:
+        normalized = str(project_path or "")
+        if normalized in self._expanded_projects:
+            self._expanded_projects.remove(normalized)
+        else:
+            self._expanded_projects.add(normalized)
         self._rebuild_items()
 
     def _rebuild_items(self) -> None:
-        filter_text = self._filter_text
-        filtered_sessions: list[dict[str, str]] = []
+        sessions: list[dict[str, str]] = []
         for raw in self._source_sessions:
             row = dict(raw)
             row["preview"] = _session_preview(row)
-            if filter_text:
-                haystack = " ".join(
-                    [
-                        str(row.get("title", "") or ""),
-                        str(row.get("project_path", "") or ""),
-                        str(row.get("preview", "") or ""),
-                    ]
-                ).lower()
-                if filter_text not in haystack:
-                    continue
-            filtered_sessions.append(row)
+            sessions.append(row)
 
         grouped: dict[str, list[dict[str, str]]] = {}
-        for row in filtered_sessions:
+        for row in sessions:
             project_key = str(row.get("project_path", "")).strip()
             grouped.setdefault(project_key, []).append(row)
 
@@ -186,14 +187,42 @@ class SessionListModel(QAbstractListModel):
                     "session_id": "",
                     "updated_at": "",
                     "preview": "",
+                    "active_project": project_path == self._active_project_path,
                 }
             )
             sorted_rows = sorted(rows, key=lambda item: _sidebar_dt(item.get("updated_at", "")), reverse=True)
-            for row in sorted_rows:
+            is_expanded = project_path in self._expanded_projects
+            visible_rows = sorted_rows if is_expanded else sorted_rows[: self._project_visible_limit]
+            for row in visible_rows:
                 entry = dict(row)
                 entry["kind"] = "session"
                 entry["project_title"] = _sidebar_project_name(project_path)
                 items.append(entry)
+            hidden_count = len(sorted_rows) - len(visible_rows)
+            if is_expanded and len(sorted_rows) > self._project_visible_limit:
+                items.append(
+                    {
+                        "kind": "more",
+                        "project_path": project_path,
+                        "project_title": _sidebar_project_name(project_path),
+                        "title": "Свернуть",
+                        "session_id": "",
+                        "updated_at": "",
+                        "preview": "",
+                    }
+                )
+            elif hidden_count > 0:
+                items.append(
+                    {
+                        "kind": "more",
+                        "project_path": project_path,
+                        "project_title": _sidebar_project_name(project_path),
+                        "title": "Показать больше",
+                        "session_id": "",
+                        "updated_at": "",
+                        "preview": str(hidden_count),
+                    }
+                )
 
         self.beginResetModel()
         self._items = items
@@ -233,21 +262,34 @@ class SessionItemDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:  # type: ignore[override]
         painter.save()
         item_kind = str(index.data(SessionListModel.KindRole) or "session")
-        rect = option.rect.adjusted(6, 3, -6, -3)
+        rect = option.rect.adjusted(6, 2, -6, -2)
         is_selected = bool(option.state & QStyle.State_Selected)
         is_hovered = bool(option.state & QStyle.State_MouseOver)
 
         if item_kind == "group":
-            icon_rect = rect.adjusted(2, 4, 0, 0)
-            painter.drawPixmap(icon_rect.left(), icon_rect.top(), qta.icon("fa5.folder-open", color=TEXT_MUTED).pixmap(12, 12))
+            is_active_project = bool(index.data(SessionListModel.ActiveProjectRole))
+            icon_color = TEXT_PRIMARY if is_active_project else TEXT_MUTED
+            icon_rect = rect.adjusted(4, 7, 0, 0)
+            painter.drawPixmap(icon_rect.left(), icon_rect.top(), _fa_icon("fa5.folder-open", color=icon_color, size=13).pixmap(13, 13))
             group_text = str(index.data(SessionListModel.ProjectTitleRole) or index.data(SessionListModel.TitleRole) or "")
-            title_rect = rect.adjusted(20, 0, -8, 0)
+            title_rect = rect.adjusted(26, 0, -8, 0)
             title_font = option.font
-            title_font.setPointSize(9)
-            title_font.setWeight(QFont.DemiBold)
+            title_font.setPointSize(10)
+            title_font.setWeight(QFont.DemiBold if is_active_project else QFont.Medium)
             painter.setFont(title_font)
+            painter.setPen(QColor(TEXT_PRIMARY if is_active_project else TEXT_MUTED))
+            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, group_text)
+            painter.restore()
+            return
+
+        if item_kind == "more":
+            text_rect = rect.adjusted(34, 0, -8, 0)
+            font = option.font
+            font.setPointSize(9)
+            font.setWeight(QFont.Medium)
+            painter.setFont(font)
             painter.setPen(QColor(TEXT_MUTED))
-            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, group_text.upper())
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, str(index.data(SessionListModel.TitleRole) or "Показать больше"))
             painter.restore()
             return
 
@@ -261,50 +303,47 @@ class SessionItemDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setPen(Qt.NoPen)
             painter.setBrush(background)
-            painter.drawRoundedRect(rect, 12, 12)
+            painter.drawRoundedRect(rect, 7, 7)
 
         title = str(index.data(SessionListModel.TitleRole) or "")
-        preview = str(index.data(SessionListModel.PreviewRole) or "")
         updated_at = _format_sidebar_time(str(index.data(SessionListModel.UpdatedAtRole) or ""))
 
         title_font = option.font
         title_font.setPointSize(10)
-        title_font.setWeight(QFont.DemiBold if is_selected else QFont.Medium)
+        title_font.setWeight(QFont.Medium)
         title_metrics = QFontMetrics(title_font)
 
         meta_font = option.font
-        meta_font.setPointSize(8)
+        meta_font.setPointSize(9)
         meta_font.setWeight(QFont.Medium)
         meta_metrics = QFontMetrics(meta_font)
 
-        time_width = max(34, meta_metrics.horizontalAdvance(updated_at) + 6)
-        content_rect = rect.adjusted(12, 7, -12, -7)
-        title_rect = content_rect.adjusted(0, 0, -(time_width + 8), -18)
-        time_rect = content_rect.adjusted(content_rect.width() - time_width, 0, 0, -18)
-        preview_rect = content_rect.adjusted(0, 20, 0, 0)
+        time_width = max(32, meta_metrics.horizontalAdvance(updated_at) + 6)
+        content_rect = rect.adjusted(34, 0, -12, 0)
+        title_rect = content_rect.adjusted(0, 0, -(time_width + 8), 0)
+        time_rect = content_rect.adjusted(content_rect.width() - time_width, 0, 0, 0)
 
         painter.setFont(title_font)
         painter.setPen(QColor(TEXT_PRIMARY))
         painter.drawText(
             title_rect,
-            Qt.AlignLeft | Qt.AlignTop,
+            Qt.AlignLeft | Qt.AlignVCenter,
             title_metrics.elidedText(title, Qt.ElideRight, max(10, title_rect.width())),
         )
 
         painter.setFont(meta_font)
         painter.setPen(QColor(TEXT_MUTED))
-        painter.drawText(time_rect, Qt.AlignRight | Qt.AlignTop, updated_at)
-        painter.drawText(
-            preview_rect,
-            Qt.AlignLeft | Qt.AlignTop,
-            meta_metrics.elidedText(preview, Qt.ElideRight, max(10, preview_rect.width())),
-        )
+        painter.drawText(time_rect, Qt.AlignRight | Qt.AlignVCenter, updated_at)
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # type: ignore[override]
         _ = option
         kind = str(index.data(SessionListModel.KindRole) or "session")
-        return QSize(260, 24 if kind == "group" else 56)
+        if kind == "group":
+            return QSize(260, 34)
+        if kind == "more":
+            return QSize(260, 30)
+        return QSize(260, 32)
 
 
 class SessionSidebarWidget(QWidget):
@@ -315,33 +354,17 @@ class SessionSidebarWidget(QWidget):
         super().__init__()
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(8)
 
-        title = QLabel("Chats")
+        title = QLabel("Проекты")
         title.setObjectName("SidebarSectionTitle")
         header_row.addWidget(title, 1)
 
-        self.delete_button = QToolButton()
-        self.delete_button.setObjectName("SidebarGhostButton")
-        self.delete_button.setIcon(qta.icon("fa5s.trash", color=TEXT_MUTED))
-        self.delete_button.setToolTip("Delete selected chat")
-        self.delete_button.setEnabled(False)
-        self.delete_button.setAutoRaise(True)
-        self.delete_button.clicked.connect(self._delete_selected_session)
-        header_row.addWidget(self.delete_button, 0, Qt.AlignRight)
         root.addLayout(header_row)
-
-        self.search_field = QLineEdit()
-        self.search_field.setObjectName("SidebarSearchField")
-        self.search_field.setPlaceholderText("Search chats")
-        self.search_field.setClearButtonEnabled(True)
-        self.search_field.setAccessibleName("Chat search")
-        self.search_field.setAccessibleDescription("Filter chats by title or folder")
-        root.addWidget(self.search_field)
 
         self.list_view = QListView()
         self.list_view.setObjectName("SessionListView")
@@ -372,14 +395,11 @@ class SessionSidebarWidget(QWidget):
         self.empty_label.setVisible(False)
         root.addWidget(self.empty_label)
 
-        self.search_field.textChanged.connect(self._on_search_changed)
-
     def set_sessions(self, sessions: list[dict[str, str]], active_session_id: str) -> None:
-        self.model.set_sessions(sessions)
+        self.model.set_sessions(sessions, active_session_id)
         self._refresh_empty_state()
         if not active_session_id:
             self.list_view.clearSelection()
-            self._update_action_state()
             return
         index = self.model.index_for_session(active_session_id)
         if index.isValid():
@@ -387,15 +407,9 @@ class SessionSidebarWidget(QWidget):
             self.list_view.scrollTo(index)
         else:
             self.list_view.clearSelection()
-        self._update_action_state()
 
     def title_for_session(self, session_id: str) -> str:
         return self.model.title_for_session(session_id)
-
-    def _on_search_changed(self, value: str) -> None:
-        self.model.set_filter_text(value)
-        self._refresh_empty_state()
-        self._update_action_state()
 
     def _refresh_empty_state(self) -> None:
         if self.model.session_row_count() > 0:
@@ -403,13 +417,14 @@ class SessionSidebarWidget(QWidget):
             self.list_view.setVisible(True)
             return
         self.list_view.setVisible(False)
-        if self.model.has_source_sessions():
-            self.empty_label.setText("No chats match this search")
-        else:
-            self.empty_label.setText("No chats yet")
+        self.empty_label.setText("Чатов пока нет" if not self.model.has_source_sessions() else "Нет доступных чатов")
         self.empty_label.setVisible(True)
 
     def _emit_clicked_session(self, index: QModelIndex) -> None:
+        if str(index.data(SessionListModel.KindRole) or "session") == "more":
+            self.model.toggle_project_expansion(str(index.data(SessionListModel.ProjectPathRole) or ""))
+            self._refresh_empty_state()
+            return
         session_id = self.model.session_id_at(index)
         if session_id:
             self.session_activated.emit(session_id)
@@ -417,12 +432,10 @@ class SessionSidebarWidget(QWidget):
     def _selected_session_id(self) -> str:
         return self.model.session_id_at(self.list_view.currentIndex())
 
-    def _update_action_state(self) -> None:
-        self.delete_button.setEnabled(bool(self._selected_session_id()))
-
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         _ = current
-        self._update_action_state()
+        if str(current.data(SessionListModel.KindRole) or "session") == "more":
+            self.list_view.clearSelection()
 
     def _delete_selected_session(self) -> None:
         session_id = self._selected_session_id()

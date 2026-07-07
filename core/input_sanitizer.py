@@ -23,10 +23,6 @@ class SanitizedUserInput:
             or len(self.text) != self.original_length
         )
 
-    @property
-    def is_empty(self) -> bool:
-        return not bool(self.text)
-
 
 def sanitize_user_text(raw_text: str, *, max_chars: int = DEFAULT_USER_INPUT_LIMIT) -> SanitizedUserInput:
     text = str(raw_text or "")

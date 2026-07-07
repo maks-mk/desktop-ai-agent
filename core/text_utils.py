@@ -470,12 +470,6 @@ def clean_markdown_text(text: str) -> str:
     return _collapse_non_code_markdown(text)
 
 
-def _append_unique_text(parts: list[str], value: Any) -> None:
-    normalized = str(value or "").strip()
-    if normalized and normalized not in parts:
-        parts.append(normalized)
-
-
 def _code_signal_score(line: str) -> int:
     stripped = line.strip()
     if not stripped:

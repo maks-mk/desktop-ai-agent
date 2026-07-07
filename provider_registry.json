@@ -1,21 +1,34 @@
 {
   "schema_version": 1,
-  "data_version": 1,
+  "data_version": 2,
   "providers": [
     {
       "id": "openai",
       "enabled": true,
       "priority": 100,
-      "match": ["api.openai.com"],
+      "match": [
+        "api.openai.com"
+      ],
       "match_type": "exact",
       "supports_reasoning": true,
       "model_match": {
-        "prefix": ["gpt-5", "o1", "o3", "o4"]
+        "prefix": [
+          "gpt-5",
+          "o1",
+          "o3",
+          "o4"
+        ]
       },
       "validation": "map",
       "reasoning": {
         "path": "reasoning.effort",
-        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
         "value_map": {},
         "extra_fields": {
           "reasoning.summary": "auto"
@@ -27,13 +40,21 @@
       "id": "openrouter",
       "enabled": true,
       "priority": 90,
-      "match": ["openrouter.ai"],
+      "match": [
+        "openrouter.ai"
+      ],
       "match_type": "suffix",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "extra_body.reasoning.effort",
-        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
         "value_map": {
           "none": "none"
         }
@@ -44,13 +65,19 @@
       "id": "ollama_cloud",
       "enabled": true,
       "priority": 85,
-      "match": ["ollama.com"],
+      "match": [
+        "ollama.com"
+      ],
       "match_type": "suffix",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["low", "medium", "high"],
+        "allowed_values": [
+          "low",
+          "medium",
+          "high"
+        ],
         "value_map": {
           "minimal": "low",
           "xhigh": "high"
@@ -62,13 +89,19 @@
       "id": "fireworks",
       "enabled": true,
       "priority": 80,
-      "match": ["api.fireworks.ai"],
+      "match": [
+        "api.fireworks.ai"
+      ],
       "match_type": "suffix",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["low", "medium", "high"],
+        "allowed_values": [
+          "low",
+          "medium",
+          "high"
+        ],
         "value_map": {
           "minimal": "low",
           "xhigh": "high"
@@ -80,31 +113,65 @@
       "id": "nvidia_nim",
       "enabled": true,
       "priority": 70,
-      "match": ["integrate.api.nvidia.com", "api.nvidia.com"],
+      "match": [
+        "integrate.api.nvidia.com",
+        "api.nvidia.com"
+      ],
       "match_type": "suffix",
       "supports_reasoning": true,
       "validation": "map",
+      "model_match": {
+        "contains": [
+          "deepseek-r1",
+          "deepseek-v4",
+          "deepseek-v3",
+          "deepseek-prover",
+          "glm-5",
+          "glm-4.7",
+          "kimi-k2",
+          "qwen3",
+          "gemma-4",
+          "gpt-oss"
+        ]
+      },
       "reasoning": {
-        "path": "reasoning_effort",
-        "allowed_values": ["low", "medium", "high"],
+        "path": "extra_body.chat_template_kwargs.enable_thinking",
+        "allowed_values": [
+          "true"
+        ],
         "value_map": {
-          "minimal": "low",
-          "xhigh": "high"
+          "minimal": "true",
+          "low": "true",
+          "medium": "true",
+          "high": "true",
+          "xhigh": "true",
+          "max": "true"
+        },
+        "extra_fields": {
+          "extra_body.chat_template_kwargs.clear_thinking": false
         }
       },
-      "notes": "Reasoning support depends on model."
+      "notes": "NVIDIA NIM uses chat_template_kwargs to enable thinking (not reasoning_effort). DeepSeek V3.x: {thinking:true}. DeepSeek V4: {thinking:true, reasoning_effort:high|max}. GLM-5/4.7: {enable_thinking:true, clear_thinking:false}. Kimi-K2: {thinking:true}. Qwen3/Gemma-4: {enable_thinking:true}. Models not in model_match either do not support thinking or always think regardless. reasoning_content appears in streaming delta when thinking is enabled. chat_template_kwargs is sent via extra_body to avoid LangChain UserWarning about non-default parameters. Ref: github.com/xRyul/pi-nvidia-nim, NVIDIA docs."
     },
     {
       "id": "aihubmix",
       "enabled": true,
       "priority": 70,
-      "match": ["aihubmix.com"],
+      "match": [
+        "aihubmix.com"
+      ],
       "match_type": "suffix",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["minimal", "low", "medium", "high", "xhigh"],
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
         "value_map": {
           "none": "none"
         }
@@ -115,13 +182,19 @@
       "id": "baai",
       "enabled": true,
       "priority": 70,
-      "match": ["api.b.ai"],
+      "match": [
+        "api.b.ai"
+      ],
       "match_type": "exact",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["low", "medium", "high"],
+        "allowed_values": [
+          "low",
+          "medium",
+          "high"
+        ],
         "value_map": {
           "minimal": "low",
           "xhigh": "high"
@@ -133,13 +206,17 @@
       "id": "mistral",
       "enabled": true,
       "priority": 60,
-      "match": ["api.mistral.ai"],
+      "match": [
+        "api.mistral.ai"
+      ],
       "match_type": "exact",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning_effort",
-        "allowed_values": ["high"],
+        "allowed_values": [
+          "high"
+        ],
         "value_map": {
           "minimal": "high",
           "low": "high",
@@ -153,7 +230,9 @@
       "id": "modelscope_global",
       "enabled": true,
       "priority": 60,
-      "match": ["api-inference.modelscope.ai"],
+      "match": [
+        "api-inference.modelscope.ai"
+      ],
       "match_type": "exact",
       "supports_reasoning": false,
       "validation": "passthrough",
@@ -163,7 +242,9 @@
       "id": "modelscope_cn",
       "enabled": true,
       "priority": 60,
-      "match": ["api-inference.modelscope.cn"],
+      "match": [
+        "api-inference.modelscope.cn"
+      ],
       "match_type": "exact",
       "supports_reasoning": false,
       "validation": "passthrough",
@@ -173,13 +254,20 @@
       "id": "freemodel",
       "enabled": true,
       "priority": 60,
-      "match": ["api.freemodel.dev"],
+      "match": [
+        "api.freemodel.dev"
+      ],
       "match_type": "exact",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning.effort",
-        "allowed_values": ["minimal", "low", "medium", "high"],
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
         "value_map": {
           "xhigh": "high"
         },
@@ -189,17 +277,51 @@
       },
       "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through freemodel.dev."
     },
-    {
-      "id": "freetheai",
+	{
+      "id": "ai-router",
       "enabled": true,
       "priority": 60,
-      "match": ["api.freetheai.xyz"],
+      "match": [
+        "api.ai-router.dev"
+      ],
       "match_type": "exact",
       "supports_reasoning": true,
       "validation": "map",
       "reasoning": {
         "path": "reasoning.effort",
-        "allowed_values": ["minimal", "low", "medium", "high"],
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "value_map": {
+          "xhigh": "high"
+        },
+        "extra_fields": {
+          "reasoning.summary": "auto"
+        }
+      },
+      "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through api.ai-router.dev."
+    },
+    {
+      "id": "freetheai",
+      "enabled": true,
+      "priority": 60,
+      "match": [
+        "api.freetheai.xyz"
+      ],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning.effort",
+        "allowed_values": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
         "value_map": {
           "xhigh": "high"
         },

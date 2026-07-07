@@ -164,6 +164,8 @@ class ProtocolMixin:
         self,
         tool_calls: List[Dict[str, Any]],
         messages: List[Any],
+        *,
+        plan_mode: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str, bool]:
         if not tool_calls:
             return tool_calls, "", False

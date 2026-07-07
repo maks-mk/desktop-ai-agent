@@ -30,10 +30,35 @@ from core.provider_registry import (
     build_reasoning_kwargs,
     provider_supports_reasoning_for_model,
 )
-from core.reasoning_debug import debug_event, elapsed_since, log_unknown_fields, now, preview_value
+from core.reasoning_debug import (
+    STRUCTURED_OUTPUT_PARSED_EXCLUDE,
+    debug_event,
+    elapsed_since,
+    log_unknown_fields,
+    now,
+    preview_value,
+)
 
 logger = logging.getLogger("agent")
 reasoning_logger = logging.getLogger("agent.reasoning_debug")
+
+
+def _safe_openai_model_dump(value: Any) -> dict[str, Any]:
+    """Dump OpenAI SDK models without serializing structured-output ``parsed``.
+
+    Some OpenAI/LangChain typed response objects carry the parsed Pydantic
+    structured output in ``choices[].message.parsed``.  Recent Pydantic versions
+    warn when that runtime value is serialized through a field schema that
+    expects ``None``.  The parsed object is not needed for stream chunk
+    conversion/debug field discovery; LangChain copies it from the typed final
+    response separately when required.
+    """
+    if not hasattr(value, "model_dump"):
+        return value
+    try:
+        return value.model_dump(exclude=STRUCTURED_OUTPUT_PARSED_EXCLUDE)
+    except TypeError:
+        return value.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +74,7 @@ def extract_openai_reasoning_delta(chunk: Any) -> Any:
     """
     if not isinstance(chunk, dict) and hasattr(chunk, "model_dump"):
         try:
-            chunk = chunk.model_dump()
+            chunk = _safe_openai_model_dump(chunk)
         except Exception:
             return None
     if not isinstance(chunk, dict):
@@ -113,7 +138,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
             fields_source = chunk
             if not isinstance(fields_source, dict) and hasattr(fields_source, "model_dump"):
                 try:
-                    fields_source = fields_source.model_dump()
+                    fields_source = _safe_openai_model_dump(fields_source)
                 except Exception:
                     fields_source = chunk
             debug_event(
@@ -229,7 +254,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                     for chunk in response:
                         self._log_raw_provider_chunk("openai_chat_completions_stream", chunk)
                         if not isinstance(chunk, dict):
-                            chunk = chunk.model_dump()
+                            chunk = _safe_openai_model_dump(chunk)
                         generation_chunk = self._convert_chunk_to_generation_chunk(
                             chunk,
                             default_chunk_class,
@@ -375,7 +400,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                     ):
                         self._log_raw_provider_chunk("openai_chat_completions_stream", chunk)
                         if not isinstance(chunk, dict):
-                            chunk = chunk.model_dump()
+                            chunk = _safe_openai_model_dump(chunk)
                         generation_chunk = self._convert_chunk_to_generation_chunk(
                             chunk,
                             default_chunk_class,
@@ -471,14 +496,17 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
             normalized_reasoning_effort(getattr(config, "model_reasoning_effort", "medium")),
         )
         reasoning_logger.debug(
-            "openai reasoning kwargs applied model=%s has_reasoning=%s has_extra_body=%s reasoning_effort=%s extra_body_keys=%s",
+            "openai reasoning kwargs applied model=%s provider_id=%s reasoning_path=%s has_reasoning_key=%s has_extra_body=%s reasoning_effort=%s extra_body_keys=%s applied_keys=%s",
             config.openai_model,
+            provider_config.get("id") if isinstance(provider_config, dict) else None,
+            (provider_config.get("reasoning") or {}).get("path") if isinstance(provider_config, dict) else None,
             "reasoning" in openai_kwargs,
             "extra_body" in openai_kwargs,
             openai_kwargs.get("reasoning_effort"),
             sorted((openai_kwargs.get("extra_body") or {}).keys())
             if isinstance(openai_kwargs.get("extra_body"), dict)
             else [],
+            sorted(k for k in openai_kwargs if k not in ("model", "temperature", "api_key", "base_url", "max_retries", "stream_usage", "top_p")),
         )
     else:
         reasoning_logger.debug(

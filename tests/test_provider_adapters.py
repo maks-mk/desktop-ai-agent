@@ -11,7 +11,10 @@ thought-signature round-tripping at runtime.
 """
 
 import unittest
+import warnings
 from unittest import mock
+
+from pydantic import BaseModel, ConfigDict
 
 from core.providers import (
     chat_model_accepts_kwarg,
@@ -35,8 +38,11 @@ from core.providers.gemini import (
     _decode_gemini_thought_signature,
     create_gemini_chat_model,
 )
+from core.planning import RuntimePlanDraft
+from core.reasoning_debug import preview_value
 from core.providers.openai_reasoning import (
     _build_reasoning_debug_chat_openai,
+    _safe_openai_model_dump,
     create_openai_chat_model,
 )
 
@@ -243,6 +249,101 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         self.assertTrue(hasattr(cls, "_astream"))
         self.assertTrue(hasattr(cls, "_log_raw_provider_chunk"))
         self.assertTrue(hasattr(cls, "_attach_raw_reasoning_delta"))
+
+    def test_safe_openai_model_dump_excludes_structured_parsed_without_warning(self):
+        class FakeOpenAIMessage(BaseModel):
+            model_config = ConfigDict(extra="allow")
+            parsed: None = None
+
+        class FakeOpenAIChoice(BaseModel):
+            message: FakeOpenAIMessage
+
+        class FakeOpenAICompletion(BaseModel):
+            choices: list[FakeOpenAIChoice]
+
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a fix",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect code",
+                        "description": "Find the failing serialization path.",
+                        "status": "pending",
+                    }
+                ],
+            }
+        )
+        message = FakeOpenAIMessage.model_construct(parsed=draft)
+        completion = FakeOpenAICompletion(choices=[FakeOpenAIChoice(message=message)])
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            dumped = _safe_openai_model_dump(completion)
+
+        self.assertEqual(captured, [])
+        self.assertNotIn("parsed", dumped["choices"][0]["message"])
+
+    def test_reasoning_debug_preview_excludes_structured_parsed_without_warning(self):
+        class FakeOpenAIMessage(BaseModel):
+            model_config = ConfigDict(extra="allow")
+            parsed: None = None
+
+        class FakeOpenAIChoice(BaseModel):
+            message: FakeOpenAIMessage
+
+        class FakeOpenAICompletion(BaseModel):
+            choices: list[FakeOpenAIChoice]
+
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a fix",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect code",
+                        "description": "Find the failing serialization path.",
+                        "status": "pending",
+                    }
+                ],
+            }
+        )
+        message = FakeOpenAIMessage.model_construct(parsed=draft)
+        completion = FakeOpenAICompletion(choices=[FakeOpenAIChoice(message=message)])
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            rendered = preview_value(completion)
+
+        self.assertEqual(captured, [])
+        self.assertNotIn("parsed", rendered)
+
+    def test_reasoning_debug_preview_excludes_top_level_parsed_without_warning(self):
+        class FakeParsedCompletion(BaseModel):
+            model_config = ConfigDict(extra="allow")
+            parsed: None = None
+
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a fix",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect code",
+                        "description": "Find the failing serialization path.",
+                        "status": "pending",
+                    }
+                ],
+            }
+        )
+        completion = FakeParsedCompletion.model_construct(parsed=draft)
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            rendered = preview_value(completion)
+
+        self.assertEqual(captured, [])
+        self.assertNotIn("parsed", rendered)
 
 
 class RetryPatchIdempotencyTests(unittest.TestCase):

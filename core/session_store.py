@@ -252,19 +252,6 @@ class SessionStore:
             return None
         return self.get_session(sessions[0].session_id)
 
-    def update_session_title(self, session_id: str, title: str) -> Optional[SessionSnapshot]:
-        snapshot = self.get_session(session_id)
-        if snapshot is None:
-            return None
-        snapshot.title = str(title or DEFAULT_CHAT_TITLE).strip() or DEFAULT_CHAT_TITLE
-        active = self._load_active_session_file()
-        if active is not None and active.session_id == session_id:
-            active.title = snapshot.title
-            self.save_active_session(active, touch=False, set_active=True)
-            return active
-        self._upsert_session(snapshot, set_active=False, touch=False)
-        return snapshot
-
     def delete_session(self, session_id: str) -> bool:
         if not session_id:
             return False

@@ -78,6 +78,30 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sessions", payload)
         self.assertEqual(payload["active_session_id"], worker.current_session.session_id)
 
+    async def test_emit_session_payload_restores_pending_user_choice_flags(self):
+        worker = AgentRunWorker()
+        worker.config = mock.Mock()
+        worker.tool_registry = mock.Mock()
+        worker.store = mock.Mock()
+        worker.current_session = self._session_snapshot(Path.cwd())
+        worker.model_profiles = {"active_profile": None, "profiles": []}
+        worker.model_capabilities = {"image_input_supported": False}
+        worker.agent_app = mock.Mock()
+        payload = {
+            "snapshot": {},
+            "sessions": [],
+            "active_session_id": "session-1",
+            "pending_user_choice": {"choice_type": "plan_review"},
+        }
+
+        with mock.patch("ui.runtime_session.build_ui_payload", new=mock.AsyncMock(return_value=payload)):
+            result = await worker._emit_session_payload(include_transcript=False)
+
+        self.assertIs(result, payload)
+        self.assertTrue(worker._awaiting_approval)
+        self.assertEqual(worker._awaiting_interrupt_kind, "user_choice")
+        self.assertEqual(worker._pending_user_choice_type, "plan_review")
+
     async def test_build_config_for_active_profile_bootstraps_base_config_when_worker_config_missing(self):
         worker = AgentRunWorker()
         worker.base_config = None

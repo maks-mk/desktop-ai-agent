@@ -6,6 +6,10 @@ class InspectorController:
         self.window = window
 
     def toggle_info_popup(self) -> None:
+        if getattr(self.window, "plan_progress_panel", None) is not None and not self.window.plan_progress_panel.isHidden():
+            self.window._clear_plan_progress_panel()
+            self.set_inspector_collapsed(True)
+            return
         self.set_inspector_collapsed(not self.window.inspector_collapsed)
 
     def set_inspector_collapsed(self, collapsed: bool) -> None:

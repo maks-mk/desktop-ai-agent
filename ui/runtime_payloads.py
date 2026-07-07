@@ -10,6 +10,7 @@ from core.config import AgentConfig
 from core.constants import AGENT_VERSION
 from core.message_utils import is_tool_message_error, stringify_content
 from core.model_profiles import find_active_profile, normalize_profiles_payload
+from core.planning import coerce_runtime_plan
 from core.multimodal import extract_user_turn_data, resolve_model_capabilities
 from core.session_store import (
     DEFAULT_CHAT_TITLE,
@@ -27,7 +28,6 @@ from ui.visibility import get_internal_ui_notice, is_hidden_internal_message
 
 APPROVAL_MODE_PROMPT = "prompt"
 APPROVAL_MODE_ALWAYS = "always"
-APPROVAL_MODE_DENY = "deny"
 _INLINE_THOUGHT_BLOCK_RE = re.compile(r"<(think|thought)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _INLINE_THOUGHT_CLOSE_PREFIX_RE = re.compile(r"^.*?</(think|thought)>\s*", re.IGNORECASE | re.DOTALL)
 _INLINE_THOUGHT_UNCLOSED_RE = re.compile(r"<(think|thought)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
@@ -40,6 +40,11 @@ TITLE_PREFIX_RE = re.compile(
 )
 TITLE_STRIP_RE = re.compile(r"^[\s\-\.,:;!?\"'`~()\[\]{}<>/\\]+|[\s\-\.,:;!?\"'`~()\[\]{}<>/\\]+$")
 DIFF_BLOCK_RE = re.compile(r"```diff\r?\n(.*?)```", re.DOTALL)
+IMPLEMENTATION_PLAN_BLOCK_RE = re.compile(r"<implementation_plan>\s*(.*?)\s*</implementation_plan>", re.IGNORECASE | re.DOTALL)
+PLAN_STEP_COMPLETE_COMMENT_RE = re.compile(
+    r"<!--\s*plan-step-complete\s*:\s*[^>\s]+\s*-->",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -332,12 +337,43 @@ def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
             return _extract_visible_text(additional_kwargs.get("content_blocks"))
         return stringify_content(content)
 
-    return _extract_visible_text(message.content)
+    return PLAN_STEP_COMPLETE_COMMENT_RE.sub("", _extract_visible_text(message.content)).strip()
 
 
 def _diff_from_tool_content(content: str) -> str:
     match = DIFF_BLOCK_RE.search(content or "")
     return match.group(1).strip() if match else ""
+
+
+def _extract_implementation_plan_markdown(text: str) -> str:
+    match = IMPLEMENTATION_PLAN_BLOCK_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _strip_implementation_plan_blocks(text: str) -> str:
+    return IMPLEMENTATION_PLAN_BLOCK_RE.sub("", text or "").strip()
+
+
+def _append_inline_plan_block(current_turn: dict[str, Any], plan_markdown: str, plan: dict[str, Any] | None) -> None:
+    markdown = str(plan_markdown or "").strip()
+    if not markdown:
+        return
+    payload: dict[str, Any] = {"plan_markdown": markdown}
+    if isinstance(plan, dict):
+        payload["current_plan"] = plan
+    current_turn["blocks"].append(
+        {
+            "type": "plan",
+            "payload": payload,
+            "actions_visible": False,
+            "implemented": True,
+        }
+    )
+
+
+def _current_plan_for_inline_block(values: dict[str, Any]) -> dict[str, Any] | None:
+    plan = coerce_runtime_plan(values.get("current_plan"))
+    return plan if isinstance(plan, dict) else None
 
 
 def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_stats: str = "") -> dict[str, Any]:
@@ -347,6 +383,7 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
     turns: list[dict[str, Any]] = []
     pending_tool_calls: dict[str, dict[str, Any]] = {}
     current_turn: dict[str, Any] | None = None
+    current_plan = _current_plan_for_inline_block(values)
 
     for message in values.get("messages", []) or []:
         if isinstance(message, HumanMessage):
@@ -382,6 +419,10 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
                 continue
             text = _extract_ai_text(message)
             if text.strip():
+                plan_markdown = _extract_implementation_plan_markdown(text)
+                if plan_markdown:
+                    _append_inline_plan_block(current_turn, plan_markdown, current_plan)
+                    text = _strip_implementation_plan_blocks(text)
                 markdown = prepare_markdown_for_render(text.strip())
                 if markdown:
                     current_turn["blocks"].append(
@@ -451,13 +492,32 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
     }
 
 
-async def load_state_values(agent_app, thread_id: str) -> dict[str, Any]:
+async def load_state_snapshot(agent_app, thread_id: str):
     config = {"configurable": {"thread_id": thread_id}}
     async_get_state = getattr(agent_app, "aget_state", None)
     if callable(async_get_state):
-        state = await async_get_state(config)
-    else:
-        state = agent_app.get_state(config)
+        return await async_get_state(config)
+    return agent_app.get_state(config)
+
+
+def state_snapshot_has_interrupt(state_snapshot, *, choice_type: str) -> bool:
+    tasks = getattr(state_snapshot, "tasks", ()) or ()
+    for task in tasks:
+        interrupts = getattr(task, "interrupts", ()) or ()
+        for entry in interrupts:
+            value = getattr(entry, "value", entry)
+            if isinstance(value, dict) and str(value.get("choice_type") or "") == choice_type:
+                return True
+    interrupts = getattr(state_snapshot, "interrupts", ()) or ()
+    for entry in interrupts:
+        value = getattr(entry, "value", entry)
+        if isinstance(value, dict) and str(value.get("choice_type") or "") == choice_type:
+            return True
+    return False
+
+
+async def load_state_values(agent_app, thread_id: str) -> dict[str, Any]:
+    state = await load_state_snapshot(agent_app, thread_id)
     values = getattr(state, "values", {}) if state is not None else {}
     return values if isinstance(values, dict) else {}
 
@@ -548,10 +608,42 @@ def build_user_choice_payload(interrupt_payload: dict) -> dict[str, Any]:
 
     return {
         "kind": "user_choice",
+        "choice_type": str((interrupt_payload or {}).get("choice_type", "clarification") or "clarification"),
         "question": interrupt_payload.get("question", "How would you like to proceed?"),
         "options": options_payload,
         "recommended_key": matched_recommended_label,
+        "allow_custom_text": bool((interrupt_payload or {}).get("allow_custom_text")),
+        "custom_label": str((interrupt_payload or {}).get("custom_label", "") or "").strip(),
+        "current_plan": (interrupt_payload or {}).get("current_plan"),
+        "reason": str((interrupt_payload or {}).get("reason", "") or "").strip(),
     }
+
+
+def build_pending_plan_review_payload(state_values: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(state_values, dict):
+        return None
+    plan_status = str(state_values.get("plan_status") or "").strip().lower()
+    if plan_status != "pending_approval":
+        return None
+    plan = coerce_runtime_plan(state_values.get("current_plan"))
+    if plan is None:
+        return None
+    return build_user_choice_payload(
+        {
+            "kind": "user_choice",
+            "choice_type": "plan_review",
+            "question": "Что сделать с этим планом?",
+            "options": [
+                {"key": "implement", "label": "Реализовать", "submit_text": "implement"},
+                {"key": "revise", "label": "Внести изменения в план", "submit_text": "revise"},
+                {"key": "rebuild", "label": "Перестроить план", "submit_text": "rebuild"},
+                {"key": "cancel", "label": "Отменить", "submit_text": "cancel"},
+            ],
+            "recommended": "implement",
+            "current_plan": plan,
+            "reason": "Восстановлено из checkpoint после прерывания сессии.",
+        }
+    )
 
 
 def build_approval_payload(interrupt_payload: dict, current_session: SessionSnapshot) -> dict[str, Any]:
@@ -590,9 +682,17 @@ async def build_ui_payload(
         model_capabilities if model_capabilities is not None else getattr(tool_registry, "model_capabilities", None),
     )
     state_values: dict[str, Any] = {}
+    state_snapshot = None
+    has_pending_plan_review_interrupt = False
     if agent_app is not None:
         try:
-            state_values = await load_state_values(agent_app, snapshot.thread_id)
+            state_snapshot = await load_state_snapshot(agent_app, snapshot.thread_id)
+            values = getattr(state_snapshot, "values", {}) if state_snapshot is not None else {}
+            state_values = values if isinstance(values, dict) else {}
+            has_pending_plan_review_interrupt = state_snapshot_has_interrupt(
+                state_snapshot,
+                choice_type="plan_review",
+            )
         except Exception:
             state_values = {}
     payload = {
@@ -605,6 +705,15 @@ async def build_ui_payload(
         "model_profiles": normalized_profiles,
         "model_capabilities": effective_capabilities,
     }
+    pending_user_choice = build_pending_plan_review_payload(state_values) if has_pending_plan_review_interrupt else None
+    if pending_user_choice is not None:
+        pending_user_choice["restored_from_checkpoint"] = True
+        payload["pending_user_choice"] = pending_user_choice
+        payload["checkpoint_notice"] = {
+            "message": "Восстановлен ожидающий план из checkpoint. Выберите действие, чтобы продолжить.",
+            "kind": "plan_checkpoint_restored",
+            "level": "warning",
+        }
     if include_transcript and agent_app is not None:
         payload["transcript"] = build_transcript_payload(
             state_values,

@@ -9,7 +9,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from .foundation import TRANSCRIPT_MAX_WIDTH, _fa_icon
-from .messages import AssistantMessageWidget, NoticeWidget, RunStatsWidget, StatusIndicatorWidget, UserMessageWidget
+from .messages import AssistantMessageWidget, InlinePlanWidget, NoticeWidget, RunStatsWidget, StatusIndicatorWidget, UserMessageWidget
 from .tool_group import ToolGroupWidget
 from .tools import ToolCardWidget
 
@@ -30,6 +30,7 @@ class ConversationTurnWidget(QWidget):
         self.assistant_segments: list[AssistantMessageWidget] = []
         self.tool_cards: dict[str, ToolCardWidget] = {}
         self.tool_group: ToolGroupWidget | None = None
+        self.inline_plan_widget: InlinePlanWidget | None = None
         self.status_widget: StatusIndicatorWidget | None = None
         self.summary_notice_widget: NoticeWidget | None = None
         self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or []), parent=self))
@@ -96,9 +97,6 @@ class ConversationTurnWidget(QWidget):
             self._layout.removeWidget(self.status_widget)
             self._layout.addWidget(self.status_widget)
         return widget
-
-    def has_rendered_output(self) -> bool:
-        return len(self._timeline) > 1
 
     def set_status(self, label: str, *, meta: str = "", phase: str = "working") -> None:
         if self.status_widget is None:
@@ -194,6 +192,20 @@ class ConversationTurnWidget(QWidget):
             return
         self.assistant_segments[-1].set_streaming(active)
 
+    def add_inline_plan(self, payload: dict[str, Any], *, actions_visible: bool = True, implemented: bool = False) -> InlinePlanWidget:
+        if self.inline_plan_widget is None:
+            self.inline_plan_widget = InlinePlanWidget(parent=self)
+            self._append_block("plan", self.inline_plan_widget)
+        self.inline_plan_widget.set_payload(payload)
+        self.inline_plan_widget.set_actions_visible(actions_visible)
+        if implemented:
+            self.inline_plan_widget.collapse_after_implement()
+        return self.inline_plan_widget
+
+    def collapse_inline_plan_after_implement(self) -> None:
+        if self.inline_plan_widget is not None:
+            self.inline_plan_widget.collapse_after_implement()
+
     def add_notice(self, message: str, level: str = "info") -> None:
         self._append_block("notice", NoticeWidget(message, level=level, parent=self))
 
@@ -215,7 +227,7 @@ class ConversationTurnWidget(QWidget):
             if self.tool_group is None or not self._timeline or self._timeline[-1][0] != "tool_group":
                 self.tool_group = ToolGroupWidget(parent=self)
                 self._append_block("tool_group", self.tool_group)
-            card = ToolCardWidget(payload, parent=self)
+            card = ToolCardWidget(payload, parent=self.tool_group.container)
             self.tool_cards[tool_id] = card
             self.tool_group.add_tool(card)
         card.update_started_payload(payload)
@@ -275,8 +287,17 @@ class ConversationTurnWidget(QWidget):
                     self.finish_tool(payload, collapse_delay_ms=0)
             elif block_type == "notice":
                 message = str(block.get("message", "") or "").strip()
-                if message:
-                    self.add_notice(message, str(block.get("level") or "info"))
+                level = str(block.get("level") or "info")
+                if message and level == "error":
+                    self.add_notice(message, level)
+            elif block_type == "plan":
+                payload = dict(block.get("payload") or {})
+                if payload:
+                    self.add_inline_plan(
+                        payload,
+                        actions_visible=bool(block.get("actions_visible", False)),
+                        implemented=bool(block.get("implemented", False)),
+                    )
             elif block_type == "stats":
                 stats = str(block.get("stats", "") or "").strip()
                 if stats:
@@ -300,18 +321,18 @@ class ChatTranscriptWidget(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        self.scroll = QScrollArea()
+        self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self.container = QWidget()
+        self.container = QWidget(self.scroll)
         self.container.setObjectName("TranscriptContainer")
         shell = QHBoxLayout(self.container)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         shell.addStretch(1)
 
-        self.column = QWidget()
+        self.column = QWidget(self.container)
         self.column.setObjectName("TranscriptColumn")
         self.column.setMaximumWidth(TRANSCRIPT_MAX_WIDTH)
         self.column.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -359,17 +380,28 @@ class ChatTranscriptWidget(QWidget):
         return turn
 
     def load_transcript(self, payload: dict[str, Any] | None) -> None:
-        self.clear_transcript()
-        payload = payload or {}
-        summary_notice = str(payload.get("summary_notice", "") or "").strip()
-        if summary_notice:
-            self.add_global_notice(summary_notice, level="info")
-        for turn_data in payload.get("turns", []) or []:
-            user_text = str(turn_data.get("user_text", "") or "")
-            attachments = list(turn_data.get("attachments", []) or [])
-            turn = ConversationTurnWidget(user_text, attachments=attachments, parent=self.column)
-            turn.restore_blocks(list(turn_data.get("blocks", []) or []))
-            self.layout.insertWidget(self.layout.count() - 1, turn)
+        self.setUpdatesEnabled(False)
+        self.scroll.setUpdatesEnabled(False)
+        self.container.setUpdatesEnabled(False)
+        self.column.setUpdatesEnabled(False)
+        try:
+            self.clear_transcript()
+            payload = payload or {}
+            for turn_data in payload.get("turns", []) or []:
+                user_text = str(turn_data.get("user_text", "") or "")
+                attachments = list(turn_data.get("attachments", []) or [])
+                turn = ConversationTurnWidget(user_text, attachments=attachments, parent=self.column)
+                turn.setUpdatesEnabled(False)
+                turn.setVisible(False)
+                turn.restore_blocks(list(turn_data.get("blocks", []) or []))
+                self.layout.insertWidget(self.layout.count() - 1, turn)
+                turn.setUpdatesEnabled(True)
+                turn.setVisible(True)
+        finally:
+            self.column.setUpdatesEnabled(True)
+            self.container.setUpdatesEnabled(True)
+            self.scroll.setUpdatesEnabled(True)
+            self.setUpdatesEnabled(True)
         self.notify_content_changed(force=True)
 
     @property
@@ -467,6 +499,3 @@ class ChatTranscriptWidget(QWidget):
     def _update_jump_button(self) -> None:
         should_show = not self._auto_follow_enabled and not self.is_near_bottom()
         self.jump_to_latest_button.setVisible(should_show)
-
-
-

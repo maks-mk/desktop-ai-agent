@@ -1,6 +1,7 @@
 import logging
 import shutil
 import unittest
+import warnings
 from pathlib import Path
 
 from core.logging_config import SensitiveDataFilter, setup_logging
@@ -93,6 +94,34 @@ class SensitiveDataFilterTests(unittest.TestCase):
             for handler in list(logging.getLogger("agent.reasoning_debug").handlers):
                 handler.close()
             shutil.rmtree(log_dir, ignore_errors=True)
+
+    def test_setup_logging_suppresses_known_pydantic_content_block_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            setup_logging(level="INFO", log_file=None)
+
+            warnings.warn_explicit(
+                (
+                    "Pydantic serializer warnings:\n"
+                    "  PydanticSerializationUnexpectedValue(Expected `str` - serialized value may not be as expected "
+                    "[field_name='content', input_value=[{'type': 'thinking'}, {'type': 'text', 'text': 'П'}], "
+                    "input_type=list])"
+                ),
+                UserWarning,
+                "pydantic/main.py",
+                475,
+                module="pydantic.main",
+            )
+            warnings.warn_explicit(
+                "Pydantic serializer warnings: something else",
+                UserWarning,
+                "pydantic/main.py",
+                475,
+                module="pydantic.main",
+            )
+
+        self.assertEqual(len(caught), 1)
+        self.assertIn("something else", str(caught[0].message))
 
 
 if __name__ == "__main__":

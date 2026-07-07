@@ -27,6 +27,7 @@ from core.multimodal import (
     strip_image_content_from_message_content,
 )
 from core.tool_args import canonicalize_tool_args
+from core.planning import active_step, coerce_runtime_plan
 from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
 from core.state import AgentState
 
@@ -87,6 +88,7 @@ class ContextBuilder:
         if summary:
             full_context.append(SystemMessage(content=f"<memory>\n{summary}\n</memory>"))
         inferred_user_choice_locked = user_choice_locked or self._has_request_user_input_tool_result(sanitized_messages)
+        plan_mode = str(state.get("turn_mode", "") if state else "").strip().lower() == "plan"
         full_context.extend(
             self._runtime_policy_builder.build_messages(
                 RuntimePromptContext(
@@ -94,6 +96,7 @@ class ContextBuilder:
                     tools_available=tools_available,
                     active_tool_names=tuple(active_tool_names),
                     user_choice_locked=inferred_user_choice_locked,
+                    plan_mode=plan_mode,
                 )
             )
         )
@@ -106,8 +109,43 @@ class ContextBuilder:
         recovery_message = self._recovery_message_builder(recovery_state)
         if recovery_message:
             full_context.append(recovery_message)
+        plan_execution_message = self._build_plan_execution_message(state)
+        if plan_execution_message:
+            full_context.append(plan_execution_message)
         full_context.extend(sanitized_messages)
         return self.normalize_system_prefix(full_context)
+
+    def _build_plan_execution_message(self, state: AgentState | None) -> SystemMessage | None:
+        if not isinstance(state, dict):
+            return None
+        plan = coerce_runtime_plan(state.get("current_plan"))
+        if plan is None:
+            return None
+        status = str(state.get("plan_status") or plan.get("status") or "").strip().lower()
+        if status not in {"approved", "executing"}:
+            return None
+        step = active_step(plan, str(state.get("active_plan_step_id") or ""))
+        if not step:
+            return None
+        return SystemMessage(
+            content=(
+                "APPROVED PLAN EXECUTION CONTEXT:\n"
+                "A user-approved runtime plan is active. Do not rebuild or re-approve the plan. "
+                "Execute only the active step below using the normal tool-use rules. "
+                "Do not do work from later steps, and do not say you are moving to another step.\n"
+                "Final visible status must be exactly one short line in Russian, no more than 140 characters. "
+                "Do not write reports, bullet lists, section headings, file inventories, verification summaries, "
+                "or phrases like 'Что вошло', 'Проверка выполнена', or 'Переход к шагу'.\n"
+                "Use this shape only: 'Готово: <what changed in this active step>.'\n"
+                "Only when the active step is actually complete, append this hidden marker on its own final line: "
+                f"<!--plan-step-complete:{step.get('id')}-->\n"
+                "If the step is not complete, do not include the marker; use one short line: 'Не завершено: <what remains or blocked it>.'\n\n"
+                f"Plan summary: {plan.get('summary')}\n"
+                f"Active step id: {step.get('id')}\n"
+                f"Active step title: {step.get('title')}\n"
+                f"Active step description: {step.get('description')}\n"
+            )
+        )
 
     def _has_request_user_input_tool_result(self, messages: List[BaseMessage]) -> bool:
         for message in messages:
@@ -130,6 +168,8 @@ class ContextBuilder:
         normalized_content_count = 0
         filtered_image_message_count = 0
         filtered_image_block_count = 0
+        stripped_reasoning_block_count = 0
+        stripped_reasoning_kwarg_count = 0
         image_input_supported = bool(self._model_capabilities.get("image_input_supported"))
 
         for message in messages:
@@ -185,6 +225,12 @@ class ContextBuilder:
                         if signature_map_changed:
                             metadata[_GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY] = remapped_signature_map
                             normalized_message = normalized_message.model_copy(update={"additional_kwargs": metadata})
+
+                    normalized_message, block_count, kwarg_count = self._strip_cross_provider_reasoning(
+                        normalized_message
+                    )
+                    stripped_reasoning_block_count += block_count
+                    stripped_reasoning_kwarg_count += kwarg_count
 
             if isinstance(normalized_message, ToolMessage):
                 raw_tool_id = str(normalized_message.tool_call_id or "").strip()
@@ -257,7 +303,64 @@ class ContextBuilder:
                 filtered_message_count=filtered_image_message_count,
                 filtered_image_block_count=filtered_image_block_count,
             )
+        if stripped_reasoning_block_count or stripped_reasoning_kwarg_count:
+            self._log_run_event(
+                state,
+                "provider_cross_provider_reasoning_stripped",
+                run_id=None if state is None else state.get("run_id", ""),
+                provider=self.config.provider,
+                stripped_content_block_count=stripped_reasoning_block_count,
+                stripped_additional_kwargs_count=stripped_reasoning_kwarg_count,
+            )
         return sanitized
+
+    def _strip_cross_provider_reasoning(
+        self,
+        message: AIMessage | AIMessageChunk,
+    ) -> tuple[AIMessage | AIMessageChunk, int, int]:
+        """Remove reasoning content blocks that are incompatible with the target provider.
+
+        OpenAI Responses API (``output_version="responses/v1"``) emits reasoning
+        blocks with ``type: "reasoning"`` and a ``summary`` list — **not** the
+        ``reasoning`` string key that langchain-google-genai expects.  When the
+        agent switches from OpenAI to Gemini mid-session, these blocks remain in
+        the persisted message history and cause a ``KeyError`` inside
+        ``langchain_google_genai.chat_models`` (``part["reasoning"]`` /
+        ``content_block["reasoning"]``).
+
+        Reasoning content is ephemeral and never needed for cross-provider
+        replay, so we strip it unconditionally from both ``content`` blocks and
+        ``additional_kwargs``.
+
+        Returns ``(message, stripped_block_count, stripped_kwarg_count)``.
+        """
+        block_count = 0
+        kwarg_count = 0
+
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            new_content: list = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "reasoning":
+                    # OpenAI Responses API reasoning blocks have ``summary`` (list)
+                    # but no ``reasoning`` string key.  Gemini's native reasoning
+                    # blocks have ``reasoning`` (string) and ``extras.signature``
+                    # — those must be preserved for multi-turn tool-calling.
+                    if "reasoning" not in block:
+                        block_count += 1
+                        continue
+                new_content.append(block)
+            if block_count:
+                message = message.model_copy(update={"content": new_content})
+
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and "reasoning" in additional_kwargs:
+            additional_kwargs = dict(additional_kwargs)
+            del additional_kwargs["reasoning"]
+            kwarg_count = 1
+            message = message.model_copy(update={"additional_kwargs": additional_kwargs})
+
+        return message, block_count, kwarg_count
 
     def detect_tool_history_mismatch(
         self,

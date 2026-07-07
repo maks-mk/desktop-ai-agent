@@ -38,11 +38,18 @@ class StatusBarManager:
         )
 
     def set_primary_status_message(self, label: str) -> None:
-        self.window._primary_status_label = label
-        self.window._status_message_ticket += 1
+        text = str(label or "").strip()
+        status_bar = self.window.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(text)
 
     def show_transient_status_message(self, label: str, timeout_ms: int = 1800) -> None:
-        self.window._status_message_ticket += 1
+        text = str(label or "").strip()
+        if not text:
+            return
+        status_bar = self.window.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(text, max(0, int(timeout_ms)))
 
     def set_status_visual(self, label: str, *, busy: bool = False, success: bool = False, error: bool = False) -> None:
         color = ACCENT_BLUE if busy else SUCCESS_GREEN if success else ERROR_RED if error else ACCENT_BLUE

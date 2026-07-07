@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QActionGroup, QColor
+from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtGui import QActionGroup, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QCheckBox,
     QLabel,
     QMenu,
     QPushButton,
@@ -25,6 +26,7 @@ from ui.widgets import (
     ComposerTextEdit,
     ImageAttachmentStripWidget,
     InspectorPanelWidget,
+    PlanProgressPanelWidget,
     SessionSidebarWidget,
     SummaryProgressRing,
     TRANSCRIPT_MAX_WIDTH,
@@ -35,6 +37,42 @@ from ui.widgets import (
 COMPOSER_ATTACH_TOOLTIP = "Add images or insert file paths"
 COMPOSER_ADD_IMAGE_LABEL = "Add image…"
 COMPOSER_INSERT_FILE_PATH_LABEL = "Add files…"
+
+
+class PlanModeSwitch(QCheckBox):
+    def sizeHint(self) -> QSize:
+        return QSize(74, 30)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        track = QRectF(0.5, 6.5, 32.0, 17.0)
+        checked = self.isChecked()
+        enabled = self.isEnabled()
+        track_color = QColor("#5C5851" if checked else "#3A3732")
+        border_color = QColor("#A8A49E" if checked else "#514D46")
+        thumb_color = QColor("#ECEAE6" if enabled else "#524F4A")
+        text_color = QColor("#C9C5BE" if checked else "#9E9A94")
+        if not enabled:
+            track_color = QColor("#2F2D2A")
+            border_color = QColor("#38352F")
+            text_color = QColor("#524F4A")
+
+        painter.setPen(QPen(border_color, 1.0))
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track, 8.5, 8.5)
+
+        thumb_x = 17.0 if checked else 3.0
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(thumb_color)
+        painter.drawEllipse(QRectF(thumb_x, 9.0, 12.0, 12.0))
+
+        painter.setPen(text_color)
+        painter.drawText(QRectF(39.0, 0.0, 35.0, 30.0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        painter.end()
+
 
 
 @dataclass(frozen=True)
@@ -62,11 +100,13 @@ class WorkspaceBuildResult:
     model_image_badge: QLabel
     no_models_label: QLabel
     open_settings_inline_button: QPushButton
+    plan_mode_button: PlanModeSwitch
     summary_progress_ring: SummaryProgressRing
     send_button: QPushButton
     stop_action_button: QPushButton
     inspector_container: QFrame
     inspector_panel: InspectorPanelWidget
+    plan_progress_panel: PlanProgressPanelWidget
     overview_panel: QWidget
     tools_panel: QWidget
     help_text: QWidget
@@ -214,6 +254,17 @@ class WorkspaceBuilder:
         open_settings_inline_button.setFocusPolicy(Qt.NoFocus)
         control_row.addWidget(open_settings_inline_button, 0, Qt.AlignVCenter)
 
+        plan_mode_button = PlanModeSwitch("Plan")
+        plan_mode_button.setObjectName("ComposerPlanModeButton")
+        plan_mode_button.setChecked(False)
+        plan_mode_button.setFixedSize(74, 30)
+        plan_mode_button.setToolTip("Plan mode: the agent will analyse and propose a plan without making changes")
+        plan_mode_button.setAccessibleName("Plan mode toggle")
+        plan_mode_button.setAccessibleDescription("When enabled, the agent creates a plan using read-only tools and does not execute changes")
+        plan_mode_button.setCursor(Qt.PointingHandCursor)
+        plan_mode_button.setFocusPolicy(Qt.NoFocus)
+        control_row.addWidget(plan_mode_button, 0, Qt.AlignVCenter)
+
         control_row.addStretch(1)
 
         summary_progress_ring = SummaryProgressRing()
@@ -254,6 +305,10 @@ class WorkspaceBuilder:
         help_text = inspector_panel.help_text
         inspector_layout.addWidget(inspector_panel, 1)
 
+        plan_progress_panel = PlanProgressPanelWidget()
+        plan_progress_panel.setVisible(False)
+        inspector_layout.addWidget(plan_progress_panel, 1)
+
         splitter.addWidget(sidebar_container)
         splitter.addWidget(center_panel)
         splitter.addWidget(inspector_container)
@@ -287,11 +342,13 @@ class WorkspaceBuilder:
             model_image_badge=model_image_badge,
             no_models_label=no_models_label,
             open_settings_inline_button=open_settings_inline_button,
+            plan_mode_button=plan_mode_button,
             summary_progress_ring=summary_progress_ring,
             send_button=send_button,
             stop_action_button=stop_action_button,
             inspector_container=inspector_container,
             inspector_panel=inspector_panel,
+            plan_progress_panel=plan_progress_panel,
             overview_panel=overview_panel,
             tools_panel=tools_panel,
             help_text=help_text,

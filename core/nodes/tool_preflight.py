@@ -202,6 +202,23 @@ class ToolPreflightMixin:
         metadata = self._metadata_for_tool(tool_name)
         return metadata.read_only and not metadata.mutating and not metadata.destructive
 
+    def _tool_name_available_in_plan_mode(self, tool_name: str) -> bool:
+        normalized_name = self._normalize_tool_name(tool_name)
+        return (
+            normalized_name == "request_user_input"
+            or normalized_name == "cli_exec"
+            or self._tool_is_read_only(tool_name)
+        )
+
+    def _tool_call_allowed_in_plan_mode(self, tool_call: Dict[str, Any]) -> bool:
+        tool_name = str(tool_call.get("name") or "")
+        normalized_name = self._normalize_tool_name(tool_name)
+        if normalized_name == "request_user_input":
+            return True
+        if normalized_name == "cli_exec":
+            return self._effective_tool_metadata(tool_name, canonicalize_tool_args(tool_call.get("args"))).read_only
+        return self._tool_is_read_only(tool_name)
+
     def _effective_tool_metadata(self, tool_name: str, tool_args: Dict[str, Any] | None = None) -> ToolMetadata:
         metadata = self._metadata_for_tool(tool_name)
         if self._normalize_tool_name(tool_name) != "cli_exec":

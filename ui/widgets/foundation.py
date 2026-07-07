@@ -4,13 +4,14 @@ import json
 import os
 import re
 import time
+from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import qtawesome as qta
 from PySide6.QtCore import QMimeData, QRectF, QRegularExpression, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPixmap, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget
 
 from ui.theme import (
@@ -27,7 +28,6 @@ from ui.theme import (
     TEXT_PRIMARY,
 )
 
-FENCED_BLOCK_RE = re.compile(r"```([\w+-]*)\r?\n(.*?)```", re.DOTALL)
 DIFF_HUNK_HEADER_RE = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
 RENDERED_DIFF_LINE_RE = re.compile(r"^\s*\d*\s+\d*\s(?P<marker>[+\- ])\s")
 # Keep the transcript/composer column comfortably readable on wide displays.
@@ -160,7 +160,19 @@ class CopySafePlainTextEdit(QPlainTextEdit):
 
 def _fa_icon(name: str, *, color: str = TEXT_MUTED, size: int = 14, **kwargs: Any) -> QIcon:
     safe_size = max(8, int(size))
-    icon = qta.icon(name, color=color, **kwargs)
+    try:
+        icon = qta.icon(name, color=color, **kwargs)
+    except Exception:
+        pixmap = QPixmap(safe_size, safe_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        inset = max(2, safe_size // 5)
+        painter.drawEllipse(inset, inset, safe_size - (inset * 2), safe_size - (inset * 2))
+        painter.end()
+        return QIcon(pixmap)
     pixmap = icon.pixmap(safe_size, safe_size)
     if pixmap.isNull():
         return icon
@@ -487,6 +499,10 @@ class AutoTextBrowser(QTextBrowser):
             # A queued resize sync can fire after the Qt object was already deleted.
             return
         target_height = max(28, doc_height + 8)
+        max_auto_height = self.property("maxAutoHeight")
+        if isinstance(max_auto_height, int) and max_auto_height > 0:
+            target_height = min(target_height, max_auto_height)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded if doc_height + 8 > max_auto_height else Qt.ScrollBarAlwaysOff)
         if target_height == self._last_height:
             return
         self._last_height = target_height
@@ -501,16 +517,59 @@ class ElidedLabel(QLabel):
     def __init__(self, parent: QWidget | None = None, *, elide_mode: Qt.TextElideMode = Qt.ElideRight) -> None:
         super().__init__(parent)
         self._full_text = ""
+        self._rich_segments: list[tuple[str, str]] = []
         self._elide_mode = elide_mode
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
 
     def set_full_text(self, text: str) -> None:
         self._full_text = str(text or "")
+        self._rich_segments = []
+        self.setTextFormat(Qt.PlainText)
+        self._update_elided_text()
+
+    def set_rich_segments(self, segments: list[tuple[str, str]]) -> None:
+        self._rich_segments = [(str(text or ""), str(color or "")) for text, color in segments if str(text or "")]
+        self._full_text = "".join(text for text, _color in self._rich_segments)
+        self.setTextFormat(Qt.RichText if self._rich_segments else Qt.PlainText)
         self._update_elided_text()
 
     def full_text(self) -> str:
         return self._full_text
+
+    def _rich_text_for_visible_text(self, visible_text: str) -> str:
+        if not self._rich_segments:
+            return escape(visible_text)
+        ellipsis = ""
+        body = visible_text
+        if body.endswith("…"):
+            ellipsis = "…"
+            body = body[:-1]
+        remaining = len(body)
+        parts: list[str] = []
+        for segment_text, color in self._rich_segments:
+            if remaining <= 0:
+                break
+            piece = segment_text[:remaining]
+            remaining -= len(piece)
+            escaped = escape(piece)
+            if color:
+                parts.append(f'<span style="color:{escape(color, quote=True)};">{escaped}</span>')
+            else:
+                parts.append(escaped)
+        if ellipsis:
+            parts.append(escape(ellipsis))
+        return "".join(parts)
+
+    def _set_visible_text(self, visible_text: str) -> None:
+        if self._rich_segments:
+            super().setText(self._rich_text_for_visible_text(visible_text))
+            return
+        super().setText(visible_text)
+
+    def setFixedWidth(self, width: int) -> None:  # type: ignore[override]
+        super().setFixedWidth(width)
+        self._update_elided_text()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -522,13 +581,19 @@ class ElidedLabel(QLabel):
             super().setText("")
             self.setToolTip("")
             return
+        window = self.window()
+        has_explicit_width = self.minimumWidth() > 0 and self.minimumWidth() == self.maximumWidth()
+        if window is not None and not window.isVisible() and not has_explicit_width:
+            self._set_visible_text(text)
+            self.setToolTip("")
+            return
         available = max(0, self.contentsRect().width())
         if available <= 0:
-            super().setText("")
-            self.setToolTip(text)
+            self._set_visible_text(text)
+            self.setToolTip("")
             return
         elided = self.fontMetrics().elidedText(text, self._elide_mode, available)
-        super().setText(elided)
+        self._set_visible_text(elided)
         self.setToolTip(text if elided != text else "")
 
 
@@ -636,13 +701,13 @@ class CodeBlockWidget(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
 
-        self.title_label = QLabel(title)
+        self.title_label = QLabel(title, self)
         self.title_label.setObjectName("TranscriptMeta")
         self.title_label.setVisible(bool(title))
         title_row.addWidget(self.title_label, 0, Qt.AlignVCenter)
         title_row.addStretch(1)
 
-        self.copy_button = QToolButton()
+        self.copy_button = QToolButton(self)
         self.copy_button.setObjectName("CodeCopyButton")
         self.copy_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.copy_button.setCursor(Qt.PointingHandCursor)
@@ -653,7 +718,7 @@ class CodeBlockWidget(QWidget):
 
         layout.addLayout(title_row)
 
-        self.editor = CopySafePlainTextEdit()
+        self.editor = CopySafePlainTextEdit(self)
         self.editor.setObjectName("CodeView")
         self.editor.setReadOnly(True)
         self.editor.setFont(_make_mono_font())
@@ -694,8 +759,8 @@ class CodeBlockWidget(QWidget):
 
 
 class DiffBlockWidget(QFrame):
-    def __init__(self, diff_text: str, source_path: str = "") -> None:
-        super().__init__()
+    def __init__(self, diff_text: str, source_path: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("DiffPanel")
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -705,24 +770,26 @@ class DiffBlockWidget(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(10, 7, 10, 7)
+        self.header_row = QWidget(self)
+        self.header_row.setObjectName("DiffHeaderRow")
+        header_row = QHBoxLayout(self.header_row)
+        header_row.setContentsMargins(10, 7, 9, 7)
         header_row.setSpacing(8)
 
-        self.path_label = QLabel("diff")
+        self.path_label = QLabel("diff", self.header_row)
         self.path_label.setObjectName("DiffHeaderPath")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         header_row.addWidget(self.path_label, 1)
 
-        self.added_label = QLabel("+0")
+        self.added_label = QLabel("+0", self.header_row)
         self.added_label.setObjectName("DiffStatAdded")
         header_row.addWidget(self.added_label, 0, Qt.AlignVCenter)
 
-        self.removed_label = QLabel("-0")
+        self.removed_label = QLabel("-0", self.header_row)
         self.removed_label.setObjectName("DiffStatRemoved")
         header_row.addWidget(self.removed_label, 0, Qt.AlignVCenter)
 
-        self.copy_button = QToolButton()
+        self.copy_button = QToolButton(self.header_row)
         self.copy_button.setObjectName("CodeCopyButton")
         self.copy_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.copy_button.setCursor(Qt.PointingHandCursor)
@@ -730,9 +797,9 @@ class DiffBlockWidget(QFrame):
         self.copy_button.setIcon(_fa_icon("fa5s.copy", color=TEXT_MUTED, size=13))
         self.copy_button.clicked.connect(self._copy_diff)
         header_row.addWidget(self.copy_button, 0, Qt.AlignVCenter)
-        layout.addLayout(header_row)
+        layout.addWidget(self.header_row)
 
-        self.editor = CopySafePlainTextEdit()
+        self.editor = CopySafePlainTextEdit(self)
         self.editor.setObjectName("DiffCodeView")
         self.editor.setReadOnly(True)
         self.editor.setFont(_make_mono_font())
@@ -754,7 +821,7 @@ class DiffBlockWidget(QFrame):
         if self.editor.toPlainText() != display_text:
             self.editor.setPlainText(display_text)
         self.editor.setExtraSelections(_build_full_width_diff_selections(self.editor))
-        _sync_plain_text_height(self.editor, min_lines=3, max_lines=26, extra_padding=18)
+        _sync_plain_text_height(self.editor, min_lines=3, max_lines=22, extra_padding=16)
 
     def _copy_diff(self) -> None:
         QApplication.clipboard().setText(self._raw_diff)
@@ -775,12 +842,13 @@ class CollapsibleSection(QFrame):
         expanded: bool = False,
         indent: int = 0,
         content_margins: tuple[int, int, int, int] | None = None,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self.setObjectName("ToolExpandablePanel")
         self.setFrameShape(QFrame.NoFrame)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.toggle_button = QPushButton()
+        self.toggle_button = QPushButton(self)
         self.toggle_button.setObjectName("ToolExpandableToggle")
         self.toggle_button.setText(title)
         self.toggle_button.setCheckable(True)
@@ -792,7 +860,7 @@ class CollapsibleSection(QFrame):
         self._set_toggle_icon(expanded)
 
         self.content = content
-        self.content_container = QWidget()
+        self.content_container = QWidget(self)
         self.content_container.setObjectName("ToolExpandableContent")
         self.content_container.setAttribute(Qt.WA_StyledBackground, True)
         content_layout = QHBoxLayout(self.content_container)
@@ -824,6 +892,3 @@ class CollapsibleSection(QFrame):
             self.toggle_button.blockSignals(False)
         self._set_toggle_icon(expanded)
         self.content_container.setVisible(expanded)
-
-
-

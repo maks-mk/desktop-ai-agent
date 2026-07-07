@@ -17,12 +17,123 @@ from core.turn_outcomes import (
 
 _GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY = "__gemini_function_call_thought_signatures__"
 
+_PLAN_APPROVAL_KEYWORDS = frozenset({
+    "реализовать", "отказаться", "правки", "дополнения",
+    "implement", "reject", "revise", "approve", "execute", "decline",
+})
+_PLAN_MIN_CONTENT_LENGTH = 50
+
 
 class AgentMixin:
     """Agent node facade and result-building helpers."""
 
     async def agent_node(self, state: AgentState):
         return await self.agent_turn.run(state)
+
+    def _normalized_allowed_tool_name_set(self, allowed_tool_names: List[str] | None) -> set[str]:
+        return {self._normalize_tool_name(name) for name in (allowed_tool_names or [])}
+
+    def _build_protocol_issue(
+        self,
+        *,
+        current_turn_id: int,
+        summary: str,
+        reason: str,
+        source: str,
+        tool_names: List[str] | None = None,
+        tool_args: Dict[str, Any] | None = None,
+        details: Dict[str, Any] | None = None,
+        response_preview: str = "",
+    ) -> Dict[str, Any]:
+        return self._build_protocol_open_tool_issue(
+            current_turn_id=current_turn_id,
+            summary=summary,
+            reason=reason,
+            source=source,
+            tool_names=tool_names,
+            tool_args=tool_args,
+            details=details,
+            response_preview=response_preview,
+        )
+
+    def _new_ai_message_with_tool_calls(self, response: AIMessage, tool_calls: List[Dict[str, Any]]) -> AIMessage:
+        return response.model_copy(update={"tool_calls": tool_calls})
+
+    def _new_ai_message_without_tool_calls(self, response: AIMessage, content: Any) -> AIMessage:
+        return AIMessage(
+            content=content,
+            additional_kwargs=response.additional_kwargs,
+            response_metadata=response.response_metadata,
+            usage_metadata=response.usage_metadata,
+            id=response.id,
+        )
+
+    def _new_ai_message_with_content_and_tool_calls(
+        self, response: AIMessage, content: Any, tool_calls: List[Dict[str, Any]]
+    ) -> AIMessage:
+        return response.model_copy(update={"content": content, "tool_calls": tool_calls})
+
+    def _plan_approval_tool_call(self, turn_id: int) -> Dict[str, Any]:
+        return {
+            "name": "request_user_input",
+            "args": {
+                "question": "Что сделать с этим планом?",
+                "options": [
+                    "Да, реализовать",
+                    "Нет, отказаться от реализации",
+                    "Внести правки/дополнения в план",
+                ],
+                "recommended": "Да, реализовать",
+                "choice_type": "plan_approval",
+            },
+            "id": f"planapproval-{max(0, int(turn_id or 0))}",
+        }
+
+    def _plan_approval_allowed(self, allowed_tool_names: List[str] | None) -> bool:
+        if allowed_tool_names is None:
+            return True
+        allowed = self._normalized_allowed_tool_name_set(allowed_tool_names)
+        return "request_user_input" in allowed
+
+    def _is_plan_approval_request(self, tool_call: Dict[str, Any]) -> bool:
+        """Check whether request_user_input is asking to approve the implementation plan."""
+        if self._normalize_tool_name(tool_call.get("name") or "") != "request_user_input":
+            return False
+        args = canonicalize_tool_args(tool_call.get("args"))
+        if not isinstance(args, dict):
+            return False
+        choice_type = str(args.get("choice_type") or "").strip().lower()
+        if choice_type:
+            return choice_type == "plan_approval"
+
+        # Backward-compatible fallback for older persisted tool calls/prompts.
+        options = args.get("options") or []
+        if not isinstance(options, list) or not options:
+            return False
+        options_text = " ".join(str(o).lower() for o in options)
+        return any(kw in options_text for kw in _PLAN_APPROVAL_KEYWORDS)
+
+    def _build_agent_protocol_issue(
+        self,
+        *,
+        current_turn_id: int,
+        summary: str,
+        reason: str,
+        tool_names: List[str] | None = None,
+        tool_args: Dict[str, Any] | None = None,
+        details: Dict[str, Any] | None = None,
+        response_preview: str = "",
+    ) -> Dict[str, Any]:
+        return self._build_protocol_issue(
+            current_turn_id=current_turn_id,
+            summary=summary,
+            reason=reason,
+            source="agent",
+            tool_names=tool_names,
+            tool_args=tool_args,
+            details=details,
+            response_preview=response_preview,
+        )
 
     def _ensure_gemini_tool_call_signatures(
         self,
@@ -62,6 +173,8 @@ class AgentMixin:
         open_tool_issue: Dict[str, Any] | None = None,
         recovery_state: Dict[str, Any] | None = None,
         allowed_tool_names: List[str] | None = None,
+        plan_mode: bool = False,
+        legacy_plan_approval: bool = True,
     ) -> Dict[str, Any]:
         token_usage_update = {}
         if getattr(response, "usage_metadata", None):
@@ -76,20 +189,27 @@ class AgentMixin:
             t_calls = list(getattr(response, "tool_calls", []))
             invalid_calls = list(getattr(response, "invalid_tool_calls", []))
             retry_user_input_turn = False
+            if not tools_available and t_calls and not any(
+                self._normalize_tool_name(tool_call.get("name") or "") == "request_user_input"
+                for tool_call in t_calls
+            ):
+                t_calls = []
+                response = self._new_ai_message_without_tool_calls(response, response.content)
+
 
             if tools_available and not t_calls and not invalid_calls:
                 recovered_tool_calls = extract_text_tool_calls(
                     stringify_content(response.content),
+
                     allowed_tool_names=allowed_tool_names or self._all_tool_names,
                     id_prefix=f"txttc{max(0, int(turn_id or 0)) % 100:02d}",
                 )
                 if recovered_tool_calls.tool_calls:
                     if bool(getattr(self.config, "enable_text_tool_call_recovery", False)):
-                        response = response.model_copy(
-                            update={
-                                "content": recovered_tool_calls.cleaned_text or "I will use the requested tool.",
-                                "tool_calls": recovered_tool_calls.tool_calls,
-                            }
+                        response = self._new_ai_message_with_content_and_tool_calls(
+                            response,
+                            recovered_tool_calls.cleaned_text or "I will use the requested tool.",
+                            recovered_tool_calls.tool_calls,
                         )
                         t_calls = list(recovered_tool_calls.tool_calls)
                     else:
@@ -104,17 +224,17 @@ class AgentMixin:
                             "a structured tool_calls payload. Textual tool-call recovery is disabled. If a tool is "
                             "still needed, retry with a fresh structured tool call only."
                         )
-                        protocol_issue = self._build_protocol_open_tool_issue(
+                        protocol_issue = self._build_agent_protocol_issue(
                             current_turn_id=turn_id,
                             summary=protocol_error,
                             reason="textual_tool_call_disabled",
-                            source="agent",
                             tool_names=tool_names,
                             tool_args=first_args,
                             details={"recovered_textual_tool_call_count": len(recovered_tool_calls.tool_calls)},
                             response_preview=stringify_content(response.content),
                         )
-                        response = response.model_copy(update={"content": protocol_error, "tool_calls": []})
+
+                        response = self._new_ai_message_without_tool_calls(response, protocol_error)
 
             missing_fields = [
                 tc for tc in t_calls
@@ -133,11 +253,10 @@ class AgentMixin:
                     if parsed_args:
                         first_args = parsed_args
                         break
-                protocol_issue = self._build_protocol_open_tool_issue(
+                protocol_issue = self._build_agent_protocol_issue(
                     current_turn_id=turn_id,
                     summary=protocol_error,
                     reason="tool_protocol_error",
-                    source="agent",
                     tool_names=tool_names,
                     tool_args=first_args,
                     details={
@@ -146,12 +265,10 @@ class AgentMixin:
                     },
                     response_preview=str(response.content),
                 )
-                response = AIMessage(
-                    content=self._merge_protocol_error_into_content(response.content, protocol_error),
-                    additional_kwargs=response.additional_kwargs,
-                    response_metadata=response.response_metadata,
-                    usage_metadata=response.usage_metadata,
-                    id=response.id,
+
+                response = self._new_ai_message_without_tool_calls(
+                    response,
+                    self._merge_protocol_error_into_content(response.content, protocol_error),
                 )
                 t_calls = []
             else:
@@ -162,7 +279,44 @@ class AgentMixin:
                 ) = self._sanitize_user_input_tool_calls(
                     t_calls,
                     messages,
+                    plan_mode=plan_mode,
                 )
+                if plan_mode:
+                    # Keep request_user_input (at most 1, already enforced by
+                    # sanitize) and read-only inspection calls. Mutating tools
+                    # are dropped here and again by _filter_tool_calls_for_turn.
+                    t_calls = [
+                        tool_call
+                        for tool_call in t_calls
+                        if self._normalize_tool_name(tool_call.get("name") or "") == "request_user_input"
+                        or self._tool_call_allowed_in_plan_mode(tool_call)
+                    ]
+
+                    response = self._new_ai_message_with_tool_calls(response, t_calls)
+                    if t_calls and self._is_plan_approval_request(t_calls[0]):
+                        content_text = stringify_content(response.content).strip()
+                        if len(content_text) < _PLAN_MIN_CONTENT_LENGTH:
+                            plan_guard_error = (
+                                "INTERNAL TOOL PROTOCOL ERROR: You called request_user_input for plan approval "
+                                "but did not write the plan in your response message content. "
+                                "You MUST write the complete plan as visible text BEFORE asking the user to approve it. "
+                                "Retry now: output the full plan text, then call request_user_input for approval."
+                            )
+                            protocol_error = self._merge_protocol_error_text(
+                                protocol_error,
+                                plan_guard_error,
+                            )
+                            protocol_issue = self._build_agent_protocol_issue(
+                                current_turn_id=turn_id,
+                                summary=plan_guard_error,
+                                reason="plan_approval_without_plan_text",
+                                tool_names=["request_user_input"],
+                                tool_args=canonicalize_tool_args(t_calls[0].get("args")),
+                                details={"content_length": len(content_text)},
+                                response_preview=content_text,
+                            )
+                            t_calls = []
+                            response = self._new_ai_message_without_tool_calls(response, plan_guard_error)
                 original_tool_calls = list(t_calls)
                 t_calls = self._filter_tool_calls_for_turn(
                     t_calls,
@@ -173,43 +327,56 @@ class AgentMixin:
                         protocol_error,
                         user_input_protocol_error,
                     )
-                    response = response.model_copy(update={"tool_calls": t_calls})
+                    response = self._new_ai_message_with_tool_calls(response, t_calls)
                 filtered_out_count = len(original_tool_calls) - len(t_calls)
                 if filtered_out_count:
+                    allowed_tool_name_set = self._normalized_allowed_tool_name_set(allowed_tool_names)
                     dropped_names = [
                         str(tool_call.get("name") or "").strip()
                         for tool_call in original_tool_calls
-                        if self._normalize_tool_name(tool_call.get("name") or "") not in {
-                            self._normalize_tool_name(name) for name in (allowed_tool_names or [])
-                        }
+                        if self._normalize_tool_name(tool_call.get("name") or "") not in allowed_tool_name_set
                     ]
+
                     dropped_error = (
                         "INTERNAL TOOL PROTOCOL ERROR: model requested tool(s) that are not available in the current turn. "
                         "Issue a fresh valid tool call using only allowed tools."
                     )
                     protocol_error = self._merge_protocol_error_text(protocol_error, dropped_error)
                     if not t_calls:
-                        protocol_issue = self._build_protocol_open_tool_issue(
+                        protocol_issue = self._build_agent_protocol_issue(
                             current_turn_id=turn_id,
                             summary=dropped_error,
                             reason="tool_not_allowed_for_turn",
-                            source="agent",
                             tool_names=dropped_names,
                             tool_args={},
                             details={"allowed_tool_names": list(allowed_tool_names or [])},
                             response_preview=str(response.content),
                         )
-                    response = response.model_copy(update={"tool_calls": t_calls})
+
+                    response = self._new_ai_message_with_tool_calls(response, t_calls)
 
             response = self._ensure_gemini_tool_call_signatures(response, t_calls)
+
+            if (
+                plan_mode
+                and legacy_plan_approval
+                and tools_available
+                and not t_calls
+                and not protocol_issue
+                and not retry_user_input_turn
+                and self._plan_approval_allowed(allowed_tool_names)
+                and not self._current_turn_has_user_input_request(messages)
+            ):
+                t_calls = [self._plan_approval_tool_call(turn_id)]
+                response = self._new_ai_message_with_tool_calls(response, t_calls)
+
             has_tool_calls = bool(tools_available and t_calls)
+
             if has_tool_calls and open_tool_issue and open_tool_issue.get("kind") == "approval_denied":
-                response = AIMessage(
-                    content="Okay, I did not do that because you declined the action. Tell me what you want to do instead.",
-                    additional_kwargs=response.additional_kwargs,
-                    response_metadata=response.response_metadata,
-                    usage_metadata=response.usage_metadata,
-                    id=response.id,
+                response = self._new_ai_message_without_tool_calls(
+
+                    response,
+                    "Okay, I did not do that because you declined the action. Tell me what you want to do instead.",
                 )
                 has_tool_calls = False
 

@@ -55,6 +55,11 @@ REASONING_FIELD_HINTS = frozenset(
     }
 )
 
+STRUCTURED_OUTPUT_PARSED_EXCLUDE = {
+    "parsed": True,
+    "choices": {"__all__": {"message": {"parsed"}}},
+}
+
 
 def reasoning_debug_enabled() -> bool:
     return bool(logger.isEnabledFor(logging.DEBUG) and not logger.disabled)
@@ -132,9 +137,16 @@ def _json_safe(value: Any, *, depth: int) -> Any:
         return [_json_safe(item, depth=depth - 1) for item in value]
     if hasattr(value, "model_dump"):
         try:
-            return _json_safe(value.model_dump(mode="json"), depth=depth - 1)
+            dumped = value.model_dump(mode="json", exclude=STRUCTURED_OUTPUT_PARSED_EXCLUDE)
+        except TypeError:
+            try:
+                dumped = value.model_dump(mode="json")
+            except Exception:
+                dumped = None
         except Exception:
-            pass
+            dumped = None
+        if dumped is not None:
+            return _json_safe(dumped, depth=depth - 1)
     if hasattr(value, "dict"):
         try:
             return _json_safe(value.dict(), depth=depth - 1)

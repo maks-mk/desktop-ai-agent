@@ -28,6 +28,7 @@ from core.multimodal import (
 )
 from core.model_profiles import ModelProfileStore
 from core.nodes import AgentNodes
+from core.planning import RuntimePlanDraft
 from core.run_logger import JsonlRunLogger
 from core.session_store import SessionSnapshot, SessionStore
 from core.state import AgentState
@@ -95,6 +96,25 @@ class FakeBindableLLM(FakeLLM):
     def bind_tools(self, tools):
         self.bound_tool_name_batches.append([tool.name for tool in tools])
         return self
+
+
+class FakeStructuredPlanLLM(FakeBindableLLM):
+    def __init__(self, responses, structured_response):
+        super().__init__(responses)
+        self.structured_response = structured_response
+        self.structured_invocations = []
+        self.structured_bind_kwargs = []
+
+    def with_structured_output(self, schema, **kwargs):
+        self.structured_bind_kwargs.append(kwargs)
+        parent = self
+
+        class _Structured:
+            async def ainvoke(self, context):
+                parent.structured_invocations.append((schema, context))
+                return parent.structured_response
+
+        return _Structured()
 
 
 class FailingBindableLLM(FakeLLM):
@@ -193,6 +213,188 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             "last_tool_error": "",
             "last_tool_result": "",
         }
+
+    async def test_plan_graph_interrupt_resume_uses_checkpoint_without_rebuilding_plan(self):
+        config = self._make_config()
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a small change",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect files",
+                        "description": "Read relevant files before editing.",
+                        "status": "pending",
+                    },
+                    {
+                        "id": "apply",
+                        "title": "Apply change",
+                        "description": "Make the required code update.",
+                        "status": "pending",
+                    },
+                ],
+                "risks": ["Regression risk"],
+                "assumptions": ["Task is clear"],
+                "verification": ["Run focused tests"],
+                "estimated_tools": ["read_file", "edit_file"],
+                "estimated_files": ["core/example.py"],
+                "complexity": "medium",
+            }
+        )
+        self.assertEqual(draft.verification, ["Run focused tests"])
+        llm = FakeStructuredPlanLLM(
+            [
+                AIMessage(content="Research complete. Ready to build a runtime plan."),
+                AIMessage(content="Inspect files complete.\n<!--plan-step-complete:inspect-->"),
+                AIMessage(content="Apply change complete.\n<!--plan-step-complete:apply-->"),
+            ],
+            draft,
+        )
+        nodes = AgentNodes(
+            config=config,
+            llm=llm,
+            tools=[],
+            llm_with_tools=llm,
+            tool_metadata={},
+        )
+        app = create_agent_workflow(nodes, config, tools_enabled=False).compile(checkpointer=MemorySaver())
+        thread_config = {"configurable": {"thread_id": "plan-graph-resume"}, "recursion_limit": 64}
+        state = self._initial_state("Implement feature")
+        state["turn_mode"] = "plan"
+        state["plan_status"] = "draft"
+        state["current_plan"] = None
+        state["plan_graph_active"] = True
+
+        interrupted = await app.ainvoke(state, config=thread_config)
+
+        self.assertIn("__interrupt__", interrupted)
+        self.assertEqual(len(llm.structured_invocations), 1)
+        self.assertEqual(llm.structured_bind_kwargs, [{"method": "function_calling"}])
+        interrupt_payload = interrupted["__interrupt__"][0].value
+        self.assertEqual(interrupt_payload["choice_type"], "plan_review")
+        self.assertEqual([option["key"] for option in interrupt_payload["options"]], ["implement", "revise", "rebuild", "cancel"])
+        checkpoint_state = app.get_state(thread_config).values
+        self.assertEqual(checkpoint_state["plan_status"], "pending_approval")
+        self.assertEqual(checkpoint_state["current_plan"]["status"], "pending_approval")
+        self.assertEqual(
+            [type(message).__name__ for message in checkpoint_state.get("messages", [])],
+            ["HumanMessage", "AIMessage"],
+        )
+        self.assertEqual(
+            checkpoint_state["messages"][-1].content,
+            "Research complete. Ready to build a runtime plan.",
+        )
+
+        resumed = await app.ainvoke(Command(resume={"choice": "implement"}), config=thread_config)
+
+        self.assertEqual(len(llm.structured_invocations), 1)
+        self.assertEqual(resumed["plan_status"], "completed")
+        self.assertEqual(resumed["active_plan_step_id"], "")
+        steps = resumed["current_plan"]["steps"]
+        self.assertEqual([step["status"] for step in steps], ["completed", "completed"])
+
+    async def test_plan_execution_does_not_advance_without_completion_marker(self):
+        config = self._make_config()
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a small change",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect files",
+                        "description": "Read relevant files before editing.",
+                        "status": "pending",
+                    }
+                ],
+                "risks": [],
+                "assumptions": [],
+                "verification": [],
+                "estimated_tools": [],
+                "estimated_files": [],
+                "complexity": "low",
+            }
+        )
+        llm = FakeStructuredPlanLLM(
+            [
+                AIMessage(content="Research complete."),
+                AIMessage(content="I inspected part of it, but more remains."),
+            ],
+            draft,
+        )
+        nodes = AgentNodes(
+            config=config,
+            llm=llm,
+            tools=[],
+            llm_with_tools=llm,
+            tool_metadata={},
+        )
+        app = create_agent_workflow(nodes, config, tools_enabled=False).compile(checkpointer=MemorySaver())
+        thread_config = {"configurable": {"thread_id": "plan-no-marker"}, "recursion_limit": 64}
+        state = self._initial_state("Implement feature")
+        state["turn_mode"] = "plan"
+        state["plan_status"] = "draft"
+        state["current_plan"] = None
+        state["plan_graph_active"] = True
+
+        interrupted = await app.ainvoke(state, config=thread_config)
+        self.assertIn("__interrupt__", interrupted)
+
+        resumed = await app.ainvoke(Command(resume={"choice": "implement"}), config=thread_config)
+
+        self.assertEqual(resumed["plan_status"], "executing")
+        self.assertEqual(resumed["active_plan_step_id"], "inspect")
+        self.assertEqual(resumed["current_plan"]["steps"][0]["status"], "in_progress")
+
+    async def test_plan_revision_input_reasks_for_blank_feedback(self):
+        config = self._make_config()
+        draft = RuntimePlanDraft.model_validate(
+            {
+                "summary": "Implement a small change",
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "title": "Inspect files",
+                        "description": "Read relevant files before editing.",
+                        "status": "pending",
+                    }
+                ],
+                "risks": [],
+                "assumptions": [],
+                "verification": ["Run unit tests"],
+                "estimated_tools": [],
+                "estimated_files": [],
+                "complexity": "low",
+            }
+        )
+        llm = FakeStructuredPlanLLM([AIMessage(content="Research complete.")], draft)
+        nodes = AgentNodes(
+            config=config,
+            llm=llm,
+            tools=[],
+            llm_with_tools=llm,
+            tool_metadata={},
+        )
+        app = create_agent_workflow(nodes, config, tools_enabled=False).compile(checkpointer=MemorySaver())
+        thread_config = {"configurable": {"thread_id": "plan-revision-blank-feedback"}, "recursion_limit": 64}
+        state = self._initial_state("Implement feature")
+        state["turn_mode"] = "plan"
+        state["plan_status"] = "draft"
+        state["plan_graph_active"] = True
+
+        interrupted = await app.ainvoke(state, config=thread_config)
+        self.assertEqual(interrupted["__interrupt__"][0].value["choice_type"], "plan_review")
+
+        revision_prompt = await app.ainvoke(Command(resume={"choice": "revise"}), config=thread_config)
+        self.assertEqual(revision_prompt["__interrupt__"][0].value["choice_type"], "plan_revision")
+
+        repeated_prompt = await app.ainvoke(Command(resume={"feedback": "   \n\t"}), config=thread_config)
+
+        self.assertEqual(repeated_prompt["__interrupt__"][0].value["choice_type"], "plan_revision")
+        self.assertIn("Пустые замечания", repeated_prompt["__interrupt__"][0].value["reason"])
+        checkpoint_state = app.get_state(thread_config).values
+        self.assertEqual(checkpoint_state.get("plan_status"), "needs_changes")
+        self.assertEqual(checkpoint_state.get("plan_feedback", ""), "")
+        self.assertEqual(len(llm.structured_invocations), 1)
 
     def test_model_capabilities_normalize_profile_variants(self):
         self.assertEqual(normalize_model_capabilities(None), {"image_input_supported": False})
@@ -902,6 +1104,16 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         await registry.cleanup()
         fake_client.aclose.assert_awaited_once()
 
+    async def test_register_llm_cleanup_callback_closes_root_async_client(self):
+        registry = ToolRegistry(self._make_config())
+        fake_client = mock.AsyncMock()
+        fake_llm = SimpleNamespace(root_async_client=fake_client)
+
+        self.assertTrue(_register_llm_cleanup_callback(registry, fake_llm))
+
+        await registry.cleanup()
+        fake_client.aclose.assert_awaited_once()
+
     async def test_rotating_chat_model_reuses_cached_model_and_closes_clients(self):
         tmp = Path.cwd() / ".tmp_tests" / uuid4().hex
         tmp.mkdir(parents=True, exist_ok=True)
@@ -1098,7 +1310,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["reasoning_effort"], "medium")
         self.assertNotIn("extra_body", captured)
 
-    def test_create_llm_for_nvidia_reasoning_model_uses_registry_reasoning_effort(self):
+    def test_create_llm_for_nvidia_reasoning_model_uses_registry_thinking_kwargs(self):
         captured = {}
 
         class FakeChatOpenAI:
@@ -1117,8 +1329,11 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertNotIn("reasoning", captured)
-        self.assertNotIn("extra_body", captured)
-        self.assertEqual(captured["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", captured)
+        self.assertEqual(
+            captured["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": "true", "clear_thinking": False}},
+        )
 
     def test_create_llm_for_fireworks_reasoning_model_uses_registry_reasoning_effort(self):
         captured = {}
@@ -4127,8 +4342,171 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
         run_mock.assert_called()
 
+    async def test_start_run_async_awaits_plan_checkpoint_merge_before_graph_payload(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker._reset_live_summary_progress_from_state = mock.AsyncMock()
+        worker._repair_current_session_if_needed = mock.AsyncMock(return_value=[])
+        worker._merge_plan_checkpoint_into_initial_state = mock.AsyncMock(
+            side_effect=lambda initial_state: initial_state
+        )
+        captured_calls = []
+
+        async def fake_run_graph_payload(payload, **kwargs):
+            captured_calls.append((payload, kwargs))
+
+        worker._run_graph_payload = fake_run_graph_payload
+
+        await worker._start_run_async("hello")
+
+        worker._merge_plan_checkpoint_into_initial_state.assert_awaited_once()
+        self.assertEqual(len(captured_calls), 1)
+        self.assertIsInstance(captured_calls[0][0], dict)
+        self.assertEqual(captured_calls[0][0]["current_task"], "hello")
+        self.assertFalse(captured_calls[0][1]["plan_execution_hint"])
+
+    async def test_start_run_async_marks_checkpointed_active_plan_for_live_streaming(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        active_plan = {
+            "id": "plan-1",
+            "status": "executing",
+            "active_step_id": "s1",
+            "steps": [{"id": "s1", "title": "Edit", "status": "in_progress"}],
+        }
+        worker._reset_live_summary_progress_from_state = mock.AsyncMock()
+        worker._repair_current_session_if_needed = mock.AsyncMock(return_value=[])
+        worker._merge_plan_checkpoint_into_initial_state = mock.AsyncMock(
+            side_effect=lambda initial_state: {
+                **initial_state,
+                "plan_graph_active": True,
+                "plan_status": "executing",
+                "current_plan": active_plan,
+                "active_plan_step_id": "s1",
+            }
+        )
+        captured_calls = []
+
+        async def fake_run_graph_payload(payload, **kwargs):
+            captured_calls.append((payload, kwargs))
+
+        worker._run_graph_payload = fake_run_graph_payload
+
+        await worker._start_run_async("продолжай")
+
+        self.assertEqual(len(captured_calls), 1)
+        self.assertTrue(captured_calls[0][1]["plan_execution_hint"])
+
+    async def test_run_graph_payload_passes_active_plan_hint_to_stream_processor(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.agent_app = type(
+            "DummyApp",
+            (),
+            {"astream": lambda self, *_args, **_kwargs: object()},
+        )()
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config()
+        worker._set_busy(True)
+        processor_kwargs = []
+        original_init = StreamProcessor.__init__
+
+        def capture_init(processor, *args, **kwargs):
+            processor_kwargs.append(dict(kwargs))
+            original_init(processor, *args, **kwargs)
+
+        with (
+            mock.patch.object(StreamProcessor, "__init__", new=capture_init),
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    return_value=StreamProcessResult(
+                        stats="0.5s   In: 10   Out: 2",
+                        elapsed_seconds=0.5,
+                    )
+                ),
+            ),
+            mock.patch.object(worker, "_repair_current_session_if_needed", new=mock.AsyncMock(return_value=[])),
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock(return_value={})),
+        ):
+            await worker._run_graph_payload(Command(resume={"choice_type": "plan_review", "choice": "implement"}), plan_execution_hint=True)
+
+        self.assertTrue(processor_kwargs)
+        self.assertTrue(processor_kwargs[0]["plan_execution_active"])
+
+    async def test_reject_active_plan_before_stop_updates_durable_state(self):
+        worker = gui_runtime.AgentRunWorker()
+        worker.config = AgentConfig()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        plan = {
+            "id": "plan-1",
+            "status": "executing",
+            "active_step_id": "s1",
+            "steps": [{"id": "s1", "title": "Edit", "status": "in_progress"}],
+        }
+        update_calls = []
+
+        class FakeApp:
+            async def aget_state(self, _config):
+                return SimpleNamespace(values={"plan_status": "executing", "current_plan": plan})
+
+            async def aupdate_state(self, config, update, as_node=None):
+                update_calls.append({"config": config, "update": update, "as_node": as_node})
+
+        events = []
+        worker.agent_app = FakeApp()
+        worker._log_ui_run_event = mock.Mock()
+        worker.event_emitted = SimpleNamespace(emit=events.append)
+
+        await worker._reject_active_plan_before_stop()
+
+        self.assertEqual(len(update_calls), 1)
+        self.assertEqual(update_calls[0]["as_node"], "plan_cancel")
+        update = update_calls[0]["update"]
+        self.assertEqual(update["plan_status"], "rejected")
+        self.assertEqual(update["active_plan_step_id"], "")
+        self.assertEqual(update["turn_mode"], "chat")
+        self.assertEqual(update["current_plan"]["status"], "rejected")
+        self.assertEqual(update["current_plan"]["active_step_id"], "")
+        self.assertEqual(events[-1].type, "plan_progress")
+        self.assertEqual(events[-1].payload["status"], "rejected")
+
     async def test_run_graph_payload_with_image_failure_emits_friendly_notice(self):
         worker = gui_runtime.AgentRunWorker()
+
         worker.agent_app = type(
             "FailingApp",
             (),
@@ -4226,7 +4604,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             updated_at="2026-01-01T00:00:00+00:00",
             project_path=str(Path.cwd()),
         )
-        worker.config = self._make_config(MAX_RETRIES=3)
+        worker.config = self._make_config(MAX_RETRIES=3, RETRY_DELAY=0)
         worker._set_busy(True)
         events = []
         worker.event_emitted.connect(events.append)
@@ -4296,7 +4674,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
             updated_at="2026-01-01T00:00:00+00:00",
             project_path=str(Path.cwd()),
         )
-        worker.config = self._make_config(MAX_RETRIES=3)
+        worker.config = self._make_config(MAX_RETRIES=3, RETRY_DELAY=0)
         worker._set_busy(True)
         events = []
         worker.event_emitted.connect(events.append)
@@ -4385,6 +4763,116 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         result = process_tools.stop_background_process.invoke({"pid": os.getpid()})
         self.assertIn("ACCESS_DENIED", result)
 
+    def test_classify_stream_error_rate_limit(self):
+        info = gui_runtime.AgentRunWorker._classify_stream_error("Error: 429 Too Many Requests")
+        self.assertEqual(info["kind"], "rate_limit")
+        self.assertTrue(info["retryable"])
+
+    def test_classify_stream_error_timeout(self):
+        info = gui_runtime.AgentRunWorker._classify_stream_error("Request timed out after 30s")
+        self.assertEqual(info["kind"], "timeout")
+        self.assertTrue(info["retryable"])
+
+    def test_classify_stream_error_server_error(self):
+        info = gui_runtime.AgentRunWorker._classify_stream_error("503 Service Unavailable")
+        self.assertEqual(info["kind"], "server_error")
+        self.assertTrue(info["retryable"])
+
+    def test_classify_stream_error_network(self):
+        info = gui_runtime.AgentRunWorker._classify_stream_error("Connection reset by peer")
+        self.assertEqual(info["kind"], "network")
+        self.assertTrue(info["retryable"])
+
+    def test_classify_stream_error_unknown(self):
+        info = gui_runtime.AgentRunWorker._classify_stream_error("Something unexpected happened")
+        self.assertEqual(info["kind"], "unknown")
+        self.assertTrue(info["retryable"])
+
+    def test_stream_retry_backoff_increases_with_attempts(self):
+        """Backoff should increase exponentially across attempts."""
+        delay_0 = gui_runtime.AgentRunWorker._stream_retry_backoff(0, 2.0, "network")
+        delay_1 = gui_runtime.AgentRunWorker._stream_retry_backoff(1, 2.0, "network")
+        delay_2 = gui_runtime.AgentRunWorker._stream_retry_backoff(2, 2.0, "network")
+        # Base component (without jitter) should be 2, 4, 8
+        self.assertGreater(delay_0, 0)
+        self.assertGreater(delay_1, delay_0 - 2)  # account for jitter range
+        self.assertGreater(delay_2, delay_1 - 4)
+
+    def test_stream_retry_backoff_rate_limit_uses_longer_base(self):
+        """Rate-limit errors should produce longer backoff than network errors."""
+        network_delay = gui_runtime.AgentRunWorker._stream_retry_backoff(0, 2.0, "network")
+        rate_limit_delay = gui_runtime.AgentRunWorker._stream_retry_backoff(0, 2.0, "rate_limit")
+        # rate_limit base = 2.0 * 1.5 = 3.0, network base = 2.0
+        # With jitter [0, base], rate_limit minimum = 3.0, network maximum = 4.0
+        # So we check the base component: rate_limit should be at least 1.5x on average
+        # More robust: check multiple samples
+        network_samples = [gui_runtime.AgentRunWorker._stream_retry_backoff(0, 2.0, "network") for _ in range(100)]
+        rate_limit_samples = [gui_runtime.AgentRunWorker._stream_retry_backoff(0, 2.0, "rate_limit") for _ in range(100)]
+        self.assertGreater(sum(rate_limit_samples) / len(rate_limit_samples),
+                           sum(network_samples) / len(network_samples))
+
+    async def test_run_graph_payload_includes_backoff_and_error_kind_in_log(self):
+        """Verify that backoff_seconds and error_kind are logged during stream repair."""
+        worker = gui_runtime.AgentRunWorker()
+
+        class DummyApp:
+            def __init__(self):
+                self.inputs = []
+
+            def astream(self, payload, *_args, **_kwargs):
+                self.inputs.append(payload)
+                return object()
+
+        dummy_app = DummyApp()
+        worker.agent_app = dummy_app
+        worker.store = mock.Mock()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="sqlite",
+            checkpoint_target="demo.sqlite",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker.config = self._make_config(MAX_RETRIES=3, RETRY_DELAY=0)
+        worker._set_busy(True)
+        logged_events = []
+        worker._log_ui_run_event = lambda event_type, **kwargs: logged_events.append((event_type, kwargs))
+
+        with (
+            mock.patch.object(
+                StreamProcessor,
+                "process_stream",
+                new=mock.AsyncMock(
+                    side_effect=[
+                        StreamProcessResult(
+                            stats=None,
+                            failed=True,
+                            error_message="429 Too Many Requests",
+                            elapsed_seconds=0.5,
+                        ),
+                        StreamProcessResult(
+                            stats="1.0s   In: 10   Out: 2",
+                            elapsed_seconds=1.0,
+                        ),
+                    ]
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "_repair_current_session_if_needed",
+                new=mock.AsyncMock(side_effect=[["repaired missing tool output"], []]),
+            ),
+            mock.patch.object(worker, "_emit_session_payload", new=mock.AsyncMock()),
+        ):
+            await worker._run_graph_payload({"messages": []})
+
+        repair_logs = [kwargs for et, kwargs in logged_events if et == "run_auto_continued_after_stream_repair"]
+        self.assertTrue(len(repair_logs) >= 1)
+        self.assertEqual(repair_logs[0]["error_kind"], "rate_limit")
+        self.assertIn("backoff_seconds", repair_logs[0])
+
     def test_stream_processor_ignores_tool_call_without_id(self):
         processor = StreamProcessor()
         processor._remember_tool_call({"name": "broken_tool", "args": {"x": 1}})
@@ -4413,6 +4901,59 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].payload["message"], "Нужен новый запрос.")
         self.assertEqual(processor.full_text, "")
         self.assertEqual(processor.clean_full, "")
+
+    async def test_merge_plan_checkpoint_preserves_pending_plan_on_continue(self):
+        worker = gui_runtime.AgentRunWorker()
+
+        plan = {
+            "id": "plan-1",
+            "version": 2,
+            "summary": "Inspect before implementing",
+            "steps": [{"id": "s1", "title": "Inspect", "description": "Read files", "status": "pending"}],
+            "risks": [],
+            "assumptions": [],
+            "verification": [],
+            "estimated_tools": [],
+            "estimated_files": [],
+            "complexity": "low",
+            "status": "pending_approval",
+            "active_step_id": "",
+        }
+
+        class FakeApp:
+            async def aget_state(self, _config):
+                return SimpleNamespace(
+                    values={
+                        "plan_graph_active": True,
+                        "current_plan": plan,
+                        "plan_status": "pending_approval",
+                        "plan_revision": 2,
+                        "active_plan_step_id": "",
+                        "plan_feedback": "",
+                    }
+                )
+
+        worker.agent_app = FakeApp()
+        worker.current_session = SessionSnapshot(
+            session_id="session-1",
+            thread_id="thread-1",
+            checkpoint_backend="memory",
+            checkpoint_target="memory",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            project_path=str(Path.cwd()),
+        )
+        worker._log_ui_run_event = mock.Mock()
+        initial_state = build_initial_state("Продолжай", session_id="session-1")
+
+        merged = await worker._merge_plan_checkpoint_into_initial_state(initial_state)
+
+        self.assertTrue(merged["plan_graph_active"])
+        self.assertEqual(merged["current_plan"], plan)
+        self.assertEqual(merged["plan_status"], "pending_approval")
+        self.assertEqual(merged["plan_revision"], 2)
+        worker._log_ui_run_event.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

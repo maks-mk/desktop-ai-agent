@@ -19,6 +19,7 @@ class RuntimePromptContext:
     tools_available: bool
     active_tool_names: Sequence[str]
     user_choice_locked: bool = False
+    plan_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,16 @@ class RuntimePromptPolicyBuilder:
         "That should show whether the wrong value comes from env loading or runtime overrides.'\n"
         "An empty `content` when `tool_calls` are present is a PROTOCOL ERROR."
     )
+    PLAN_MODE_TEXT = (
+        "PLAN MODE IS ACTIVE.\n"
+        "Plan only; do not change files, run mutating commands, or call destructive tools.\n"
+        "First inspect the repository with read-only tools when context can be discovered. Ask the user only when one "
+        "blocking decision cannot be recovered from the repo, messages, or tools.\n"
+        "Use request_user_input at most once, only for that blocking decision, and never for plan approval.\n"
+        "When ready, output exactly one <implementation_plan>...</implementation_plan> block and nothing after it.\n"
+        "Inside the block, keep concise Markdown with: summary, key changes, tests/verification, risks, and assumptions.\n"
+        "The plan must be decision-complete and specific to the actual codebase."
+    )
     def __init__(self, *, config: AgentConfig) -> None:
         self.config = config
 
@@ -92,6 +103,9 @@ class RuntimePromptPolicyBuilder:
                     )
                 )
             )
+
+        if context.plan_mode:
+            messages.append(SystemMessage(content=self.PLAN_MODE_TEXT))
         
         if context.tools_available:
             messages.append(SystemMessage(content=self.TOOL_INTENT_REQUIREMENT_TEXT))

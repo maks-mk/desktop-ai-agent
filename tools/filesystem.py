@@ -374,8 +374,8 @@ def search_in_file_tool(path: str, pattern: str, use_regex: bool = False, ignore
 
 @tool("search_in_directory")
 def search_in_directory_tool(
-    path: str,
     pattern: str,
+    path: str = ".",
     use_regex: bool = False,
     ignore_case: bool = False,
     extensions: Optional[str] = None,

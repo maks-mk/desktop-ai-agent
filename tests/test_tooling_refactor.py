@@ -107,6 +107,22 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         callback.assert_awaited_once()
 
+    async def test_tool_registry_cleanup_awaits_sync_close_returning_coroutine(self):
+        registry = ToolRegistry(self._make_config())
+        closed = False
+
+        async def close_impl():
+            nonlocal closed
+            closed = True
+
+        client = SimpleNamespace(close=mock.Mock(side_effect=close_impl))
+        registry.mcp_clients.append(client)
+
+        await registry.cleanup()
+
+        client.close.assert_called_once()
+        self.assertTrue(closed)
+
     def test_mcp_metadata_keeps_safe_tools_read_only(self):
         metadata = ToolRegistry._infer_mcp_metadata(
             "context7:resolve-library-id",

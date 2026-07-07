@@ -181,6 +181,16 @@ def setup_logging(
         category=UserWarning,
         module=r"google\.genai\._common",
     )
+    warnings.filterwarnings(
+        "ignore",
+        message=(
+            r"Pydantic serializer warnings:\s+"
+            r"PydanticSerializationUnexpectedValue\(Expected `str` - serialized value may not be as expected "
+            r"\[field_name='content'.*"
+        ),
+        category=UserWarning,
+        module=r"pydantic\.main",
+    )
 
     _suppress_library_logs(level)
 
@@ -212,7 +222,6 @@ def _setup_reasoning_debug_logger(log_file: str | Path | None, *, enabled: bool)
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(str(log_path), encoding="utf-8")
-        handler._reasoning_debug_handler = True
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         handler.addFilter(SensitiveDataFilter())

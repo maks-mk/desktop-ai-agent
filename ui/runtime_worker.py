@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import sys
 import uuid
 from typing import Any
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from core.config import AgentConfig
 from core.logging_config import setup_logging
 from core.model_profiles import ModelProfileStore, find_active_profile, normalize_profiles_payload
+from core.planning import coerce_runtime_plan, update_plan_status
 from core.multimodal import (
     DEFAULT_MODEL_CAPABILITIES,
     build_user_message_content,
@@ -64,12 +66,19 @@ def build_initial_state(user_input: Any, session_id: str, safety_mode: str = "de
     user_text = request_payload["text"]
     attachments = request_payload["attachments"]
     current_task = request_task_text(request_payload)
+    plan_mode = bool(request_payload.get("plan_mode", False))
     return {
         "messages": [HumanMessage(content=build_user_message_content(user_text, attachments))],
         "steps": 0,
         "token_usage": {},
         "current_task": current_task,
-        "turn_mode": "chat",
+        "turn_mode": "plan" if plan_mode else "chat",
+        "plan_status": "draft" if plan_mode else "",
+        "plan_revision": 0,
+        "current_plan": None,
+        "plan_graph_active": bool(plan_mode),
+        "active_plan_step_id": "",
+        "plan_feedback": "",
         "requires_evidence": False,
         "session_id": session_id,
         "run_id": uuid.uuid4().hex,
@@ -137,8 +146,10 @@ class AgentRunWorker(QObject):
         self._is_busy = False
         self._awaiting_approval = False
         self._awaiting_interrupt_kind = ""
+        self._pending_user_choice_type = ""
         self._active_run_elapsed_seconds = 0.0
         self._active_request_has_images = False
+        self._active_plan_stream_hint = False
         self._active_summary_estimated_tokens = 0
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
@@ -186,17 +197,11 @@ class AgentRunWorker(QObject):
     def _sync_tool_registry_workdir(self, target_project_path: str) -> None:
         self._coordinator.sync_tool_registry_workdir(target_project_path)
 
-    def _set_current_session_active(self, session, *, touch: bool = False) -> None:
-        self._coordinator.set_current_session_active(session, touch=touch)
-
     def _ensure_current_session_persisted(self) -> bool:
         return self._coordinator.ensure_current_session_persisted()
 
     def _try_change_workdir(self, target_project_path: str) -> tuple[bool, str]:
         return self._coordinator.try_change_workdir(target_project_path)
-
-    def _fallback_to_current_project_session(self, **kwargs):
-        return self._coordinator.fallback_to_current_project_session(**kwargs)
 
     def _activate_session_with_workdir_or_fallback(self, target, **kwargs):
         return self._coordinator.activate_session_with_workdir_or_fallback(target, **kwargs)
@@ -210,6 +215,17 @@ class AgentRunWorker(QObject):
     async def _emit_session_payload(self, *, include_transcript: bool) -> dict[str, Any]:
         return await self._coordinator.emit_session_payload(include_transcript=include_transcript)
 
+    def _sync_pending_user_choice_from_payload(self, payload: dict[str, Any]) -> None:
+        pending_choice = payload.get("pending_user_choice") if isinstance(payload, dict) else None
+        if not isinstance(pending_choice, dict):
+            return
+        choice_type = str(pending_choice.get("choice_type") or "").strip()
+        if not choice_type:
+            return
+        self._awaiting_approval = True
+        self._awaiting_interrupt_kind = "user_choice"
+        self._pending_user_choice_type = choice_type
+
     async def _repair_current_session_if_needed(self) -> list[str]:
         return await self._coordinator.repair_current_session_if_needed()
 
@@ -220,10 +236,6 @@ class AgentRunWorker(QObject):
     @staticmethod
     def _profile_bootstrap_env_from_config(config: AgentConfig) -> dict[str, str]:
         return RuntimeSessionCoordinator.profile_bootstrap_env_from_config(config)
-
-    @staticmethod
-    def _config_overrides_for_profile(profile: dict[str, str]) -> dict[str, Any]:
-        return RuntimeSessionCoordinator.config_overrides_for_profile(profile)
 
     def _build_config_for_active_profile(self, model_profiles: dict[str, Any]):
         return self._coordinator.build_config_for_active_profile(model_profiles)
@@ -444,6 +456,7 @@ class AgentRunWorker(QObject):
             agent_app=self.agent_app,
             include_transcript=True,
         )
+        self._sync_pending_user_choice_from_payload(payload)
         self.initialized.emit(payload)
         self.session_changed.emit(payload)
 
@@ -493,6 +506,58 @@ class AgentRunWorker(QObject):
             self.event_emitted.emit(StreamEvent("run_failed", {"message": str(exc)}))
             self._set_busy(False)
 
+    async def _merge_plan_checkpoint_into_initial_state(self, initial_state: dict) -> dict:
+        """Preserve an active plan graph when the user sends a non-plan follow-up.
+
+        ``build_initial_state`` resets ``plan_graph_active`` to ``False`` and
+        ``current_plan`` to ``None``. If the previous run left a pending plan in
+        the checkpoint (e.g. interrupted right before ``plan_review`` by a 429
+        error), this would silently destroy it, letting a plain "Продолжай"
+        bypass plan approval and jump straight into execution.
+
+        This method loads the checkpoint values and, if a non-terminal plan
+        exists, restores the plan-related fields so the graph routes correctly.
+        """
+        request_plan_mode = bool(initial_state.get("plan_graph_active"))
+        if request_plan_mode:
+            return initial_state
+        if self.agent_app is None or self.current_session is None:
+            return initial_state
+        try:
+            from ui.runtime_payloads import load_state_values
+
+            values = await load_state_values(self.agent_app, self.current_session.thread_id)
+        except Exception:
+            logger.debug("Failed to load checkpoint state for plan merge.", exc_info=True)
+            return initial_state
+        if not isinstance(values, dict):
+            return initial_state
+        plan_status = str(values.get("plan_status") or "").strip().lower()
+        current_plan = coerce_runtime_plan(values.get("current_plan"))
+        plan_graph_active = bool(values.get("plan_graph_active") or current_plan)
+        if (
+            not plan_graph_active
+            or current_plan is None
+            or plan_status in {"", "completed", "rejected", "cancelled", "canceled"}
+        ):
+            return initial_state
+        try:
+            plan_revision = int(values.get("plan_revision") or current_plan.get("version") or 1)
+        except (TypeError, ValueError):
+            plan_revision = 1
+        initial_state["plan_graph_active"] = True
+        initial_state["current_plan"] = current_plan
+        initial_state["plan_status"] = plan_status
+        initial_state["plan_revision"] = plan_revision
+        initial_state["active_plan_step_id"] = str(values.get("active_plan_step_id") or "")
+        initial_state["plan_feedback"] = str(values.get("plan_feedback") or "")
+        self._log_ui_run_event(
+            "plan_state_preserved_from_checkpoint",
+            thread_id=getattr(self.current_session, "thread_id", ""),
+            plan_status=plan_status,
+        )
+        return initial_state
+
     async def _start_run_async(self, user_text: object) -> None:
         request_payload = normalize_request_payload(user_text)
         self._active_run_elapsed_seconds = 0.0
@@ -509,10 +574,59 @@ class AgentRunWorker(QObject):
                 {"text": request_payload["text"], "attachments": request_payload["attachments"]},
             )
         )
-        await self._run_graph_payload(build_initial_state(request_payload, session_id=self.current_session.session_id))
+        initial_state = await self._merge_plan_checkpoint_into_initial_state(
+            build_initial_state(request_payload, session_id=self.current_session.session_id)
+        )
+        await self._run_graph_payload(
+            initial_state,
+            plan_execution_hint=self._payload_has_active_plan(initial_state),
+        )
 
-    async def _run_graph_payload(self, payload: dict | Command | None) -> None:
+    # --- Stream-interruption recovery helpers ---
+
+    @staticmethod
+    def _classify_stream_error(error_message: str) -> dict[str, Any]:
+        """Classify a provider stream error to drive retry strategy.
+
+        Returns a dict with:
+          * ``kind``: "rate_limit" | "timeout" | "server_error" | "network" | "unknown"
+          * ``retryable``: bool — whether a retry makes sense
+          * ``label``: human-readable label for UI notices
+        """
+        text = " ".join(str(error_message or "").lower().split())
+
+        if any(m in text for m in ("429", "rate limit", "rate_limit", "too many requests")):
+            return {"kind": "rate_limit", "retryable": True, "label": "Rate limit"}
+        if any(m in text for m in ("timeout", "timed out", "deadline exceeded")):
+            return {"kind": "timeout", "retryable": True, "label": "Timeout"}
+        if any(m in text for m in ("502", "503", "504", "bad gateway", "service unavailable", "gateway timeout")):
+            return {"kind": "server_error", "retryable": True, "label": "Server error"}
+        if any(m in text for m in ("connection", "network", "reset by peer", "broken pipe", "eof", "stream ended")):
+            return {"kind": "network", "retryable": True, "label": "Network error"}
+        return {"kind": "unknown", "retryable": True, "label": "Stream error"}
+
+    @staticmethod
+    def _stream_retry_backoff(attempt: int, base_delay: float, error_kind: str) -> float:
+        """Compute exponential backoff with jitter for stream-repair retries.
+
+        Uses the same pattern as ``_invoke_llm_with_retry``: delay = base * 2^attempt + jitter.
+        Rate-limit errors get a longer base to avoid hammering the provider.
+        """
+        effective_base = base_delay * 1.5 if error_kind == "rate_limit" else base_delay
+        return effective_base * (2 ** attempt) + random.uniform(0, effective_base)
+
+    @staticmethod
+    def _payload_has_active_plan(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        plan_status = str(payload.get("plan_status") or "").strip().lower()
+        if plan_status in {"", "completed", "rejected", "cancelled", "canceled", "pending_approval"}:
+            return False
+        return bool(payload.get("plan_graph_active") or payload.get("current_plan"))
+
+    async def _run_graph_payload(self, payload: dict | Command | None, *, plan_execution_hint: bool = False) -> None:
         try:
+            self._active_plan_stream_hint = bool(plan_execution_hint or self._payload_has_active_plan(payload))
             stream_repair_resume_attempts = 0
             max_stream_repair_resumes = max(0, min(int(getattr(self.config, "max_retries", 1) or 1), 2))
             while True:
@@ -528,6 +642,7 @@ class AgentRunWorker(QObject):
                     events_max=self.config.stream_events_max,
                     tool_buffer_max=self.config.stream_tool_buffer_max,
                     base_elapsed_seconds=self._active_run_elapsed_seconds,
+                    plan_execution_active=self._active_plan_stream_hint,
                 )
                 result = await processor.process_stream(stream)
                 self._active_run_elapsed_seconds = result.elapsed_seconds
@@ -543,28 +658,38 @@ class AgentRunWorker(QObject):
 
                 if result.failed:
                     self._log_ui_run_event("run_failed", message=result.error_message)
+                    error_info = self._classify_stream_error(result.error_message)
                     repair_notices = await self._repair_current_session_if_needed()
                     if repair_notices and stream_repair_resume_attempts < max_stream_repair_resumes:
                         stream_repair_resume_attempts += 1
+                        backoff = self._stream_retry_backoff(
+                            stream_repair_resume_attempts - 1,
+                            float(getattr(self.config, "retry_delay", 2) or 2),
+                            error_info["kind"],
+                        )
                         self._log_ui_run_event(
                             "run_auto_continued_after_stream_repair",
                             attempt=stream_repair_resume_attempts,
                             max_attempts=max_stream_repair_resumes,
                             message=result.error_message,
+                            error_kind=error_info["kind"],
+                            backoff_seconds=round(backoff, 2),
                         )
                         self.event_emitted.emit(
                             StreamEvent(
                                 "summary_notice",
                                 {
                                     "message": (
-                                        "Provider stream interrupted. History was repaired automatically; "
-                                        "continuing the run…"
+                                        f"Provider stream interrupted ({error_info['label']}). "
+                                        "History was repaired automatically; "
+                                        f"continuing the run in {backoff:.1f}s…"
                                     ),
                                     "kind": "stream_repair_auto_continue",
                                     "level": "warning",
                                 },
                             )
                         )
+                        await asyncio.sleep(backoff)
                         payload = None
                         continue
                     self._refresh_model_profiles_from_store()
@@ -577,12 +702,18 @@ class AgentRunWorker(QObject):
                     repair_notices = await self._repair_current_session_if_needed()
                     if repair_notices and stream_repair_resume_attempts < max_stream_repair_resumes:
                         stream_repair_resume_attempts += 1
+                        backoff = self._stream_retry_backoff(
+                            stream_repair_resume_attempts - 1,
+                            float(getattr(self.config, "retry_delay", 2) or 2),
+                            "network",
+                        )
                         self._log_ui_run_event(
                             "run_auto_continued_after_stream_repair",
                             attempt=stream_repair_resume_attempts,
                             max_attempts=max_stream_repair_resumes,
                             phase="post_success",
                             repaired_count=len(repair_notices),
+                            backoff_seconds=round(backoff, 2),
                         )
                         self.event_emitted.emit(
                             StreamEvent(
@@ -590,13 +721,15 @@ class AgentRunWorker(QObject):
                                 {
                                     "message": (
                                         "Provider stream ended with an incomplete tool call. "
-                                        "History was repaired automatically; continuing the run..."
+                                        "History was repaired automatically; "
+                                        f"continuing the run in {backoff:.1f}s..."
                                     ),
                                     "kind": "stream_repair_auto_continue",
                                     "level": "warning",
                                 },
                             )
                         )
+                        await asyncio.sleep(backoff)
                         payload = None
                         continue
 
@@ -614,6 +747,9 @@ class AgentRunWorker(QObject):
                 if interrupt_kind == "user_choice":
                     self._awaiting_approval = True
                     self._awaiting_interrupt_kind = "user_choice"
+                    self._pending_user_choice_type = str(
+                        (result.interrupt or {}).get("choice_type", "clarification") or "clarification"
+                    )
                     self.user_choice_requested.emit(build_user_choice_payload(result.interrupt))
                     self._set_busy(False)
                     return
@@ -666,6 +802,8 @@ class AgentRunWorker(QObject):
     async def _resume_approval_async(self, approved: bool, always: bool) -> None:
         self._awaiting_approval = False
         self._awaiting_interrupt_kind = ""
+        self._pending_user_choice_type = ""
+
         if always:
             self.current_session.approval_mode = APPROVAL_MODE_ALWAYS
             self.store.save_active_session(self.current_session, touch=False, set_active=True)
@@ -674,7 +812,10 @@ class AgentRunWorker(QObject):
         self.event_emitted.emit(
             StreamEvent("approval_resolved", {"approved": approved, "always": always, "auto": False})
         )
-        await self._run_graph_payload(Command(resume={"approved": approved}))
+        await self._run_graph_payload(
+            Command(resume={"approved": approved}),
+            plan_execution_hint=bool(getattr(self, "_active_plan_stream_hint", False)),
+        )
 
     @Slot(str)
     def resume_user_choice(self, chosen: str) -> None:
@@ -691,15 +832,97 @@ class AgentRunWorker(QObject):
             self._set_busy(False)
 
     async def _resume_user_choice_async(self, chosen: str) -> None:
+        choice_type = str(getattr(self, "_pending_user_choice_type", "") or "clarification")
         self._awaiting_approval = False
         self._awaiting_interrupt_kind = ""
-        self.event_emitted.emit(StreamEvent("user_choice_resolved", {"chosen": chosen}))
+        self._pending_user_choice_type = ""
+        self.event_emitted.emit(StreamEvent("user_choice_resolved", {"chosen": chosen, "choice_type": choice_type}))
+        if choice_type in {"plan_review", "plan_revision", "plan_replan"}:
+            await self._run_graph_payload(
+                Command(resume={"choice_type": choice_type, "choice": chosen, "feedback": chosen}),
+                plan_execution_hint=True,
+            )
+            return
+
+        if choice_type == "plan_approval":
+            resume_payload = {"choice_type": choice_type, "choice": chosen}
+            if chosen == "Да, реализовать":
+                await self._run_graph_payload(
+                    Command(
+                        update={"turn_mode": "chat", "plan_status": "approved"},
+                        resume=resume_payload,
+                    ),
+                    plan_execution_hint=True,
+                )
+            elif chosen == "Нет, отказаться от реализации":
+                await self._run_graph_payload(
+                    Command(update={"plan_status": "rejected"}, resume=resume_payload)
+                )
+            else:
+                await self._run_graph_payload(
+                    Command(update={"plan_status": "needs_changes"}, resume=resume_payload)
+                )
+            return
+
         await self._run_graph_payload(Command(resume=chosen))
+
+    async def _reject_active_plan_before_stop(self) -> None:
+        if not self.agent_app or not self.current_session:
+            return
+        try:
+            config = build_graph_config(self.current_session.thread_id, self.config.max_loops)
+            state_snapshot = await self.agent_app.aget_state(config)
+            values = getattr(state_snapshot, "values", {}) or {}
+            plan_status = str(values.get("plan_status") or "").strip().lower()
+            current_plan = values.get("current_plan")
+            if plan_status not in {"approved", "executing"} or not isinstance(current_plan, dict):
+                return
+            rejected_plan = update_plan_status(current_plan, status="rejected", active_step_id="")
+            if rejected_plan is None:
+                rejected_plan = dict(current_plan)
+                rejected_plan["status"] = "rejected"
+                rejected_plan["active_step_id"] = ""
+            await self.agent_app.aupdate_state(
+                config,
+                {
+                    "current_plan": rejected_plan,
+                    "plan_status": "rejected",
+                    "active_plan_step_id": "",
+                    "turn_mode": "chat",
+                },
+                as_node="plan_cancel",
+            )
+            self._log_ui_run_event("plan_execution_cancelled_by_user", plan_status=plan_status)
+            self.event_emitted.emit(
+                StreamEvent(
+                    "plan_progress",
+                    {
+                        "current_plan": rejected_plan,
+                        "status": "rejected",
+                        "active_step_id": "",
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("Failed to reject active plan before stopping run.", exc_info=True)
 
     @Slot()
     def stop_run(self) -> None:
-        if self._loop and self._current_task and not self._current_task.done():
-            self._loop.call_soon_threadsafe(self._current_task.cancel)
+        if not self._loop or not self._current_task or self._current_task.done():
+            return
+        task = self._current_task
+
+        async def _cancel_task() -> None:
+            if not task.done():
+                task.cancel()
+
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(_cancel_task()))
+
+    @Slot()
+    def cancel_active_plan(self) -> None:
+        if not self._loop:
+            return
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reject_active_plan_before_stop()))
 
     @Slot()
     def new_session(self) -> None:
@@ -920,6 +1143,7 @@ class AgentRuntimeController(QObject):
     _initialize_requested = Signal()
     _start_run_requested = Signal(object)
     _stop_run_requested = Signal()
+    _cancel_active_plan_requested = Signal()
     _resume_requested = Signal(bool, bool)
     _resume_user_choice_requested = Signal(str)
     _new_session_requested = Signal()
@@ -932,6 +1156,16 @@ class AgentRuntimeController(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._thread: QThread | None = None
+        self._worker: AgentRunWorker | None = None
+        self._worker_busy = False
+        self._force_stop_timeout_ms = 5000
+        self._force_stop_timer = QTimer(self)
+        self._force_stop_timer.setSingleShot(True)
+        self._force_stop_timer.timeout.connect(self._force_stop_hung_worker)
+        self._start_worker_thread()
+
+    def _start_worker_thread(self) -> None:
         self._thread = QThread(self)
         self._worker = AgentRunWorker()
         self._worker.moveToThread(self._thread)
@@ -940,6 +1174,7 @@ class AgentRuntimeController(QObject):
         self._reinitialize_requested.connect(self._worker.reinitialize)
         self._start_run_requested.connect(self._worker.start_run)
         self._stop_run_requested.connect(self._worker.stop_run, Qt.DirectConnection)
+        self._cancel_active_plan_requested.connect(self._worker.cancel_active_plan, Qt.DirectConnection)
         self._resume_requested.connect(self._worker.resume_approval)
         self._resume_user_choice_requested.connect(self._worker.resume_user_choice)
         self._new_session_requested.connect(self._worker.new_session)
@@ -955,11 +1190,112 @@ class AgentRuntimeController(QObject):
         self._worker.approval_requested.connect(self.approval_requested)
         self._worker.user_choice_requested.connect(self.user_choice_requested)
         self._worker.session_changed.connect(self.session_changed)
-        self._worker.busy_changed.connect(self.busy_changed)
+        self._worker.busy_changed.connect(self._on_worker_busy_changed)
         self._worker.shutdown_complete.connect(self._thread.quit)
         self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
+
+    def _disconnect_worker_thread(self) -> None:
+        worker = self._worker
+        thread = self._thread
+        if worker is None:
+            return
+        for signal, slot in (
+            (self._initialize_requested, worker.initialize),
+            (self._reinitialize_requested, worker.reinitialize),
+            (self._start_run_requested, worker.start_run),
+            (self._stop_run_requested, worker.stop_run),
+            (self._cancel_active_plan_requested, worker.cancel_active_plan),
+            (self._resume_requested, worker.resume_approval),
+            (self._resume_user_choice_requested, worker.resume_user_choice),
+            (self._new_session_requested, worker.new_session),
+            (self._switch_session_requested, worker.switch_session),
+            (self._delete_session_requested, worker.delete_session),
+            (self._set_active_profile_requested, worker.set_active_profile),
+            (self._save_profiles_requested, worker.save_profiles),
+            (self._shutdown_requested, worker.shutdown),
+            (worker.initialized, self.initialized),
+            (worker.initialization_failed, self.initialization_failed),
+            (worker.event_emitted, self.event_emitted),
+            (worker.approval_requested, self.approval_requested),
+            (worker.user_choice_requested, self.user_choice_requested),
+            (worker.session_changed, self.session_changed),
+            (worker.busy_changed, self._on_worker_busy_changed),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        if thread is not None:
+            try:
+                worker.shutdown_complete.disconnect(thread.quit)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                thread.finished.disconnect(worker.deleteLater)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _stop_worker_thread(self, *, force: bool) -> None:
+        thread = self._thread
+        worker = self._worker
+        if thread is None:
+            self._worker = None
+            return
+        if force and thread.isRunning():
+            self._disconnect_worker_thread()
+            logger.warning("Force-stopping unresponsive runtime worker thread after stop request.")
+            thread.terminate()
+            thread.wait(3000)
+        elif thread.isRunning():
+            self._shutdown_requested.emit()
+            if not thread.wait(3000):
+                self._disconnect_worker_thread()
+                logger.warning("Runtime worker shutdown timed out; terminating thread.")
+                thread.terminate()
+                thread.wait(3000)
+            else:
+                self._disconnect_worker_thread()
+        else:
+            self._disconnect_worker_thread()
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
+        self._thread = None
+        self._worker = None
+
+    @Slot(bool)
+    def _on_worker_busy_changed(self, busy: bool) -> None:
+        self._worker_busy = bool(busy)
+        if not busy and self._force_stop_timer.isActive():
+            self._force_stop_timer.stop()
+        self.busy_changed.emit(busy)
+
+    @Slot()
+    def _force_stop_hung_worker(self) -> None:
+        thread = self._thread
+        if thread is None or not thread.isRunning():
+            return
+        self.event_emitted.emit(
+            StreamEvent(
+                "run_failed",
+                {
+                    "message": (
+                        "Stopped by user. The provider did not respond to cancellation, "
+                        "so the runtime worker was restarted."
+                    ),
+                    "forced": True,
+                },
+            )
+        )
+        self._worker_busy = False
+        self.busy_changed.emit(False)
+        self._stop_worker_thread(force=True)
+        self._start_worker_thread()
+        self._initialize_requested.emit()
 
     def initialize(self) -> None:
         self._initialize_requested.emit()
@@ -972,6 +1308,11 @@ class AgentRuntimeController(QObject):
 
     def stop_run(self) -> None:
         self._stop_run_requested.emit()
+        if self._worker_busy:
+            self._force_stop_timer.start(self._force_stop_timeout_ms)
+
+    def cancel_active_plan(self) -> None:
+        self._cancel_active_plan_requested.emit()
 
     def resume_approval(self, approved: bool, always: bool = False) -> None:
         self._resume_requested.emit(approved, always)
@@ -995,10 +1336,6 @@ class AgentRuntimeController(QObject):
         self._save_profiles_requested.emit(config_payload)
 
     def shutdown(self) -> None:
-        if self._thread.isRunning():
-            self._shutdown_requested.emit()
-            import time
-
-            time.sleep(0.1)
-            self._thread.quit()
-            self._thread.wait()
+        if self._force_stop_timer.isActive():
+            self._force_stop_timer.stop()
+        self._stop_worker_thread(force=False)

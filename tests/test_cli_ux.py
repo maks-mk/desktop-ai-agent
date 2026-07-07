@@ -3,11 +3,12 @@ import shutil
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QModelIndex, QObject, Qt, QtMsgType, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButton, QSizePolicy, QToolBar, QWidget
@@ -17,11 +18,13 @@ from core.model_fetcher import ModelEntry
 from core.model_profiles import normalize_profiles_payload
 from core.tool_policy import ToolMetadata
 from ui.runtime import build_runtime_snapshot, summarize_approval_request
+from ui.runtime_worker import AgentRuntimeController
 from ui.streaming import StreamEvent
-from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
+from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SUCCESS_GREEN, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
 from ui.widgets.composer import _ComposerMentionItemWidget
-from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, TRANSCRIPT_MAX_WIDTH
-from ui.widgets.messages import AssistantMessageWidget
+from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, DiffBlockWidget, TRANSCRIPT_MAX_WIDTH
+from ui.widgets.messages import AssistantMessageWidget, InlinePlanWidget
+from ui.widgets.sidebar import SessionListModel
 from ui.widgets.transcript import ConversationTurnWidget
 from ui.widgets.tool_group import ToolGroupWidget
 
@@ -89,6 +92,7 @@ class FakeController(QObject):
         self.reinitialize_calls: list[bool] = []
         self.shutdown_calls = 0
         self.initialize_calls = 0
+        self.cancel_active_plan_calls = 0
 
     def initialize(self):
         self.initialize_calls += 1
@@ -122,6 +126,49 @@ class FakeController(QObject):
 
     def shutdown(self):
         self.shutdown_calls += 1
+
+    def cancel_active_plan(self):
+        self.cancel_active_plan_calls += 1
+
+
+class RuntimeControllerStopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_force_stop_watchdog_recovers_unresponsive_worker(self):
+        controller = AgentRuntimeController()
+        real_thread = controller._thread
+        real_worker = controller._worker
+        real_stop_worker_thread = controller._stop_worker_thread
+        real_start_worker_thread = controller._start_worker_thread
+        events = []
+        busy_values = []
+        controller.event_emitted.connect(events.append)
+        controller.busy_changed.connect(busy_values.append)
+        try:
+            controller._force_stop_timer.stop()
+            controller._worker_busy = True
+            controller._disconnect_worker_thread()
+            controller._thread = SimpleNamespace(isRunning=lambda: True)
+            controller._worker = SimpleNamespace()
+            controller._stop_worker_thread = mock.Mock()
+            controller._start_worker_thread = mock.Mock()
+
+            controller._force_stop_hung_worker()
+
+            self.assertTrue(any(event.type == "run_failed" and event.payload.get("forced") for event in events))
+            self.assertIn(False, busy_values)
+            controller._stop_worker_thread.assert_called_once_with(force=True)
+            controller._start_worker_thread.assert_called_once()
+        finally:
+            controller._thread = real_thread
+            controller._worker = real_worker
+            controller._stop_worker_thread = real_stop_worker_thread
+            controller._start_worker_thread = real_start_worker_thread
+            if real_thread is not None and real_thread.isRunning():
+                real_thread.quit()
+                real_thread.wait(1000)
 
 
 class GuiUxTests(unittest.TestCase):
@@ -176,6 +223,353 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(turn.block_kinds(), ["user", "assistant", "tool_group"])
         self.assertEqual(len(turn.assistant_segments), 1)
         self.assertEqual(turn.assistant_segments[0].markdown(), preface)
+
+    def _plan_progress_payload(self, status: str = "executing") -> dict:
+        return {
+            "status": status,
+            "active_step_id": "step-2" if status == "executing" else "",
+            "completed_steps": 1 if status == "executing" else 0,
+            "total_steps": 2,
+            "current_plan": {
+                "id": "plan-1",
+                "title": "Implementation plan",
+                "summary": "Small UI update",
+                "status": status,
+                "steps": [
+                    {"id": "step-1", "title": "Inspect", "status": "completed" if status == "executing" else "pending"},
+                    {"id": "step-2", "title": "Render", "status": "pending"},
+                ],
+                "risks": ["Risk"],
+                "assumptions": ["Assumption"],
+                "verification": ["Run focused tests"],
+            },
+        }
+
+    def test_plan_progress_event_waits_for_execution_before_showing_side_panel(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("pending_approval")))
+
+        self.assertIsNotNone(self.window.current_turn)
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+        self.assertFalse(self.window.inspector_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+
+        self.assertFalse(self.window.inspector_container.isHidden())
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "1 / 2")
+        plan_card = self.window.plan_progress_panel.plan_card
+        self.assertFalse(plan_card.isHidden())
+        self.assertFalse(plan_card.title_label.isHidden())
+        self.assertIn("План реализации", plan_card.title_label.text())
+        self.assertIn("Run focused tests", plan_card.meta_label.text())
+        self.assertIn("Risk", plan_card.meta_label.text())
+        self.assertIn("Assumption", plan_card.meta_label.text())
+        self.assertTrue(any("Render" in label.text() for label in plan_card._step_labels))
+
+    def test_plan_progress_card_groups_steps_and_metadata_compactly(self):
+        payload = self._plan_progress_payload("executing")
+        payload["active_step_id"] = "step-3"
+        payload["completed_steps"] = 2
+        payload["total_steps"] = 4
+        payload["current_plan"]["steps"] = [
+            {"id": "step-1", "title": "Inspect", "description": "Read current files", "status": "completed"},
+            {"id": "step-2", "title": "Build", "description": "Create the UI", "status": "completed"},
+            {"id": "step-3", "title": "Style", "description": "Tune active state colors", "status": "pending"},
+            {"id": "step-4", "title": "Verify", "description": "Run focused checks", "status": "pending"},
+        ]
+
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", payload))
+
+        plan_card = self.window.plan_progress_panel.plan_card
+        self.assertFalse(plan_card.summary_card.isHidden())
+        self.assertFalse(plan_card.steps_host.isHidden())
+        self.assertFalse(plan_card.meta_host.isHidden())
+        self.assertTrue(plan_card.status_label.isHidden())
+
+        rows = plan_card.findChildren(QFrame, "PlanStepRow")
+        self.assertEqual([row.property("stepStatus") for row in rows], ["completed", "completed", "active", "pending"])
+        self.assertEqual(len(plan_card._meta_cards), 3)
+        meta_titles = [
+            title.text()
+            for card in plan_card._meta_cards
+            for title in card.findChildren(QLabel, "PlanMetaTitle")
+        ]
+        self.assertEqual(meta_titles, ["Проверка", "Риски", "Предположения"])
+
+    def test_plan_execution_finish_does_not_restore_inspector(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("run_finished", {"stats": "1.0s   In: 10   Out: 5"}))
+
+        # Active plan stays visible after run finishes so the user can continue or cancel.
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+
+        # Completing the plan hides the panel.
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_container.isHidden())
+        self.assertTrue(self.window.inspector_collapsed)
+
+    def test_completed_plan_progress_does_not_restore_inspector(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
+
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_container.isHidden())
+        self.assertTrue(self.window.inspector_collapsed)
+
+    def test_plan_execution_panel_stays_visible_on_run_failed(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("run_failed", {"error": "connection error"}))
+
+        # Active plan stays visible after a failure so the user can continue or cancel.
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+
+    def test_plan_execution_panel_survives_followup_run_started(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("run_started", {"text": "Продолжай"}))
+
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+        self.assertTrue(any("Render" in label.text() for label in self.window.plan_progress_panel.plan_card._step_labels))
+
+    def test_plan_execution_panel_keeps_failed_plan_visible(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        failed_payload = self._plan_progress_payload("executing")
+        failed_payload["status"] = "failed"
+        failed_payload["current_plan"]["status"] = "failed"
+        self.window._handle_event(StreamEvent("plan_progress", failed_payload))
+
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "1 / 2")
+
+    def test_plan_execution_panel_ignores_terminal_progress_while_busy_until_run_finishes(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_busy_changed(True)
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        completed_payload = self._plan_progress_payload("completed")
+        completed_payload["completed_steps"] = 2
+        completed_payload["total_steps"] = 2
+        for step in completed_payload["current_plan"]["steps"]:
+            step["status"] = "completed"
+
+        self.window._handle_event(StreamEvent("plan_progress", completed_payload))
+
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "2 / 2")
+
+        self.window._handle_event(StreamEvent("run_finished", {"stats": "1.0s   In: 10   Out: 5"}))
+
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_container.isHidden())
+        self.assertTrue(self.window.inspector_collapsed)
+
+    def test_user_cancel_does_not_render_canceled_notice_in_transcript(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Останови"}))
+
+        self.window._handle_event(StreamEvent("run_failed", {"message": "Cancelled"}))
+        self._process_events()
+
+        self.assertIsNotNone(self.window.current_turn)
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
+        rendered_labels = [label.text() for label in self.window.current_turn.findChildren(QLabel)]
+        self.assertNotIn("Canceled", rendered_labels)
+        self.assertNotIn("Cancelled", rendered_labels)
+        self.assertIn("stopped", self.window.statusBar().currentMessage().lower())
+
+    def test_runtime_payload_restore_keeps_active_plan_panel_while_busy(self):
+        payload = self._snapshot_payload()
+        self.window._handle_initialized(payload)
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_busy_changed(True)
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        refreshed_payload = self._snapshot_payload()
+        refreshed_payload["transcript"] = []
+        self.window._handle_session_changed(refreshed_payload)
+
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_panel.isHidden())
+        self.assertTrue(any("Render" in label.text() for label in self.window.plan_progress_panel.plan_card._step_labels))
+
+    def test_plan_progress_cancel_button_visible_only_with_active_plan(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.assertTrue(self.window.plan_progress_panel.cancel_button.isHidden())
+
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.cancel_button.isHidden())
+
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
+        self.assertTrue(self.window.plan_progress_panel.cancel_button.isHidden())
+
+    def test_plan_progress_cancel_button_emits_cancel_request(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertEqual(self.controller.cancel_active_plan_calls, 0)
+
+        self.window.plan_progress_panel.cancel_button.click()
+        self._process_events()
+
+        self.assertEqual(self.controller.cancel_active_plan_calls, 1)
+
+    def test_plan_review_inline_widget_is_simple(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
+        self.window._handle_event(StreamEvent("implementation_plan_buffer", {"markdown": "Подробный markdown plan"}))
+        self._process_events()
+
+        self.controller.user_choice_requested.emit(
+            {
+                "choice_type": "plan_review",
+                "question": "Что сделать с этим планом?",
+                "current_plan": self._plan_progress_payload("pending_approval")["current_plan"],
+                "options": [{"key": "approve", "label": "Реализовать", "submit_text": "approve"}],
+            }
+        )
+        self._process_events()
+
+        self.assertTrue(self.window.user_choice_card.isHidden())
+        inline_plan = self.window.current_turn.inline_plan_widget
+        self.assertIsNotNone(inline_plan)
+        self.assertFalse(inline_plan.isHidden())
+        self.assertEqual(inline_plan.toggle_button.text(), "Implementation Plan")
+        self.assertIsNotNone(inline_plan.findChild(QFrame, "InlinePlanAccent"))
+        self.assertIsNotNone(inline_plan.findChild(QLabel, "InlinePlanIcon"))
+        self.assertEqual(inline_plan.count_label.text(), "2 steps")
+        self.assertFalse(inline_plan.markdown_body.isHidden())
+        self.assertIn("Подробный markdown plan", inline_plan.markdown_body.toPlainText())
+        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
+        self.assertEqual([button.text() for button in option_buttons], ["Реализовать", "Изменить", "Перестроить", "Отмена"])
+        self.assertTrue(option_buttons[0].property("recommended"))
+        self.assertEqual(option_buttons[0].property("planAction"), "implement")
+        self.assertEqual(self.window.current_turn.assistant_segments, [])
+        self.assertFalse(self.window.plan_progress_panel.isVisible())
+
+    def test_inline_plan_limits_long_markdown_height_with_vertical_scroll(self):
+        inline_plan = InlinePlanWidget()
+        long_plan = "# Plan\n" + "\n".join(f"- Step {index}" for index in range(80))
+
+        inline_plan.set_payload({"plan_markdown": long_plan})
+        inline_plan.resize(500, 600)
+        inline_plan.show()
+        self._wait_for_gui(20)
+
+        self.assertEqual(inline_plan.markdown_body.maximumHeight(), 360)
+        self.assertLessEqual(inline_plan.markdown_body.height(), 360)
+        self.assertEqual(inline_plan.markdown_body.verticalScrollBarPolicy(), Qt.ScrollBarAsNeeded)
+
+    def test_inline_plan_restore_can_keep_implemented_card_collapsed(self):
+        turn = ConversationTurnWidget("user", parent=self.window)
+
+        turn.restore_blocks(
+            [
+                {
+                    "type": "plan",
+                    "payload": {
+                        "plan_markdown": "# Plan\n- Step",
+                        "current_plan": self._plan_progress_payload("completed")["current_plan"],
+                    },
+                    "actions_visible": False,
+                    "implemented": True,
+                }
+            ]
+        )
+
+        inline_plan = turn.inline_plan_widget
+        self.assertIsNotNone(inline_plan)
+        self.assertFalse(inline_plan.isHidden())
+        self.assertEqual(inline_plan.toggle_button.text(), "✓ Plan completed (2 steps)")
+        self.assertTrue(inline_plan.markdown_body.isHidden())
+        self.assertTrue(inline_plan.actions_host.isHidden())
+
+    def test_initialized_payload_restores_pending_plan_review_choice(self):
+        payload = self._snapshot_payload()
+        payload["pending_user_choice"] = {
+            "choice_type": "plan_review",
+            "question": "Что сделать с этим планом?",
+            "current_plan": self._plan_progress_payload("pending_approval")["current_plan"],
+            "options": [{"key": "implement", "label": "Реализовать", "submit_text": "implement"}],
+            "restored_from_checkpoint": True,
+        }
+        payload["checkpoint_notice"] = {
+            "message": "Восстановлен ожидающий план из checkpoint. Выберите действие, чтобы продолжить.",
+            "kind": "plan_checkpoint_restored",
+            "level": "warning",
+        }
+
+        self.window._handle_initialized(payload)
+        self._process_events()
+
+        self.assertTrue(self.window.user_choice_card.isHidden())
+        inline_plan = self.window.current_turn.inline_plan_widget
+        self.assertIsNotNone(inline_plan)
+        self.assertFalse(inline_plan.isHidden())
+        self.assertTrue(self.window.awaiting_user_choice)
+        self.assertNotIn("notice", self.window.current_turn.block_kinds())
+        self.assertIn("checkpoint", self.window.statusBar().currentMessage().lower())
+        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
+
+        option_buttons[0].click()
+        self._process_events()
+
+        self.assertEqual(self.controller.resume_choice_calls, ["implement"])
+
+    def test_inspector_button_can_close_plan_execution_while_busy(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_busy_changed(True)
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+
+        self.assertTrue(self.window.info_button.isEnabled())
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        self.window._toggle_info_popup()
+
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+        self.assertTrue(self.window.inspector_container.isHidden())
+
+    def test_session_switch_clears_plan_execution_panel(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        self.window._switch_session("session-older")
+
+        self.assertEqual(self.controller.switch_session_calls, ["session-older"])
+        self.assertTrue(self.window.plan_progress_panel.isHidden())
+
+
+    def test_plan_replan_choice_keeps_plan_execution_panel_visible(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
+
+        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("rebuild_requested")))
+        self.assertFalse(self.window.plan_progress_panel.isHidden())
 
     def _press_composer_key(self, key: int, text: str = "", modifiers: Qt.KeyboardModifier = Qt.NoModifier):
         self.window.composer.setFocus()
@@ -318,6 +712,20 @@ class GuiUxTests(unittest.TestCase):
                 "qt.network.ssl.warning=true;qt.text.font.db=false",
             )
 
+    def test_qt_message_filter_suppresses_filesystem_watcher_warning(self):
+        from ui.window_components.main_window import _qt_message_filter
+
+        with mock.patch("builtins.print") as mock_print:
+            _qt_message_filter(QtMsgType.QtWarningMsg, None, "QFileSystemWatcher: FindNextChangeNotification failed for /tmp")
+            mock_print.assert_not_called()
+
+    def test_qt_message_filter_passes_other_warnings(self):
+        from ui.window_components.main_window import _qt_message_filter
+
+        with mock.patch("builtins.print") as mock_print:
+            _qt_message_filter(QtMsgType.QtWarningMsg, None, "Some other Qt warning")
+            mock_print.assert_called_once()
+
     def test_submit_request_uses_controller_and_clears_editor(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window.composer.setPlainText("Собери summary")
@@ -456,6 +864,47 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(self.controller.start_calls, [])
         self.assertEqual(self.controller.resume_choice_calls, ["direct_api"])
         self.assertTrue(self.window.user_choice_card.isHidden())
+
+    def test_plan_review_inline_widget_shows_structured_plan_before_actions(self):
+        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
+        self.controller.user_choice_requested.emit(
+            {
+                "choice_type": "plan_review",
+                "question": "Что сделать с этим планом?",
+                "recommended_key": "Реализовать",
+                "current_plan": {
+                    "title": "Plan",
+                    "summary": "Создание игры Тетрис в винтажном стиле",
+                    "status": "pending_approval",
+                    "steps": [
+                        {"id": f"step-{index}", "title": f"Шаг {index}", "description": "Подробное описание", "status": "pending"}
+                        for index in range(1, 8)
+                    ],
+                    "risks": ["Риск 1", "Риск 2"],
+                    "assumptions": ["Допущение 1"],
+                },
+                "options": [{"key": "approve", "label": "Реализовать", "submit_text": "approve"}],
+            }
+        )
+        self._process_events()
+
+        self.assertTrue(self.window.user_choice_card.isHidden())
+        inline_plan = self.window.current_turn.inline_plan_widget
+        self.assertIsNotNone(inline_plan)
+        self.assertFalse(inline_plan.isHidden())
+        self.assertEqual(inline_plan.count_label.text(), "7 steps")
+        self.assertIn("Key Changes", inline_plan.markdown_body.toPlainText())
+        self.assertIn("7", inline_plan.markdown_body.toPlainText())
+        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
+        self.assertEqual(len(option_buttons), 4)
+        self.assertTrue(option_buttons[0].property("recommended"))
+
+        option_buttons[0].click()
+        self._process_events()
+
+        self.assertEqual(self.controller.resume_choice_calls, ["implement"])
+        self.assertTrue(inline_plan.markdown_body.isHidden())
+        self.assertTrue(inline_plan.actions_host.isHidden())
 
     def test_user_choice_card_custom_option_arms_composer_and_resumes_on_submit(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1040,14 +1489,14 @@ class GuiUxTests(unittest.TestCase):
         self.window._handle_event(
             StreamEvent("status_changed", {"label": "Compressing context", "node": "summarize"})
         )
-        self.assertIsNotNone(self.window.current_turn.summary_notice_widget)
-        self.assertIn("compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
+        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertIn("compress", self.window.statusBar().currentMessage().lower())
 
         self.window._handle_event(
             StreamEvent("status_changed", {"label": "Working...", "node": "agent"})
         )
-        self.assertIsNotNone(self.window.current_turn.summary_notice_widget)
-        self.assertIn("context compressed", self.window.current_turn.summary_notice_widget.text_label.text().lower())
+        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertIn("context compressed", self.window.statusBar().currentMessage().lower())
 
         self.window._handle_event(
             StreamEvent(
@@ -1073,8 +1522,8 @@ class GuiUxTests(unittest.TestCase):
         )
         self._process_events()
 
-        self.assertIsNotNone(self.window.current_turn.summary_notice_widget)
-        self.assertIn("context compressed automatically", self.window.current_turn.summary_notice_widget.text_label.text().lower())
+        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertIn("context compressed automatically", self.window.statusBar().currentMessage().lower())
         self.assertNotIn("notice", self.window.current_turn.block_kinds())
 
     def test_stream_events_render_transcript_and_compact_tool_sections(self):
@@ -1140,15 +1589,24 @@ class GuiUxTests(unittest.TestCase):
         ]
         self.assertEqual(transcript_text_labels, [])
         self.assertIsInstance(self.window.current_turn.tool_group, ToolGroupWidget)
-        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Изменён 1 файл")
         self.assertTrue(self.window.current_turn.tool_group.container.isHidden())
         tool_card = self.window.current_turn.tool_cards["call-1"]
         self.assertEqual(tool_card.frameShape(), QFrame.NoFrame)
-        self.assertEqual(tool_card.tool_button.text(), "edit_file(demo.txt)")
+        self.assertEqual(tool_card.tool_button.text(), "")
+        self.assertEqual(tool_card.action_label.full_text(), "Файл изменён demo.txt +1 -1")
+        action_markup = tool_card.action_label.text()
+        self.assertIn('color:#7CC7FF', action_markup)
+        self.assertIn(f'color:{SUCCESS_GREEN}', action_markup)
+        self.assertIn(f'color:{ERROR_RED}', action_markup)
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertTrue(tool_card.args_container.isHidden())
         self.assertIsNone(tool_card.output_section)
         self.assertIsNotNone(tool_card.diff_section)
+        self.assertEqual(tool_card.diff_section.toggle_button.text(), "Отредактированный файл")
+        self.assertTrue(tool_card.diff_section.toggle_button.isHidden())
+        self.assertFalse(tool_card.diff_section.toggle_button.isChecked())
+        self.assertTrue(tool_card.diff_section.content_container.isHidden())
         self.assertEqual(tool_card.diff_section.content.path_label.text(), "demo.txt")
         self.assertEqual(tool_card.diff_section.content.added_label.text(), "+1")
         self.assertEqual(tool_card.diff_section.content.removed_label.text(), "-1")
@@ -1168,9 +1626,8 @@ class GuiUxTests(unittest.TestCase):
         tool_card.tool_button.click()
         self._process_events()
         self.assertTrue(tool_card.tool_button.isChecked())
-        self.assertFalse(tool_card.args_container.isHidden())
-        self.assertIn("Success", tool_card.args_view.toPlainText())
-        self.assertNotIn('"path"', tool_card.args_view.toPlainText())
+        self.assertTrue(tool_card.args_container.isHidden())
+        self.assertFalse(tool_card.diff_section.content_container.isHidden())
 
     def test_preview_tool_card_stays_hidden_until_resolved_refresh_arrives(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1218,10 +1675,35 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         self.assertFalse(tool_card.isHidden())
-        self.assertEqual(tool_card.tool_button.text(), "Writing file")
-        self.assertEqual(tool_card.subtitle_label.text(), "notes.md")
-        self.assertEqual(tool_card.phase_badge.text(), "Running")
-        self.assertNotIn("write_file()", tool_card.tool_button.text())
+        self.assertEqual(tool_card.tool_button.text(), "")
+        self.assertEqual(tool_card.action_label.full_text(), "Создание файла notes.md")
+        self.assertTrue(tool_card.subtitle_label.isHidden())
+        self.assertTrue(tool_card.phase_badge.isHidden())
+        self.assertNotIn("write_file()", tool_card.action_label.full_text())
+
+    def test_write_file_finished_label_says_file_created(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Создай файл"}))
+        self.window._handle_event(
+            StreamEvent(
+                "tool_finished",
+                {
+                    "tool_id": "call-write",
+                    "name": "write_file",
+                    "args": {"path": "notes.md"},
+                    "content": "Success",
+                    "summary": "File written successfully",
+                    "diff": "@@ -0,0 +1,1 @@\n+hello",
+                },
+            )
+        )
+        self._process_events()
+
+        tool_card = self.window.current_turn.tool_cards["call-write"]
+        self.assertEqual(tool_card.action_label.full_text(), "Файл создан notes.md +1 -0")
+        self.assertNotIn("Файл изменён", tool_card.action_label.full_text())
+        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertFalse(tool_card.diff_section.content_container.isHidden())
 
     def test_cli_exec_renders_live_terminal_panel_and_streams_output(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1250,19 +1732,17 @@ class GuiUxTests(unittest.TestCase):
         self.assertTrue(tool_card.args_container.isHidden())
         self.assertTrue(tool_card.tool_button.isEnabled())
         self.assertTrue(tool_card.tool_button.isCheckable())
-        self.assertTrue(tool_card.tool_button.isChecked())
-        self.assertIn("cli_exec", tool_card.tool_button.text())
+        self.assertFalse(tool_card.tool_button.isChecked())
+        self.assertEqual(tool_card.tool_button.text(), "")
+        self.assertEqual(tool_card.action_label.full_text(), "Выполнение команды echo hello")
         self.assertIsNotNone(tool_card.cli_exec_widget)
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
         self.assertEqual(tool_card.cli_exec_widget.command_label.text(), "$ echo hello")
         output_text = tool_card.cli_exec_widget.output_view.toPlainText()
         self.assertIn("hello", output_text)
         self.assertIn("world", output_text)
         self.assertLessEqual(tool_card.cli_exec_widget.output_view.height(), 90)
 
-        tool_card.tool_button.click()
-        self._process_events()
-        self.assertTrue(tool_card.cli_exec_widget.isHidden())
         tool_card.tool_button.click()
         self._process_events()
         self.assertFalse(tool_card.cli_exec_widget.isHidden())
@@ -1306,6 +1786,14 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-wide"]
+        action_label = tool_card.action_label
+        self.assertEqual(action_label.sizePolicy().horizontalPolicy(), QSizePolicy.Ignored)
+        action_label.setFixedWidth(180)
+        self._process_events()
+        self.assertNotIn("\n", action_label.text())
+        self.assertTrue(bool(action_label.toolTip()))
+        self.assertGreater(len(action_label.toolTip()), len(action_label.text()))
+
         label = tool_card.cli_exec_widget.command_label
         self.assertEqual(label.sizePolicy().horizontalPolicy(), QSizePolicy.Ignored)
         label.setFixedWidth(180)
@@ -1335,7 +1823,7 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-race"]
-        self.assertIn("echo race", tool_card.tool_button.text())
+        self.assertEqual(tool_card.action_label.full_text(), "Выполнение команды echo race")
         self.assertEqual(tool_card.cli_exec_widget.command_label.text(), "$ echo race")
 
     def test_cli_exec_output_autofollow_respects_manual_scroll(self):
@@ -1404,9 +1892,9 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-cli-finish"]
-        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertFalse(tool_card.tool_button.isChecked())
         self.assertIsNotNone(tool_card.cli_exec_widget)
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
         self.assertIn("done", tool_card.cli_exec_widget.output_view.toPlainText())
         self._wait_for_gui(950)
         self.assertFalse(tool_card.tool_button.isChecked())
@@ -1429,14 +1917,11 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-cli-finish-open"]
-        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertFalse(tool_card.tool_button.isChecked())
         self.assertIsNotNone(tool_card.cli_exec_widget)
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
-
-        # User toggles while running; finish still auto-collapses by policy.
-        tool_card.tool_button.click()
-        self._process_events()
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
+
+        # User toggles while running; finish still keeps the compact row collapsed.
         tool_card.tool_button.click()
         self._process_events()
         self.assertFalse(tool_card.cli_exec_widget.isHidden())
@@ -1446,8 +1931,8 @@ class GuiUxTests(unittest.TestCase):
         )
         self._process_events()
 
-        self.assertTrue(tool_card.tool_button.isChecked())
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+        self.assertFalse(tool_card.tool_button.isChecked())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
         self._wait_for_gui(950)
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
@@ -1509,12 +1994,52 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(restored_turn.block_kinds(), ["user", "tool_group"])
         self.assertIsInstance(restored_turn.tool_group, ToolGroupWidget)
         self.assertTrue(restored_turn.tool_group.container.isHidden())
-        self.assertEqual(restored_turn.tool_group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(restored_turn.tool_group.header_btn.text(), "Команда выполнена")
         tool_card = restored_turn.tool_cards["call-cli-restored"]
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertIsNotNone(tool_card.cli_exec_widget)
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
-        self.assertEqual(tool_card.phase_badge.text(), "✓")
+        self.assertEqual(tool_card.action_label.full_text(), "Команда выполнена python --version")
+        self.assertTrue(tool_card.phase_badge.isHidden())
+
+    def test_restored_tool_widgets_are_parented_under_tool_group(self):
+        payload = self._snapshot_payload()
+        payload["transcript"] = {
+            "summary_notice": "",
+            "turns": [
+                {
+                    "user_text": "edit",
+                    "blocks": [
+                        {
+                            "type": "tool",
+                            "payload": {
+                                "tool_id": "call-edit-restored",
+                                "name": "edit_file",
+                                "args": {"path": "index.html"},
+                                "content": "Success",
+                                "summary": "File edited successfully",
+                                "duration": 0.2,
+                                "diff": "@@ -1,1 +1,1 @@\n-old\n+new",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        self.window._handle_initialized(payload)
+        self._process_events()
+
+        restored_turn = self.window.transcript.layout.itemAt(0).widget()
+        tool_card = restored_turn.tool_cards["call-edit-restored"]
+        self.assertIs(tool_card.parentWidget(), restored_turn.tool_group.container)
+        self.assertFalse(tool_card.isWindow())
+        self.assertIsNotNone(tool_card.diff_section)
+        self.assertIs(tool_card.diff_section.parentWidget(), tool_card)
+        self.assertFalse(tool_card.diff_section.isWindow())
+        self.assertIsInstance(tool_card.diff_section.content, DiffBlockWidget)
+        self.assertFalse(tool_card.diff_section.content.isWindow())
+        self.assertIs(tool_card.diff_section.content.editor.parentWidget(), tool_card.diff_section.content)
 
     def test_finished_tool_restored_from_transcript_keeps_success_badge(self):
         payload = self._snapshot_payload()
@@ -1552,11 +2077,11 @@ class GuiUxTests(unittest.TestCase):
 
         restored_turn = self.window.transcript.layout.itemAt(0).widget()
         tool_card = restored_turn.tool_cards["call-restored-finished"]
-        self.assertEqual(tool_card.tool_button.text(), "Reading file")
-        self.assertTrue(tool_card.subtitle_label.text().startswith("index.html · Read 78"))
-        self.assertEqual(tool_card.subtitle_label.toolTip(), "read_file(index.html)")
-        self.assertEqual(tool_card.phase_badge.text(), "✓")
-        self.assertNotEqual(tool_card.phase_badge.text(), "Running")
+        self.assertEqual(tool_card.tool_button.text(), "")
+        self.assertEqual(tool_card.action_label.full_text(), "Файл прочитан index.html")
+        self.assertEqual(tool_card.action_label.toolTip(), "read_file(index.html)")
+        self.assertTrue(tool_card.subtitle_label.isHidden())
+        self.assertTrue(tool_card.phase_badge.isHidden())
 
     def test_restored_turn_keeps_separate_tool_groups_between_assistant_blocks(self):
         payload = self._snapshot_payload()
@@ -1600,7 +2125,7 @@ class GuiUxTests(unittest.TestCase):
         groups = restored_turn.findChildren(ToolGroupWidget)
         self.assertEqual(len(groups), 2)
         self.assertTrue(all(group.container.isHidden() for group in groups))
-        self.assertEqual([group.header_btn.text() for group in groups], ["Completed (1 tools)", "Completed (1 tools)"])
+        self.assertEqual([group.header_btn.text() for group in groups], ["Прочитан 1 файл", "Изменён 1 файл"])
 
     def test_tool_error_output_is_collapsed_by_default(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1626,7 +2151,7 @@ class GuiUxTests(unittest.TestCase):
         tool_card.tool_button.click()
         self._process_events()
         self.assertIn("error[access_denied]", tool_card.args_view.toPlainText().lower())
-        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Completed (1 tools) ·")
+        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Редактирование не удалось ·")
         self.assertFalse(self.window.current_turn.tool_group.error_icon_label.isHidden())
         self.assertEqual(self.window.current_turn.tool_group.error_count_label.text(), "1")
 
@@ -1661,7 +2186,7 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         restored_turn = self.window.transcript.layout.itemAt(0).widget()
-        self.assertEqual(restored_turn.tool_group.header_btn.text(), "Completed (1 tools) ·")
+        self.assertEqual(restored_turn.tool_group.header_btn.text(), "Редактирование не удалось ·")
         self.assertFalse(restored_turn.tool_group.error_icon_label.isHidden())
         self.assertEqual(restored_turn.tool_group.error_count_label.text(), "1")
         self.assertTrue(restored_turn.tool_group.container.isHidden())
@@ -1683,7 +2208,8 @@ class GuiUxTests(unittest.TestCase):
         )
         self._process_events()
         tool_card = self.window.current_turn.tool_cards["call-read"]
-        self.assertEqual(tool_card.phase_badge.text(), "Running")
+        self.assertEqual(tool_card.action_label.full_text(), "Чтение файла main.py")
+        self.assertTrue(tool_card.phase_badge.isHidden())
 
         tool_card.tool_button.click()
         self._process_events()
@@ -1702,11 +2228,12 @@ class GuiUxTests(unittest.TestCase):
             )
         )
         self._process_events()
-        self.assertEqual(tool_card.phase_badge.text(), "✓")
+        self.assertEqual(tool_card.action_label.full_text(), "Файл прочитан main.py")
+        self.assertTrue(tool_card.phase_badge.isHidden())
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertTrue(tool_card.args_container.isHidden())
         self.assertFalse(self.window.current_turn.tool_group.container.isHidden())
-        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(self.window.current_turn.tool_group.header_btn.text(), "Прочитан 1 файл")
 
     def test_finished_tool_group_stays_open_until_assistant_text_even_after_manual_expand(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1750,7 +2277,7 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         self.assertFalse(group.container.isHidden())
-        self.assertEqual(group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(group.header_btn.text(), "Изменён 1 файл")
 
         self.window._handle_event(
             StreamEvent(
@@ -1766,7 +2293,7 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertTrue(group.container.isHidden())
         self.assertEqual(self.window.current_turn.block_kinds(), ["user", "tool_group", "assistant"])
-        self.assertEqual(group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(group.header_btn.text(), "Изменён 1 файл")
 
     def test_approval_notice_after_tool_finish_keeps_group_completed(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1787,16 +2314,17 @@ class GuiUxTests(unittest.TestCase):
 
         group = self.window.current_turn.tool_group
         self.assertFalse(group.container.isHidden())
-        self.assertEqual(group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(group.header_btn.text(), "Изменён 1 файл")
 
         self.window._handle_event(
             StreamEvent("approval_resolved", {"approved": True, "always": False, "auto": False})
         )
         self._process_events()
 
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "tool_group", "notice"])
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "tool_group"])
+        self.assertIn("approved", self.window.statusBar().currentMessage().lower())
         self.assertFalse(group.container.isHidden())
-        self.assertEqual(group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(group.header_btn.text(), "Изменён 1 файл")
 
     def test_run_finished_keeps_completed_tool_group_open_without_assistant_text(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1819,7 +2347,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertIsNotNone(group)
         self.assertFalse(group.container.isHidden())
         self.assertEqual(self.window.current_turn.block_kinds(), ["user", "tool_group", "stats"])
-        self.assertEqual(group.header_btn.text(), "Completed (1 tools)")
+        self.assertEqual(group.header_btn.text(), "Прочитан 1 файл")
 
     def test_assistant_comment_after_tool_group_does_not_repeat_previous_prefix(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1888,13 +2416,14 @@ class GuiUxTests(unittest.TestCase):
         )
         self._process_events()
         tool_card = self.window.current_turn.tool_cards["call-cli-run"]
-        self.assertEqual(tool_card.phase_badge.text(), "Running")
-        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertEqual(tool_card.action_label.full_text(), "Выполнение команды echo hi")
+        self.assertTrue(tool_card.phase_badge.isHidden())
+        self.assertFalse(tool_card.tool_button.isChecked())
 
         tool_card.tool_button.click()
         self._process_events()
-        self.assertFalse(tool_card.tool_button.isChecked())
-        self.assertTrue(tool_card.cli_exec_widget.isHidden())
+        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertFalse(tool_card.cli_exec_widget.isHidden())
 
         tool_card._cli_started_at_monotonic = time.monotonic() - 1.2
         self.window._handle_event(
@@ -1909,7 +2438,8 @@ class GuiUxTests(unittest.TestCase):
             )
         )
         self._process_events()
-        self.assertEqual(tool_card.phase_badge.text(), "✓")
+        self.assertEqual(tool_card.action_label.full_text(), "Команда выполнена echo hi")
+        self.assertTrue(tool_card.phase_badge.isHidden())
         self.assertFalse(tool_card.tool_button.isChecked())
         self.assertTrue(tool_card.cli_exec_widget.isHidden())
 
@@ -1935,7 +2465,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(tool_card.cli_exec_widget.meta_label.property("severity"), "error")
         self.assertTrue(tool_card.cli_exec_widget.meta_label.text().lower().startswith("error"))
 
-    def test_hidden_internal_notice_event_is_rendered_in_ui(self):
+    def test_hidden_internal_notice_event_is_rendered_in_status_bar(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Проверь остановку"}))
         self.window._handle_event(
@@ -1949,7 +2479,8 @@ class GuiUxTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
+        self.assertIn("продолжение", self.window.statusBar().currentMessage().lower())
 
     def test_tool_args_missing_diagnostic_is_not_shown_in_transcript(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -2073,12 +2604,13 @@ class GuiUxTests(unittest.TestCase):
         self.window._handle_event(
             StreamEvent("approval_resolved", {"approved": True, "always": True, "auto": False})
         )
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
+        self.assertIn("approved", self.window.statusBar().currentMessage().lower())
 
         self.window._handle_event(
             StreamEvent("approval_resolved", {"approved": True, "always": True, "auto": True})
         )
-        self.assertEqual(self.window.current_turn.block_kinds(), ["user", "notice"])
+        self.assertEqual(self.window.current_turn.block_kinds(), ["user"])
 
     def test_new_session_clears_transcript_and_calls_controller(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -2204,22 +2736,77 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertEqual(self.controller.switch_session_calls, ["session-older"])
 
-    def test_sidebar_search_filters_sessions_and_shows_empty_state(self):
+    def test_sidebar_marks_active_project_group(self):
         payload = self._snapshot_payload()
         self.window._handle_initialized(payload)
 
-        self.window.sidebar.search_field.setText("other-project")
-        self._process_events()
+        active_group_titles = []
+        inactive_group_titles = []
+        for row in range(self.window.sidebar.model.rowCount()):
+            index = self.window.sidebar.model.index(row, 0)
+            if index.data(SessionListModel.KindRole) != "group":
+                continue
+            title = index.data(SessionListModel.ProjectTitleRole)
+            if index.data(SessionListModel.ActiveProjectRole):
+                active_group_titles.append(title)
+            else:
+                inactive_group_titles.append(title)
 
-        self.assertEqual(self.window.sidebar.model.session_row_count(), 1)
+        self.assertEqual(active_group_titles, ["workspace"])
+        self.assertIn("other-project", inactive_group_titles)
+
+    def test_sidebar_has_no_search_and_expands_project_groups(self):
+        payload = self._snapshot_payload()
+        for index in range(6):
+            payload["sessions"].append(
+                {
+                    "session_id": f"session-extra-{index}",
+                    "thread_id": f"thread-extra-{index}",
+                    "project_path": "D:/demo/workspace",
+                    "title": f"Extra chat {index}",
+                    "created_at": f"2026-03-31T09:0{index}:00+00:00",
+                    "updated_at": f"2026-03-31T11:0{index}:00+00:00",
+                }
+            )
+        self.window._handle_initialized(payload)
+
+        self.assertFalse(hasattr(self.window.sidebar, "search_field"))
+        self.assertLess(self.window.sidebar.model.session_row_count(), len(payload["sessions"]))
         self.assertFalse(self.window.sidebar.list_view.isHidden())
 
-        self.window.sidebar.search_field.setText("missing-chat")
+        more_index = QModelIndex()
+        for row in range(self.window.sidebar.model.rowCount()):
+            candidate = self.window.sidebar.model.index(row, 0)
+            if candidate.data(SessionListModel.KindRole) == "more":
+                more_index = candidate
+                break
+        self.assertTrue(more_index.isValid())
+        self.assertEqual(more_index.data(SessionListModel.TitleRole), "Показать больше")
+
+        self.window.sidebar._emit_clicked_session(more_index)
         self._process_events()
 
-        self.assertEqual(self.window.sidebar.model.session_row_count(), 0)
-        self.assertFalse(self.window.sidebar.list_view.isVisible())
-        self.assertEqual(self.window.sidebar.empty_label.text(), "No chats match this search")
+        self.assertEqual(self.window.sidebar.model.session_row_count(), len(payload["sessions"]))
+        self.assertFalse(self.window.sidebar.list_view.isHidden())
+
+        collapse_index = QModelIndex()
+        for row in range(self.window.sidebar.model.rowCount()):
+            candidate = self.window.sidebar.model.index(row, 0)
+            if candidate.data(SessionListModel.KindRole) == "more" and candidate.data(SessionListModel.TitleRole) == "Свернуть":
+                collapse_index = candidate
+                break
+        self.assertTrue(collapse_index.isValid())
+
+        self.window.sidebar._emit_clicked_session(collapse_index)
+        self._process_events()
+
+        self.assertLess(self.window.sidebar.model.session_row_count(), len(payload["sessions"]))
+        more_titles = [
+            self.window.sidebar.model.index(row, 0).data(SessionListModel.TitleRole)
+            for row in range(self.window.sidebar.model.rowCount())
+            if self.window.sidebar.model.index(row, 0).data(SessionListModel.KindRole) == "more"
+        ]
+        self.assertIn("Показать больше", more_titles)
 
     def test_delete_session_requests_controller_after_confirmation(self):
         payload = self._snapshot_payload()
@@ -3209,7 +3796,7 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(self.window.model_chip.accessibleName(), "Model selector")
 
     def test_primary_widgets_expose_accessible_names(self):
-        self.assertEqual(self.window.sidebar.search_field.accessibleName(), "Chat search")
+        self.assertFalse(hasattr(self.window.sidebar, "search_field"))
         self.assertEqual(self.window.sidebar.list_view.accessibleName(), "Chat list")
         self.assertEqual(self.window.transcript.accessibleName(), "Conversation transcript")
         self.assertEqual(self.window.composer.accessibleName(), "Composer")

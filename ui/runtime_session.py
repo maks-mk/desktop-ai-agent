@@ -208,6 +208,7 @@ class RuntimeSessionCoordinator:
             agent_app=self.worker.agent_app,
             include_transcript=include_transcript,
         )
+        self.worker._sync_pending_user_choice_from_payload(payload)
         self.worker.session_changed.emit(payload)
         return payload
 

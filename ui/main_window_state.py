@@ -219,10 +219,10 @@ class RunStatusController:
 
             if node == "summarize":
                 self.window._summarize_in_progress = True
-                self.window.current_turn.set_summary_notice("Context is being compressed automatically…", level="info")
+                self.show_transient_status_message("Context is being compressed automatically…")
             elif self.window._summarize_in_progress:
                 self.window._summarize_in_progress = False
-                self.window.current_turn.set_summary_notice("Context compressed", level="success")
+                self.show_transient_status_message("Context compressed")
             self.window.transcript.notify_content_changed()
 
     def on_run_finished(self, payload: dict) -> None:
@@ -237,7 +237,13 @@ class RunStatusController:
     def on_run_failed(self, payload: dict) -> None:
         self.window._realtime_timer.stop()
         self.window.status_meta.setText("")
-        message = payload.get("message", "Run failed")
+        message = str(payload.get("message", "Run failed") or "Run failed").strip()
+        if message.casefold() in {"cancelled", "canceled", "stopped by user."}:
+            if self.window.current_turn is not None:
+                self.window.current_turn.clear_status()
+            self.set_status_visual("Ready", success=True)
+            self.show_transient_status_message("Stopped")
+            return
         if self.window.current_turn is not None:
             self.window.current_turn.clear_status()
             self.window.current_turn.add_notice(message, level="error")
@@ -258,11 +264,10 @@ class RunStatusController:
         self.show_transient_status_message("Started a new session")
 
     def set_primary_status_message(self, label: str) -> None:
-        self.window._primary_status_label = label
-        self.window._status_message_ticket += 1
+        self.window._status_bar_manager.set_primary_status_message(label)
 
     def show_transient_status_message(self, label: str, timeout_ms: int = 1800) -> None:
-        self.window._status_message_ticket += 1
+        self.window._status_bar_manager.show_transient_status_message(label, timeout_ms=timeout_ms)
 
     def set_status_visual(self, label: str, *, busy: bool = False, success: bool = False, error: bool = False) -> None:
         color = ACCENT_BLUE if busy else SUCCESS_GREEN if success else ERROR_RED if error else ACCENT_BLUE

@@ -32,20 +32,6 @@ def _compact_json_payload(payload: Dict[str, Any], *, limit: int = 180) -> str:
     return compact_text(", ".join(items), limit)
 
 
-def _actionable_recovery_hint(repair_plan: RepairPlan | None) -> str:
-    if repair_plan is None:
-        return ""
-    parts: List[str] = []
-    suggested_tool = str(repair_plan.suggested_tool_name or "").strip()
-    if suggested_tool:
-        parts.append(f"Suggested next tool: `{suggested_tool}`.")
-    if isinstance(repair_plan.patched_args, dict) and repair_plan.patched_args:
-        parts.append(f"Prepared arguments: {_compact_json_payload(repair_plan.patched_args)}")
-    if repair_plan.notes:
-        parts.append(f"Hint: {repair_plan.notes}")
-    return ("\n" + "\n".join(parts)) if parts else ""
-
-
 class RecoveryManager:
     def empty_state(self, *, turn_id: int) -> Dict[str, Any]:
         return {
@@ -215,21 +201,6 @@ class RecoveryManager:
         tool_hint = f" (last tool: `{tool_names[0]}`)" if tool_names else ""
         task_hint = compact_text(current_task.strip(), 180) if current_task else "the current task"
         return constants.LOOP_BUDGET_HANDOFF_TEMPLATE.format(task_hint=task_hint, tool_hint=tool_hint)
-
-    @staticmethod
-    def build_successful_tool_stagnation_handoff_text(
-        current_task: str,
-        *,
-        tool_name: str,
-        repeat_count: int,
-    ) -> str:
-        tool_hint = f" (repeated tool: `{tool_name}`)" if tool_name else ""
-        task_hint = compact_text(current_task.strip(), 180) if current_task else "the current task"
-        return constants.SUCCESSFUL_TOOL_STAGNATION_HANDOFF_TEMPLATE.format(
-            task_hint=task_hint,
-            tool_hint=tool_hint,
-            repeat_count=max(1, int(repeat_count or 0)),
-        )
 
     @staticmethod
     def build_internal_ui_notice(completion_reason: str) -> str:
