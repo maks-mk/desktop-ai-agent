@@ -374,6 +374,11 @@ class ToolCardWidget(QFrame):
     def _compact_single_line(value: Any) -> str:
         return " ".join(str(value or "").split())
 
+    @staticmethod
+    def _is_argument_placeholder(value: str) -> bool:
+        normalized = str(value or "").strip().rstrip(".…").casefold()
+        return normalized in {"waiting for arguments", "resolving arguments"}
+
     def _compact_argument_text(self, payload: dict[str, Any], normalized_args: dict[str, Any]) -> str:
         role = self._tool_role(payload.get("name", ""))
         if role == "command":
@@ -382,12 +387,17 @@ class ToolCardWidget(QFrame):
                 command = self._command_from_display(payload.get("raw_display", ""), payload.get("name", "cli_exec"))
             return self._compact_single_line(command)
         subtitle = self._compact_single_line(payload.get("subtitle", ""))
+        if self._is_argument_placeholder(subtitle):
+            subtitle = ""
         if role == "edit":
             stats = self._diff_stats(payload.get("diff", ""))
             return f"{subtitle} {stats}".strip() if stats else subtitle
         if subtitle:
             return subtitle
         raw_display = self._compact_single_line(payload.get("raw_display", ""))
+        tool_name = self._compact_single_line(payload.get("name", ""))
+        if raw_display == tool_name:
+            return ""
         display = self._compact_single_line(payload.get("display", ""))
         return "" if raw_display == display else raw_display
 
@@ -408,6 +418,8 @@ class ToolCardWidget(QFrame):
         if role not in {"edit", "read", "list"}:
             return []
         target = self._compact_single_line(payload.get("subtitle", ""))
+        if self._is_argument_placeholder(target):
+            target = ""
         if not target:
             path_value = normalized_args.get("file_path") or normalized_args.get("path")
             target = self._compact_single_line(path_value)

@@ -2155,6 +2155,43 @@ class GuiUxTests(unittest.TestCase):
         self.assertFalse(self.window.current_turn.tool_group.error_icon_label.isHidden())
         self.assertEqual(self.window.current_turn.tool_group.error_count_label.text(), "1")
 
+    def test_tool_validation_error_drops_waiting_for_arguments_placeholder(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window._handle_event(StreamEvent("run_started", {"text": "Прочитай"}))
+        self.window._handle_event(
+            StreamEvent(
+                "tool_started",
+                {
+                    "tool_id": "call-missing-path",
+                    "name": "read_file",
+                    "args": {},
+                    "subtitle": "Waiting for arguments…",
+                    "args_state": "pending",
+                    "display_state": "preview",
+                    "phase": "preparing",
+                },
+            )
+        )
+        self.window._handle_event(
+            StreamEvent(
+                "tool_finished",
+                {
+                    "tool_id": "call-missing-path",
+                    "name": "read_file",
+                    "content": "ERROR[VALIDATION]: Missing required field(s): path.",
+                    "summary": "Missing required field(s): path.",
+                    "is_error": True,
+                    "duration": 0.1,
+                },
+            )
+        )
+        self._process_events()
+
+        tool_card = self.window.current_turn.tool_cards["call-missing-path"]
+        self.assertEqual(tool_card.action_label.full_text(), "Чтение не удалось")
+        self.assertNotIn("Waiting for arguments", tool_card.action_label.full_text())
+        self.assertNotIn("Waiting for arguments", tool_card.action_label.toolTip())
+
     def test_restored_error_tool_group_does_not_crash_and_shows_error_count(self):
         payload = self._snapshot_payload()
         payload["transcript"] = {
