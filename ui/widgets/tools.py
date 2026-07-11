@@ -67,8 +67,8 @@ class CliExecWidget(QFrame):
         self.output_view.setReadOnly(True)
         self.output_view.setFont(_make_mono_font())
         self.output_view.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.output_view.setMinimumHeight(44)
-        self.output_view.setMaximumHeight(156)
+        self.output_view.setMinimumHeight(96)
+        self.output_view.setMaximumHeight(220)
         self.output_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.output_view.document().setMaximumBlockCount(1200)
         self.output_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -114,7 +114,7 @@ class CliExecWidget(QFrame):
         self._auto_follow_enabled = True
 
     def _sync_output_height(self) -> None:
-        _sync_plain_text_height(self.output_view, min_lines=2, max_lines=7, extra_padding=14)
+        _sync_plain_text_height(self.output_view, min_lines=6, max_lines=10, extra_padding=18)
 
     def append_output(self, text: str, stream: str = "stdout") -> None:
         chunk = _strip_ansi_for_display(text)
@@ -251,8 +251,8 @@ class ToolCardWidget(QFrame):
         if self._is_cli_exec:
             self.args_container.setVisible(False)
             self._ensure_cli_exec_widget()
-            self.tool_button.setChecked(False)
-            self._set_cli_expanded(False)
+            self.tool_button.setChecked(True)
+            self._set_cli_expanded(True)
 
     @staticmethod
     def _normalize_args(args: Any) -> dict[str, Any]:
@@ -275,8 +275,12 @@ class ToolCardWidget(QFrame):
             return "search"
         if normalized in {"ls", "LS", "list_directory"}:
             return "list"
-        if normalized in {"web_search", "WebSearch", "fetch_url", "WebFetch", "fetch_content", "download_file"}:
+        if normalized in {"web_search", "WebSearch", "batch_web_search"}:
             return "network"
+        if normalized in {"fetch_url", "WebFetch", "fetch_content"}:
+            return "fetch"
+        if normalized == "download_file":
+            return "download"
         return "tool"
 
     @classmethod
@@ -293,6 +297,8 @@ class ToolCardWidget(QFrame):
                 "search": "Поиск не удался",
                 "list": "Просмотр не удался",
                 "network": "Запрос не выполнен",
+                "fetch": "Страницу получить не удалось",
+                "download": "Файл скачать не удалось",
             }.get(role, "Инструмент завершился ошибкой")
         if role == "edit":
             if normalized_name in {"write_file", "Write"}:
@@ -307,7 +313,11 @@ class ToolCardWidget(QFrame):
         if role == "list":
             return "Каталог просмотрен" if phase == "finished" else "Просмотр каталога"
         if role == "network":
-            return "Запрос выполнен" if phase == "finished" else "Выполняется запрос"
+            return "Поиск в интернете завершён" if phase == "finished" else "Ищу в интернете"
+        if role == "fetch":
+            return "Страница получена" if phase == "finished" else "Получаю страницу"
+        if role == "download":
+            return "Файл скачан" if phase == "finished" else "Скачиваю файл"
         return str(payload.get("display", "") or name or "Инструмент")
 
     def _set_visual_property(self, widget: QWidget, name: str, value: str) -> None:
@@ -392,6 +402,8 @@ class ToolCardWidget(QFrame):
         if role == "edit":
             stats = self._diff_stats(payload.get("diff", ""))
             return f"{subtitle} {stats}".strip() if stats else subtitle
+        if role in {"network", "fetch", "download"}:
+            return subtitle
         if subtitle:
             return subtitle
         raw_display = self._compact_single_line(payload.get("raw_display", ""))
@@ -590,7 +602,7 @@ class ToolCardWidget(QFrame):
         rendered = self._render_inline_output(content, summary)
         if self.args_view.toPlainText() != rendered:
             self.args_view.setPlainText(rendered)
-        _sync_plain_text_height(self.args_view, min_lines=2, max_lines=10, extra_padding=14)
+        _sync_plain_text_height(self.args_view, min_lines=4, max_lines=10, extra_padding=14)
 
     def _uses_diff_only_output(self) -> bool:
         return self._tool_role(self.payload.get("name", "")) == "edit" and bool(self.payload.get("diff", ""))
@@ -605,6 +617,8 @@ class ToolCardWidget(QFrame):
             return
         self._cancel_preview_reveal()
         self._set_tool_visible(True)
+        self.tool_button.setChecked(True)
+        self._set_cli_expanded(True)
         self._ensure_cli_exec_widget().append_output(text, stream=stream)
 
     def update_started_payload(self, payload: dict[str, Any]) -> None:
@@ -623,8 +637,8 @@ class ToolCardWidget(QFrame):
                 command = self._command_from_display(self.payload.get("raw_display", ""), self.payload.get("name", "cli_exec"))
             if command:
                 cli_exec_widget.set_command(command)
-            self.tool_button.setChecked(False)
-            self._set_cli_expanded(False)
+            self.tool_button.setChecked(True)
+            self._set_cli_expanded(True)
 
     def finish(self, payload: dict[str, Any], *, collapse_delay_ms: int | None = None) -> None:
         merged_payload = dict(self.payload)

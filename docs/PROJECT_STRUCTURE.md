@@ -144,8 +144,8 @@ GUI на PySide6 и слой выполнения агента в отдельн
 - `runtime.py` - публичный runtime controller facade.
 - `runtime_worker.py` - `AgentRunWorker` и `AgentRuntimeController`, запуск графа, interrupts, repair/continue flow, классификация stream-ошибок (`_classify_stream_error`), экспоненциальный backoff с джиттером (`_stream_retry_backoff`), live CLI output bridge.
 - `runtime_session.py` - координация активной runtime-сессии.
-- `runtime_payloads.py` - payloads для UI: transcript, tools snapshot, approval/user-choice cards, восстановление pending plan review из checkpoint state.
-- `streaming.py` - нормализация streaming events, reasoning/thinking signals, plan-progress events, suppression/fuzzy-dedup assistant replay.
+- `runtime_payloads.py` - payloads для UI: transcript, tools snapshot, approval/user-choice cards, summary progress.
+- `streaming.py` - нормализация streaming events, reasoning/thinking signals, tool events, suppression/fuzzy-dedup assistant replay.
 - `main_window_state.py` - routing stream events и состояние composer/run status.
 - `theme.py` - цвета, стили и Qt stylesheet.
 - `tool_message_utils.py` - форматирование tool messages для UI.
@@ -163,7 +163,7 @@ GUI на PySide6 и слой выполнения агента в отдельн
 ### `ui/widgets/`
 
 - `foundation.py` - базовые виджеты, markdown/code/diff helpers.
-- `messages.py` - user/assistant/notice/status/approval/user-choice виджеты, plan review card и plan progress panel.
+- `messages.py` - user/assistant/notice/status/approval/user-choice виджеты.
 - `composer.py` - поле ввода, history, mentions, image attachments.
 - `transcript.py` - отображение диалога и группировка turn-ов.
 - `tool_group.py` - группировка tool cards одного хода.
@@ -183,7 +183,6 @@ GUI на PySide6 и слой выполнения агента в отдельн
 - `test_tooling_refactor.py`, `test_policy_engine.py`, `test_api_key_rotation.py` - tools, policies и ключи.
 - `test_model_profiles.py`, `test_model_fetcher.py` - профили и загрузка моделей.
 - `test_cli_ux.py`, `test_main_window_facade.py`, `test_ui_helpers.py` - UI и UX.
-- `test_plan_mode.py` - Plan Mode: payload, prompt policy, context builder, tool filtering, protocol relaxation.
 - `test_refactor_services.py`, `test_self_correction_engine.py`, `test_critic_graph.py`, `test_mixed_parallel_tools.py`, `test_intent_engine.py`, `test_input_sanitizer.py`, `test_logging_config.py`, `test_session_utils.py` - сервисы ядра и вспомогательная логика.
 
 ## Основной поток выполнения

@@ -381,11 +381,11 @@ class ToolingRefactorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             self._make_config(MAX_FILE_SIZE="300MBps")
 
-    def test_sampling_controls_allow_none_sentinel(self):
+    def test_unknown_sampling_env_keys_are_ignored(self):
         config = self._make_config(TOP_P="none", TOP_K="")
 
-        self.assertIsNone(config.top_p)
-        self.assertIsNone(config.top_k)
+        self.assertFalse(hasattr(config, "top_p"))
+        self.assertFalse(hasattr(config, "top_k"))
 
     def test_logging_env_keys_are_loaded_via_agent_config(self):
         config = self._make_config(

@@ -464,8 +464,6 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
         "max_retries": 0,
         "stream_usage": True,
     }
-    if getattr(config, "top_p", None) is not None:
-        openai_kwargs["top_p"] = float(config.top_p)
     registry = ProviderRegistry.from_path(config.provider_registry_path)
     provider_config = registry.match(config.openai_base_url)
     reasoning_enabled = bool(getattr(config, "enable_model_reasoning", True))
@@ -506,7 +504,7 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
             sorted((openai_kwargs.get("extra_body") or {}).keys())
             if isinstance(openai_kwargs.get("extra_body"), dict)
             else [],
-            sorted(k for k in openai_kwargs if k not in ("model", "temperature", "api_key", "base_url", "max_retries", "stream_usage", "top_p")),
+            sorted(k for k in openai_kwargs if k not in ("model", "temperature", "api_key", "base_url", "max_retries", "stream_usage")),
         )
     else:
         reasoning_logger.debug(

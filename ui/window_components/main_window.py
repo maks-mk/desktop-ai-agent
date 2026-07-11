@@ -106,7 +106,6 @@ class MainWindow(QMainWindow):
         self._last_assistant_delta_sequence = 0
         self._last_assistant_delta_text = ""
         self._pending_assistant_delta_payload: dict | None = None
-        self._pending_implementation_plan_markdown = ""
         self._event_router: StreamEventRouter | None = None
         self._assistant_delta_flush_timer = QTimer(self)
         self._assistant_delta_flush_timer.setSingleShot(True)
@@ -203,13 +202,11 @@ class MainWindow(QMainWindow):
         self.model_image_badge = refs.model_image_badge
         self.no_models_label = refs.no_models_label
         self.open_settings_inline_button = refs.open_settings_inline_button
-        self.plan_mode_button = refs.plan_mode_button
         self.summary_progress_ring = refs.summary_progress_ring
         self.send_button = refs.send_button
         self.stop_action_button = refs.stop_action_button
         self.inspector_container = refs.inspector_container
         self.inspector_panel = refs.inspector_panel
-        self.plan_progress_panel = refs.plan_progress_panel
         self.overview_panel = refs.overview_panel
         self.tools_panel = refs.tools_panel
         self.help_text = refs.help_text
@@ -245,8 +242,6 @@ class MainWindow(QMainWindow):
         self.approval_card.decision_made.connect(self._handle_inline_approval_decision)
         self.user_choice_card.option_selected.connect(self._handle_user_choice_selected)
         self.user_choice_card.custom_option_requested.connect(self._handle_custom_choice_requested)
-        self.plan_progress_panel.cancel_requested.connect(lambda: self.controller.cancel_active_plan())
-
         self.controller.initialized.connect(self._handle_initialized)
         self.controller.initialization_failed.connect(self._handle_init_failed)
         self.controller.event_emitted.connect(self._handle_event)
@@ -266,8 +261,6 @@ class MainWindow(QMainWindow):
                 "tool_finished": self._on_tool_finished,
                 "tool_args_missing": self._on_tool_args_missing,
                 "summary_progress": self._on_summary_progress,
-                "implementation_plan_buffer": self._on_implementation_plan_buffer,
-                "plan_progress": self._on_plan_progress,
                 "summary_notice": self._on_summary_notice,
                 "approval_resolved": self._on_approval_resolved,
                 "run_finished": self._on_run_finished,
@@ -323,54 +316,12 @@ class MainWindow(QMainWindow):
         icon_color = "#08090B" if can_send else "#8A857E"
         self.send_button.setIcon(_fa_icon("fa5s.arrow-up", color=icon_color, size=14))
 
-    def _clear_plan_progress_panel(self, *, restore_inspector: bool = False) -> None:
-        self.plan_progress_panel.clear_plan()
-        self.plan_progress_panel.hide()
-        if restore_inspector:
-            self._restore_inspector_panel()
-        elif self.inspector_panel.isHidden():
-            self._inspector_controller.set_inspector_collapsed(True)
-
-    def _reset_plan_progress_for_new_run(self) -> None:
-        """Clear stale terminal/draft plan UI, but keep active execution visible across retries."""
-        if self._plan_progress_panel_is_active():
-            return
-        self._clear_plan_progress_panel()
-
-    @staticmethod
-    def _plan_progress_panel_should_show(payload: dict) -> bool:
-        status = str((payload or {}).get("status") or "").strip().lower()
-        if status in {"completed", "rejected", "cancelled", "canceled"}:
-            return False
-        return status in {"approved", "executing", "failed", "replan_pending", "rebuild_requested", "blocked"}
-
-    @staticmethod
-    def _plan_progress_status(payload: dict | None) -> str:
-        if not isinstance(payload, dict):
-            return ""
-        return str(payload.get("status") or "").strip().lower()
-
-    @staticmethod
-    def _plan_progress_is_terminal(payload: dict | None) -> bool:
-        return MainWindow._plan_progress_status(payload) in {"completed", "rejected", "cancelled", "canceled"}
-
-    def _plan_progress_panel_is_active(self) -> bool:
-        if self.plan_progress_panel.isHidden():
-            return False
-        plan_card = self.plan_progress_panel.plan_card
-        return not plan_card.isHidden() and bool(plan_card._step_labels)
-
-    def _plan_progress_panel_has_terminal_payload(self) -> bool:
-        return self._plan_progress_is_terminal(getattr(self.plan_progress_panel, "_last_payload", None))
-
     def _on_run_started(self, payload: dict) -> None:
         if timer := getattr(self, "_assistant_delta_flush_timer", None):
             timer.stop()
         self._pending_assistant_delta_payload = None
         self._last_assistant_delta_sequence = 0
         self._last_assistant_delta_text = ""
-        self._pending_implementation_plan_markdown = ""
-        self._reset_plan_progress_for_new_run()
         self._status_controller.on_run_started(payload)
 
     def _on_status_changed(self, payload: dict) -> None:
@@ -505,40 +456,6 @@ class MainWindow(QMainWindow):
     def _on_summary_progress(self, payload: dict) -> None:
         self.summary_progress_ring.set_summary_progress(payload)
 
-    def _on_implementation_plan_buffer(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        markdown = str(payload.get("markdown") or payload.get("plan_markdown") or "").strip()
-        if markdown:
-            self._pending_implementation_plan_markdown = markdown
-
-    def _show_plan_progress_panel(self) -> None:
-        self.inspector_panel.hide()
-        self.plan_progress_panel.show()
-        if self.inspector_collapsed:
-            self.inspector_collapsed = False
-            self.inspector_container.show()
-            self.info_action.setToolTip("Show inspector (Ctrl+I)")
-            self.info_button.setToolTip(self.info_action.toolTip())
-        self.splitter.setSizes([0 if self.sidebar_collapsed else self._sidebar_width, 1000, self._inspector_width])
-
-    def _restore_inspector_panel(self) -> None:
-        self.plan_progress_panel.hide()
-        self.inspector_panel.show()
-
-    def _on_plan_progress(self, payload: dict) -> None:
-        self._flush_pending_assistant_delta()
-        if not self._plan_progress_panel_should_show(payload):
-            status = self._plan_progress_status(payload)
-            if self.is_busy and self._plan_progress_panel_is_active() and status not in {"rejected", "cancelled", "canceled"}:
-                if status == "completed":
-                    self.plan_progress_panel.set_plan(payload)
-                    self._show_plan_progress_panel()
-                return
-            self._clear_plan_progress_panel(restore_inspector=False)
-            return
-        self.plan_progress_panel.set_plan(payload)
-        self._show_plan_progress_panel()
-
     def _on_approval_resolved(self, payload: dict) -> None:
         self._flush_pending_assistant_delta()
         auto_resolved = bool(payload.get("auto"))
@@ -557,16 +474,12 @@ class MainWindow(QMainWindow):
         self._flush_pending_assistant_delta()
         if self.current_turn is not None:
             self.current_turn.set_assistant_streaming(False)
-        if self._plan_progress_panel_has_terminal_payload() or not self._plan_progress_panel_is_active():
-            self._clear_plan_progress_panel(restore_inspector=False)
         self._status_controller.on_run_finished(payload)
 
     def _on_run_failed(self, payload: dict) -> None:
         self._flush_pending_assistant_delta()
         if self.current_turn is not None:
             self.current_turn.set_assistant_streaming(False)
-        if not self._plan_progress_panel_is_active():
-            self._clear_plan_progress_panel(restore_inspector=False)
         self._status_controller.on_run_failed(payload)
 
     def _on_chat_reset(self, _payload: dict) -> None:
@@ -813,9 +726,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_sessions(payload.get("sessions", []), self.active_session_id)
         if restore_transcript:
             same_session = bool(previous_session_id) and previous_session_id == self.active_session_id
-            keep_active_plan_panel = same_session and self.is_busy and self._plan_progress_panel_is_active()
-            if not keep_active_plan_panel:
-                self._clear_plan_progress_panel()
+            _ = same_session
             self.current_turn = None
             self.transcript.load_transcript(payload.get("transcript"))
             self._clear_draft_image_attachments()
@@ -824,8 +735,6 @@ class MainWindow(QMainWindow):
             self._clear_approval_request()
         pending_user_choice = payload.get("pending_user_choice") if isinstance(payload, dict) else None
         if isinstance(pending_user_choice, dict):
-            if self.current_turn is None and str(pending_user_choice.get("choice_type") or "") == "plan_review":
-                self.current_turn = self.transcript.start_turn("Восстановленный план")
             self._handle_user_choice_request(pending_user_choice)
 
     def _handle_busy_changed(self, busy: bool) -> None:
@@ -862,23 +771,6 @@ class MainWindow(QMainWindow):
         self._custom_choice_armed = bool(payload.get("allow_custom_text"))
         if self.current_turn is not None:
             self.current_turn.clear_status()
-            if str(payload.get("choice_type") or "") == "plan_review":
-                if not str(payload.get("plan_markdown") or "").strip() and self._pending_implementation_plan_markdown:
-                    payload = {**payload, "plan_markdown": self._pending_implementation_plan_markdown}
-                elif not str(payload.get("plan_markdown") or "").strip() and self.current_turn.assistant_segments:
-                    payload = {**payload, "plan_markdown": self.current_turn.assistant_segments[-1].markdown()}
-                self.current_turn.set_assistant_markdown("")
-                inline_plan = self.current_turn.add_inline_plan(payload, actions_visible=True)
-                if not inline_plan.property("choice_connected"):
-                    inline_plan.option_selected.connect(self._handle_user_choice_selected)
-                    inline_plan.setProperty("choice_connected", True)
-                self._clear_user_choice_request(clear_inline_plan=False)
-                self.awaiting_user_choice = True
-                self._custom_choice_armed = False
-                self._set_status_visual("Waiting for your choice", busy=False)
-                self._set_input_enabled(True)
-                self.transcript.notify_content_changed()
-                return
         self._set_user_choice_request(payload)
         self._set_status_visual("Waiting for your choice", busy=False)
         self._set_input_enabled(True)
@@ -924,9 +816,6 @@ class MainWindow(QMainWindow):
         else:
             self._clear_composer_notice()
         request_payload = {"text": text, "attachments": attachments}
-        if self.plan_mode_button.isChecked():
-            request_payload["plan_mode"] = True
-            self.plan_mode_button.setChecked(False)
         self._clear_draft_image_attachments()
         self.controller.start_run(request_payload)
         self._set_input_enabled(False)
@@ -940,14 +829,10 @@ class MainWindow(QMainWindow):
             self.awaiting_user_choice and not self.awaiting_approval and not self.is_busy
         )
 
-    def _clear_user_choice_request(self, *, clear_inline_plan: bool = True) -> None:
+    def _clear_user_choice_request(self) -> None:
         self.awaiting_user_choice = False
         self._custom_choice_armed = False
         self.user_choice_card.clear_request()
-        if clear_inline_plan and self.current_turn is not None:
-            inline_plan = getattr(self.current_turn, "inline_plan_widget", None)
-            if inline_plan is not None:
-                inline_plan.set_actions_visible(False)
 
     def _clear_approval_request(self) -> None:
         self.approval_card.clear_request()
@@ -956,14 +841,7 @@ class MainWindow(QMainWindow):
         text = str(submit_text or "").strip()
         if not text or self.is_busy or self.awaiting_approval or not self.awaiting_user_choice:
             return
-        choice_type = ""
-        if self.current_turn is not None:
-            inline_plan = getattr(self.current_turn, "inline_plan_widget", None)
-            if inline_plan is not None:
-                choice_type = str((getattr(inline_plan, "_payload", {}) or {}).get("choice_type") or "")
-        self._clear_user_choice_request(clear_inline_plan=choice_type != "plan_replan")
-        if text == "implement" and self.current_turn is not None:
-            self.current_turn.collapse_inline_plan_after_implement()
+        self._clear_user_choice_request()
         self.controller.resume_user_choice(text)
         self._set_input_enabled(False)
 

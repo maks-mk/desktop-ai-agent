@@ -17,13 +17,6 @@ from core.turn_outcomes import (
 
 _GEMINI_FUNCTION_CALL_THOUGHT_SIGNATURES_KEY = "__gemini_function_call_thought_signatures__"
 
-_PLAN_APPROVAL_KEYWORDS = frozenset({
-    "реализовать", "отказаться", "правки", "дополнения",
-    "implement", "reject", "revise", "approve", "execute", "decline",
-})
-_PLAN_MIN_CONTENT_LENGTH = 50
-
-
 class AgentMixin:
     """Agent node facade and result-building helpers."""
 
@@ -72,46 +65,6 @@ class AgentMixin:
         self, response: AIMessage, content: Any, tool_calls: List[Dict[str, Any]]
     ) -> AIMessage:
         return response.model_copy(update={"content": content, "tool_calls": tool_calls})
-
-    def _plan_approval_tool_call(self, turn_id: int) -> Dict[str, Any]:
-        return {
-            "name": "request_user_input",
-            "args": {
-                "question": "Что сделать с этим планом?",
-                "options": [
-                    "Да, реализовать",
-                    "Нет, отказаться от реализации",
-                    "Внести правки/дополнения в план",
-                ],
-                "recommended": "Да, реализовать",
-                "choice_type": "plan_approval",
-            },
-            "id": f"planapproval-{max(0, int(turn_id or 0))}",
-        }
-
-    def _plan_approval_allowed(self, allowed_tool_names: List[str] | None) -> bool:
-        if allowed_tool_names is None:
-            return True
-        allowed = self._normalized_allowed_tool_name_set(allowed_tool_names)
-        return "request_user_input" in allowed
-
-    def _is_plan_approval_request(self, tool_call: Dict[str, Any]) -> bool:
-        """Check whether request_user_input is asking to approve the implementation plan."""
-        if self._normalize_tool_name(tool_call.get("name") or "") != "request_user_input":
-            return False
-        args = canonicalize_tool_args(tool_call.get("args"))
-        if not isinstance(args, dict):
-            return False
-        choice_type = str(args.get("choice_type") or "").strip().lower()
-        if choice_type:
-            return choice_type == "plan_approval"
-
-        # Backward-compatible fallback for older persisted tool calls/prompts.
-        options = args.get("options") or []
-        if not isinstance(options, list) or not options:
-            return False
-        options_text = " ".join(str(o).lower() for o in options)
-        return any(kw in options_text for kw in _PLAN_APPROVAL_KEYWORDS)
 
     def _build_agent_protocol_issue(
         self,
@@ -173,8 +126,6 @@ class AgentMixin:
         open_tool_issue: Dict[str, Any] | None = None,
         recovery_state: Dict[str, Any] | None = None,
         allowed_tool_names: List[str] | None = None,
-        plan_mode: bool = False,
-        legacy_plan_approval: bool = True,
     ) -> Dict[str, Any]:
         token_usage_update = {}
         if getattr(response, "usage_metadata", None):
@@ -279,44 +230,7 @@ class AgentMixin:
                 ) = self._sanitize_user_input_tool_calls(
                     t_calls,
                     messages,
-                    plan_mode=plan_mode,
                 )
-                if plan_mode:
-                    # Keep request_user_input (at most 1, already enforced by
-                    # sanitize) and read-only inspection calls. Mutating tools
-                    # are dropped here and again by _filter_tool_calls_for_turn.
-                    t_calls = [
-                        tool_call
-                        for tool_call in t_calls
-                        if self._normalize_tool_name(tool_call.get("name") or "") == "request_user_input"
-                        or self._tool_call_allowed_in_plan_mode(tool_call)
-                    ]
-
-                    response = self._new_ai_message_with_tool_calls(response, t_calls)
-                    if t_calls and self._is_plan_approval_request(t_calls[0]):
-                        content_text = stringify_content(response.content).strip()
-                        if len(content_text) < _PLAN_MIN_CONTENT_LENGTH:
-                            plan_guard_error = (
-                                "INTERNAL TOOL PROTOCOL ERROR: You called request_user_input for plan approval "
-                                "but did not write the plan in your response message content. "
-                                "You MUST write the complete plan as visible text BEFORE asking the user to approve it. "
-                                "Retry now: output the full plan text, then call request_user_input for approval."
-                            )
-                            protocol_error = self._merge_protocol_error_text(
-                                protocol_error,
-                                plan_guard_error,
-                            )
-                            protocol_issue = self._build_agent_protocol_issue(
-                                current_turn_id=turn_id,
-                                summary=plan_guard_error,
-                                reason="plan_approval_without_plan_text",
-                                tool_names=["request_user_input"],
-                                tool_args=canonicalize_tool_args(t_calls[0].get("args")),
-                                details={"content_length": len(content_text)},
-                                response_preview=content_text,
-                            )
-                            t_calls = []
-                            response = self._new_ai_message_without_tool_calls(response, plan_guard_error)
                 original_tool_calls = list(t_calls)
                 t_calls = self._filter_tool_calls_for_turn(
                     t_calls,
@@ -356,19 +270,6 @@ class AgentMixin:
                     response = self._new_ai_message_with_tool_calls(response, t_calls)
 
             response = self._ensure_gemini_tool_call_signatures(response, t_calls)
-
-            if (
-                plan_mode
-                and legacy_plan_approval
-                and tools_available
-                and not t_calls
-                and not protocol_issue
-                and not retry_user_input_turn
-                and self._plan_approval_allowed(allowed_tool_names)
-                and not self._current_turn_has_user_input_request(messages)
-            ):
-                t_calls = [self._plan_approval_tool_call(turn_id)]
-                response = self._new_ai_message_with_tool_calls(response, t_calls)
 
             has_tool_calls = bool(tools_available and t_calls)
 

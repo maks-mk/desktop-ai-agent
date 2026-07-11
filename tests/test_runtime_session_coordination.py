@@ -91,7 +91,7 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
             "snapshot": {},
             "sessions": [],
             "active_session_id": "session-1",
-            "pending_user_choice": {"choice_type": "plan_review"},
+            "pending_user_choice": {"choice_type": "clarification"},
         }
 
         with mock.patch("ui.runtime_session.build_ui_payload", new=mock.AsyncMock(return_value=payload)):
@@ -100,7 +100,7 @@ class RuntimeSessionCoordinationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, payload)
         self.assertTrue(worker._awaiting_approval)
         self.assertEqual(worker._awaiting_interrupt_kind, "user_choice")
-        self.assertEqual(worker._pending_user_choice_type, "plan_review")
+        self.assertEqual(worker._pending_user_choice_type, "clarification")
 
     async def test_build_config_for_active_profile_bootstraps_base_config_when_worker_config_missing(self):
         worker = AgentRunWorker()

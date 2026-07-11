@@ -29,15 +29,8 @@ _INLINE_THOUGHT_CLOSE_PREFIX_RE = re.compile(r"^.*?</(think|thought)>\s*", re.IG
 _INLINE_THOUGHT_UNCLOSED_RE = re.compile(r"<(think|thought)\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 _TEXT_TOOL_CALL_START_RE = re.compile(r"call:[A-Za-z_][\w.-]*\s*\{", re.DOTALL)
 _TEXT_TOOL_CALL_END = "<tool_call|>"
-_IMPLEMENTATION_PLAN_OPEN_TAG = "<implementation_plan>"
-_IMPLEMENTATION_PLAN_CLOSE_TAG = "</implementation_plan>"
-_PLAN_STEP_COMPLETE_COMMENT_RE = re.compile(
-    r"<!--\s*plan-step-complete\s*:\s*[^>\s]+\s*-->",
-    re.IGNORECASE,
-)
 _AGENT_WORKING_LABEL = "Working..."
 _AGENT_THINKING_LABEL = "Thinking..."
-_AGENT_CREATING_PLAN_LABEL = "Creating Plan..."
 logger = logging.getLogger("agent")
 reasoning_logger = logging.getLogger("agent.reasoning_debug")
 
@@ -200,13 +193,6 @@ class StreamProcessor:
         "_deferred_assistant_delta",
         "_assistant_delta_sequence",
         "_messages_replay_cursor",
-        "_plan_tag_buffer",
-        "_plan_tag_prefix_buffer",
-        "_plan_tag_closed",
-        "_inside_plan_tag",
-        "_last_emitted_plan_buffer",
-        "_last_emitted_plan_closed",
-        "_plan_execution_active",
     )
 
     def __init__(
@@ -217,7 +203,6 @@ class StreamProcessor:
         events_max: int = 400,
         tool_buffer_max: int = 128,
         base_elapsed_seconds: float = 0.0,
-        plan_execution_active: bool = False,
     ):
         self.emit_event = emit_event
         self.tracker = TokenTracker()
@@ -251,13 +236,6 @@ class StreamProcessor:
         self._deferred_assistant_delta = False
         self._assistant_delta_sequence = 0
         self._messages_replay_cursor: int | None = None
-        self._plan_tag_buffer = ""
-        self._plan_tag_prefix_buffer = ""
-        self._plan_tag_closed = False
-        self._inside_plan_tag = False
-        self._last_emitted_plan_buffer = ""
-        self._last_emitted_plan_closed = False
-        self._plan_execution_active = bool(plan_execution_active)
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -299,8 +277,6 @@ class StreamProcessor:
             )
 
         if self.pending_interrupt is not None:
-            self._flush_deferred_plan_tag_prefix()
-            self._emit_plan_buffer_if_available()
             interrupt_payload = self.pending_interrupt
             self.pending_interrupt = None
             return StreamProcessResult(
@@ -310,9 +286,7 @@ class StreamProcessor:
                 elapsed_seconds=self._elapsed_seconds(),
             )
 
-        self._flush_deferred_plan_tag_prefix()
         self._flush_deferred_assistant_delta()
-        self._emit_plan_buffer_if_available()
         duration = self._elapsed_seconds()
         debug_event(
             "stream_timing",
@@ -393,7 +367,6 @@ class StreamProcessor:
             return
 
         self.tracker.update_from_node_update(payload)
-        self._handle_plan_progress_update(payload)
 
         summarize_payload = payload.get("summarize") or {}
         if summarize_payload:
@@ -428,51 +401,6 @@ class StreamProcessor:
                     self._handle_agent_message(message, source=f"updates_{node_name}")
                 elif isinstance(message, ToolMessage):
                     self._handle_tool_result(message)
-
-    def _handle_plan_progress_update(self, payload: Dict[str, Any]) -> None:
-        for node_payload in payload.values():
-            if not isinstance(node_payload, dict):
-                continue
-            plan = node_payload.get("current_plan")
-            if not isinstance(plan, dict):
-                continue
-            if plan.get("format") == "markdown":
-                continue
-            steps = plan.get("steps") or []
-            if not isinstance(steps, list):
-                continue
-            normalized_steps: list[dict[str, Any]] = []
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                normalized_steps.append(
-                    {
-                        "id": str(step.get("id") or ""),
-                        "title": str(step.get("title") or ""),
-                        "description": str(step.get("description") or ""),
-                        "status": str(step.get("status") or "pending"),
-                    }
-                )
-            if not normalized_steps:
-                continue
-            completed_count = sum(1 for step in normalized_steps if step.get("status") in {"completed", "skipped"})
-            status = str(node_payload.get("plan_status") or plan.get("status") or "")
-            active_step_id = str(node_payload.get("active_plan_step_id") or plan.get("active_step_id") or "")
-            self._plan_execution_active = status.strip().lower() == "executing" and bool(active_step_id.strip())
-            self._emit(
-                "plan_progress",
-                {
-                    "plan_id": str(plan.get("id") or ""),
-                    "version": int(plan.get("version") or 1),
-                    "status": status,
-                    "active_step_id": active_step_id,
-                    "completed_steps": completed_count,
-                    "total_steps": len(normalized_steps),
-                    "current_plan": dict(plan),
-                    "steps": normalized_steps,
-                },
-            )
-            return
 
     def _handle_summarize_update(self, payload: Dict[str, Any]) -> None:
         summary_text = payload.get("summary")
@@ -581,8 +509,6 @@ class StreamProcessor:
             )
             return
         chunk = self._filter_visible_text_tool_call_chunk(chunk)
-        if chunk:
-            chunk = self._filter_implementation_plan_chunk(chunk)
         if not chunk:
             return
         if source == "messages" and self._consume_messages_replay_chunk(chunk):
@@ -640,7 +566,7 @@ class StreamProcessor:
 
     def _emit_assistant_delta(self, chunk: str) -> None:
         self._emit_status()
-        visible_text = _PLAN_STEP_COMPLETE_COMMENT_RE.sub("", self.clean_full).strip()
+        visible_text = self.clean_full.strip()
         rendered_markdown = prepare_markdown_for_render(visible_text) if visible_text else ""
         self._assistant_delta_sequence += 1
         logger.debug(
@@ -680,18 +606,6 @@ class StreamProcessor:
         self._messages_replay_cursor = None
         return False
 
-    def _flush_deferred_plan_tag_prefix(self) -> None:
-        if not self._plan_tag_prefix_buffer:
-            return
-        prefix = self._plan_tag_prefix_buffer
-        self._plan_tag_prefix_buffer = ""
-        merged_text = self._merge_assistant_text(prefix, source="messages")
-        if merged_text is None:
-            return
-        self.full_text = merged_text
-        self.clean_full = self.full_text
-        self._emit_assistant_delta(prefix)
-
     def _flush_deferred_assistant_delta(self) -> None:
         if not self._deferred_assistant_delta or self.tool_start_times:
             return
@@ -711,8 +625,6 @@ class StreamProcessor:
 
     def _should_defer_assistant_text(self, *, message_has_tool_calls: bool) -> bool:
         if message_has_tool_calls:
-            return False
-        if self._plan_execution_active:
             return False
         return bool(self.tool_start_times)
 
@@ -966,78 +878,6 @@ class StreamProcessor:
             return before
         after = raw_text[marker_index + len(_TEXT_TOOL_CALL_END) :]
         return before + after
-
-    def _filter_implementation_plan_chunk(self, text: str) -> str:
-        raw_text = str(text or "")
-        if not raw_text:
-            return ""
-
-        if self._plan_tag_prefix_buffer:
-            raw_text = self._plan_tag_prefix_buffer + raw_text
-            self._plan_tag_prefix_buffer = ""
-
-        visible_parts: list[str] = []
-        cursor = 0
-        while cursor < len(raw_text):
-            if self._inside_plan_tag:
-                close_index = raw_text.find(_IMPLEMENTATION_PLAN_CLOSE_TAG, cursor)
-                if close_index < 0:
-                    self._plan_tag_buffer += raw_text[cursor:]
-                    self._emit_plan_buffer_if_available()
-                    return "".join(visible_parts)
-                self._plan_tag_buffer += raw_text[cursor:close_index]
-                self._inside_plan_tag = False
-                self._plan_tag_closed = True
-                self._emit_plan_buffer_if_available()
-                cursor = close_index + len(_IMPLEMENTATION_PLAN_CLOSE_TAG)
-                # Per protocol nothing should follow the closing tag; ignore any
-                # trailing bytes so plan markdown never re-enters transcript.
-                return "".join(visible_parts)
-
-            open_index = raw_text.find(_IMPLEMENTATION_PLAN_OPEN_TAG, cursor)
-            if open_index >= 0:
-                visible_parts.append(raw_text[cursor:open_index])
-                self._inside_plan_tag = True
-                self._emit_status()
-                cursor = open_index + len(_IMPLEMENTATION_PLAN_OPEN_TAG)
-                continue
-
-            partial_open_length = self._implementation_plan_open_prefix_length(raw_text, cursor)
-            if partial_open_length > 0:
-                visible_parts.append(raw_text[cursor : len(raw_text) - partial_open_length])
-                self._plan_tag_prefix_buffer = raw_text[-partial_open_length:]
-                break
-
-            visible_parts.append(raw_text[cursor:])
-            break
-
-        return "".join(visible_parts)
-
-    @staticmethod
-    def _implementation_plan_open_prefix_length(text: str, start: int) -> int:
-        tail = text[start:]
-        max_length = min(len(tail), len(_IMPLEMENTATION_PLAN_OPEN_TAG) - 1)
-        for length in range(max_length, 0, -1):
-            if _IMPLEMENTATION_PLAN_OPEN_TAG.startswith(tail[-length:]):
-                return length
-        return 0
-
-    def _emit_plan_buffer_if_available(self) -> None:
-        plan_markdown = str(self._plan_tag_buffer or "").strip()
-        if not plan_markdown:
-            return
-        if plan_markdown == self._last_emitted_plan_buffer and self._plan_tag_closed == self._last_emitted_plan_closed:
-            return
-        self._last_emitted_plan_buffer = plan_markdown
-        self._last_emitted_plan_closed = self._plan_tag_closed
-        self._emit(
-            "implementation_plan_buffer",
-            {
-                "plan_markdown": plan_markdown,
-                "markdown": plan_markdown,
-                "closed": self._plan_tag_closed,
-            },
-        )
 
     @staticmethod
     def _extract_text_content(content: Any) -> str:
@@ -1457,6 +1297,8 @@ class StreamProcessor:
             or str(tool_info.get("name") or "").strip()
             or "unknown_tool"
         )
+        if self._normalize_tool_name(tool_name) == "request_user_input":
+            return
         tool_args = self._merge_tool_args(tool_info.get("args", {}), tool_call.get("args", {}))
         if require_args and not force and not tool_args:
             self.tool_buffer[tool_id] = {"name": tool_name, "args": tool_args}
@@ -1487,6 +1329,8 @@ class StreamProcessor:
         raw_tool_id = str(message.tool_call_id or "").strip()
         message_args = extract_tool_args(message)
         message_name = str(message.name or "").strip() or "unknown_tool"
+        if self._normalize_tool_name(message_name) == "request_user_input":
+            return
         tool_id = self._resolve_tool_result_id(raw_tool_id, message_name, message_args)
         if tool_id and tool_id in self._completed_tool_ids:
             return
@@ -1564,6 +1408,10 @@ class StreamProcessor:
         self._flush_deferred_assistant_delta()
 
     @staticmethod
+    def _normalize_tool_name(tool_name: Any) -> str:
+        return str(tool_name or "").strip().lower()
+
+    @staticmethod
     def _is_repaired_stream_interruption(message: ToolMessage, content: str) -> bool:
         metadata = getattr(message, "additional_kwargs", {}) or {}
         internal = metadata.get("agent_internal") if isinstance(metadata, dict) else None
@@ -1611,9 +1459,7 @@ class StreamProcessor:
 
     def _status_label(self) -> str:
         agent_label = (
-            _AGENT_CREATING_PLAN_LABEL
-            if self._inside_plan_tag or self._plan_tag_buffer
-            else _AGENT_THINKING_LABEL
+            _AGENT_THINKING_LABEL
             if self._agent_is_thinking
             else _AGENT_WORKING_LABEL
         )
@@ -1628,7 +1474,7 @@ class StreamProcessor:
 
     def _status_phase(self) -> str:
         phase_map = {
-            "agent": "creating_plan" if self._inside_plan_tag or self._plan_tag_buffer else "working",
+            "agent": "working",
             "recovery": "reviewing",
             "tools": "active",
             "summarize": "system",

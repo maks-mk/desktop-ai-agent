@@ -27,7 +27,6 @@ from core.multimodal import (
     strip_image_content_from_message_content,
 )
 from core.tool_args import canonicalize_tool_args
-from core.planning import active_step, coerce_runtime_plan
 from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
 from core.state import AgentState
 
@@ -88,7 +87,6 @@ class ContextBuilder:
         if summary:
             full_context.append(SystemMessage(content=f"<memory>\n{summary}\n</memory>"))
         inferred_user_choice_locked = user_choice_locked or self._has_request_user_input_tool_result(sanitized_messages)
-        plan_mode = str(state.get("turn_mode", "") if state else "").strip().lower() == "plan"
         full_context.extend(
             self._runtime_policy_builder.build_messages(
                 RuntimePromptContext(
@@ -96,7 +94,6 @@ class ContextBuilder:
                     tools_available=tools_available,
                     active_tool_names=tuple(active_tool_names),
                     user_choice_locked=inferred_user_choice_locked,
-                    plan_mode=plan_mode,
                 )
             )
         )
@@ -109,43 +106,8 @@ class ContextBuilder:
         recovery_message = self._recovery_message_builder(recovery_state)
         if recovery_message:
             full_context.append(recovery_message)
-        plan_execution_message = self._build_plan_execution_message(state)
-        if plan_execution_message:
-            full_context.append(plan_execution_message)
         full_context.extend(sanitized_messages)
         return self.normalize_system_prefix(full_context)
-
-    def _build_plan_execution_message(self, state: AgentState | None) -> SystemMessage | None:
-        if not isinstance(state, dict):
-            return None
-        plan = coerce_runtime_plan(state.get("current_plan"))
-        if plan is None:
-            return None
-        status = str(state.get("plan_status") or plan.get("status") or "").strip().lower()
-        if status not in {"approved", "executing"}:
-            return None
-        step = active_step(plan, str(state.get("active_plan_step_id") or ""))
-        if not step:
-            return None
-        return SystemMessage(
-            content=(
-                "APPROVED PLAN EXECUTION CONTEXT:\n"
-                "A user-approved runtime plan is active. Do not rebuild or re-approve the plan. "
-                "Execute only the active step below using the normal tool-use rules. "
-                "Do not do work from later steps, and do not say you are moving to another step.\n"
-                "Final visible status must be exactly one short line in Russian, no more than 140 characters. "
-                "Do not write reports, bullet lists, section headings, file inventories, verification summaries, "
-                "or phrases like 'Что вошло', 'Проверка выполнена', or 'Переход к шагу'.\n"
-                "Use this shape only: 'Готово: <what changed in this active step>.'\n"
-                "Only when the active step is actually complete, append this hidden marker on its own final line: "
-                f"<!--plan-step-complete:{step.get('id')}-->\n"
-                "If the step is not complete, do not include the marker; use one short line: 'Не завершено: <what remains or blocked it>.'\n\n"
-                f"Plan summary: {plan.get('summary')}\n"
-                f"Active step id: {step.get('id')}\n"
-                f"Active step title: {step.get('title')}\n"
-                f"Active step description: {step.get('description')}\n"
-            )
-        )
 
     def _has_request_user_input_tool_result(self, messages: List[BaseMessage]) -> bool:
         for message in messages:

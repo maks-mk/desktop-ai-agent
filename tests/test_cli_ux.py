@@ -23,7 +23,7 @@ from ui.streaming import StreamEvent
 from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SUCCESS_GREEN, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
 from ui.widgets.composer import _ComposerMentionItemWidget
 from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, DiffBlockWidget, TRANSCRIPT_MAX_WIDTH
-from ui.widgets.messages import AssistantMessageWidget, InlinePlanWidget
+from ui.widgets.messages import AssistantMessageWidget
 from ui.widgets.sidebar import SessionListModel
 from ui.widgets.transcript import ConversationTurnWidget
 from ui.widgets.tool_group import ToolGroupWidget
@@ -92,7 +92,6 @@ class FakeController(QObject):
         self.reinitialize_calls: list[bool] = []
         self.shutdown_calls = 0
         self.initialize_calls = 0
-        self.cancel_active_plan_calls = 0
 
     def initialize(self):
         self.initialize_calls += 1
@@ -126,9 +125,6 @@ class FakeController(QObject):
 
     def shutdown(self):
         self.shutdown_calls += 1
-
-    def cancel_active_plan(self):
-        self.cancel_active_plan_calls += 1
 
 
 class RuntimeControllerStopTests(unittest.TestCase):
@@ -224,170 +220,6 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(len(turn.assistant_segments), 1)
         self.assertEqual(turn.assistant_segments[0].markdown(), preface)
 
-    def _plan_progress_payload(self, status: str = "executing") -> dict:
-        return {
-            "status": status,
-            "active_step_id": "step-2" if status == "executing" else "",
-            "completed_steps": 1 if status == "executing" else 0,
-            "total_steps": 2,
-            "current_plan": {
-                "id": "plan-1",
-                "title": "Implementation plan",
-                "summary": "Small UI update",
-                "status": status,
-                "steps": [
-                    {"id": "step-1", "title": "Inspect", "status": "completed" if status == "executing" else "pending"},
-                    {"id": "step-2", "title": "Render", "status": "pending"},
-                ],
-                "risks": ["Risk"],
-                "assumptions": ["Assumption"],
-                "verification": ["Run focused tests"],
-            },
-        }
-
-    def test_plan_progress_event_waits_for_execution_before_showing_side_panel(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("pending_approval")))
-
-        self.assertIsNotNone(self.window.current_turn)
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-        self.assertFalse(self.window.inspector_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-
-        self.assertFalse(self.window.inspector_container.isHidden())
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "1 / 2")
-        plan_card = self.window.plan_progress_panel.plan_card
-        self.assertFalse(plan_card.isHidden())
-        self.assertFalse(plan_card.title_label.isHidden())
-        self.assertIn("План реализации", plan_card.title_label.text())
-        self.assertIn("Run focused tests", plan_card.meta_label.text())
-        self.assertIn("Risk", plan_card.meta_label.text())
-        self.assertIn("Assumption", plan_card.meta_label.text())
-        self.assertTrue(any("Render" in label.text() for label in plan_card._step_labels))
-
-    def test_plan_progress_card_groups_steps_and_metadata_compactly(self):
-        payload = self._plan_progress_payload("executing")
-        payload["active_step_id"] = "step-3"
-        payload["completed_steps"] = 2
-        payload["total_steps"] = 4
-        payload["current_plan"]["steps"] = [
-            {"id": "step-1", "title": "Inspect", "description": "Read current files", "status": "completed"},
-            {"id": "step-2", "title": "Build", "description": "Create the UI", "status": "completed"},
-            {"id": "step-3", "title": "Style", "description": "Tune active state colors", "status": "pending"},
-            {"id": "step-4", "title": "Verify", "description": "Run focused checks", "status": "pending"},
-        ]
-
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", payload))
-
-        plan_card = self.window.plan_progress_panel.plan_card
-        self.assertFalse(plan_card.summary_card.isHidden())
-        self.assertFalse(plan_card.steps_host.isHidden())
-        self.assertFalse(plan_card.meta_host.isHidden())
-        self.assertTrue(plan_card.status_label.isHidden())
-
-        rows = plan_card.findChildren(QFrame, "PlanStepRow")
-        self.assertEqual([row.property("stepStatus") for row in rows], ["completed", "completed", "active", "pending"])
-        self.assertEqual(len(plan_card._meta_cards), 3)
-        meta_titles = [
-            title.text()
-            for card in plan_card._meta_cards
-            for title in card.findChildren(QLabel, "PlanMetaTitle")
-        ]
-        self.assertEqual(meta_titles, ["Проверка", "Риски", "Предположения"])
-
-    def test_plan_execution_finish_does_not_restore_inspector(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("run_finished", {"stats": "1.0s   In: 10   Out: 5"}))
-
-        # Active plan stays visible after run finishes so the user can continue or cancel.
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-
-        # Completing the plan hides the panel.
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_container.isHidden())
-        self.assertTrue(self.window.inspector_collapsed)
-
-    def test_completed_plan_progress_does_not_restore_inspector(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
-
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_container.isHidden())
-        self.assertTrue(self.window.inspector_collapsed)
-
-    def test_plan_execution_panel_stays_visible_on_run_failed(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("run_failed", {"error": "connection error"}))
-
-        # Active plan stays visible after a failure so the user can continue or cancel.
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-
-    def test_plan_execution_panel_survives_followup_run_started(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("run_started", {"text": "Продолжай"}))
-
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-        self.assertTrue(any("Render" in label.text() for label in self.window.plan_progress_panel.plan_card._step_labels))
-
-    def test_plan_execution_panel_keeps_failed_plan_visible(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        failed_payload = self._plan_progress_payload("executing")
-        failed_payload["status"] = "failed"
-        failed_payload["current_plan"]["status"] = "failed"
-        self.window._handle_event(StreamEvent("plan_progress", failed_payload))
-
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "1 / 2")
-
-    def test_plan_execution_panel_ignores_terminal_progress_while_busy_until_run_finishes(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_busy_changed(True)
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        completed_payload = self._plan_progress_payload("completed")
-        completed_payload["completed_steps"] = 2
-        completed_payload["total_steps"] = 2
-        for step in completed_payload["current_plan"]["steps"]:
-            step["status"] = "completed"
-
-        self.window._handle_event(StreamEvent("plan_progress", completed_payload))
-
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-        self.assertEqual(self.window.plan_progress_panel.status_label.text(), "2 / 2")
-
-        self.window._handle_event(StreamEvent("run_finished", {"stats": "1.0s   In: 10   Out: 5"}))
-
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_container.isHidden())
-        self.assertTrue(self.window.inspector_collapsed)
-
     def test_user_cancel_does_not_render_canceled_notice_in_transcript(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Останови"}))
@@ -401,175 +233,6 @@ class GuiUxTests(unittest.TestCase):
         self.assertNotIn("Canceled", rendered_labels)
         self.assertNotIn("Cancelled", rendered_labels)
         self.assertIn("stopped", self.window.statusBar().currentMessage().lower())
-
-    def test_runtime_payload_restore_keeps_active_plan_panel_while_busy(self):
-        payload = self._snapshot_payload()
-        self.window._handle_initialized(payload)
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_busy_changed(True)
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        refreshed_payload = self._snapshot_payload()
-        refreshed_payload["transcript"] = []
-        self.window._handle_session_changed(refreshed_payload)
-
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_panel.isHidden())
-        self.assertTrue(any("Render" in label.text() for label in self.window.plan_progress_panel.plan_card._step_labels))
-
-    def test_plan_progress_cancel_button_visible_only_with_active_plan(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.assertTrue(self.window.plan_progress_panel.cancel_button.isHidden())
-
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.cancel_button.isHidden())
-
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("completed")))
-        self.assertTrue(self.window.plan_progress_panel.cancel_button.isHidden())
-
-    def test_plan_progress_cancel_button_emits_cancel_request(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertEqual(self.controller.cancel_active_plan_calls, 0)
-
-        self.window.plan_progress_panel.cancel_button.click()
-        self._process_events()
-
-        self.assertEqual(self.controller.cancel_active_plan_calls, 1)
-
-    def test_plan_review_inline_widget_is_simple(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
-        self.window._handle_event(StreamEvent("implementation_plan_buffer", {"markdown": "Подробный markdown plan"}))
-        self._process_events()
-
-        self.controller.user_choice_requested.emit(
-            {
-                "choice_type": "plan_review",
-                "question": "Что сделать с этим планом?",
-                "current_plan": self._plan_progress_payload("pending_approval")["current_plan"],
-                "options": [{"key": "approve", "label": "Реализовать", "submit_text": "approve"}],
-            }
-        )
-        self._process_events()
-
-        self.assertTrue(self.window.user_choice_card.isHidden())
-        inline_plan = self.window.current_turn.inline_plan_widget
-        self.assertIsNotNone(inline_plan)
-        self.assertFalse(inline_plan.isHidden())
-        self.assertEqual(inline_plan.toggle_button.text(), "Implementation Plan")
-        self.assertIsNotNone(inline_plan.findChild(QFrame, "InlinePlanAccent"))
-        self.assertIsNotNone(inline_plan.findChild(QLabel, "InlinePlanIcon"))
-        self.assertEqual(inline_plan.count_label.text(), "2 steps")
-        self.assertFalse(inline_plan.markdown_body.isHidden())
-        self.assertIn("Подробный markdown plan", inline_plan.markdown_body.toPlainText())
-        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
-        self.assertEqual([button.text() for button in option_buttons], ["Реализовать", "Изменить", "Перестроить", "Отмена"])
-        self.assertTrue(option_buttons[0].property("recommended"))
-        self.assertEqual(option_buttons[0].property("planAction"), "implement")
-        self.assertEqual(self.window.current_turn.assistant_segments, [])
-        self.assertFalse(self.window.plan_progress_panel.isVisible())
-
-    def test_inline_plan_limits_long_markdown_height_with_vertical_scroll(self):
-        inline_plan = InlinePlanWidget()
-        long_plan = "# Plan\n" + "\n".join(f"- Step {index}" for index in range(80))
-
-        inline_plan.set_payload({"plan_markdown": long_plan})
-        inline_plan.resize(500, 600)
-        inline_plan.show()
-        self._wait_for_gui(20)
-
-        self.assertEqual(inline_plan.markdown_body.maximumHeight(), 360)
-        self.assertLessEqual(inline_plan.markdown_body.height(), 360)
-        self.assertEqual(inline_plan.markdown_body.verticalScrollBarPolicy(), Qt.ScrollBarAsNeeded)
-
-    def test_inline_plan_restore_can_keep_implemented_card_collapsed(self):
-        turn = ConversationTurnWidget("user", parent=self.window)
-
-        turn.restore_blocks(
-            [
-                {
-                    "type": "plan",
-                    "payload": {
-                        "plan_markdown": "# Plan\n- Step",
-                        "current_plan": self._plan_progress_payload("completed")["current_plan"],
-                    },
-                    "actions_visible": False,
-                    "implemented": True,
-                }
-            ]
-        )
-
-        inline_plan = turn.inline_plan_widget
-        self.assertIsNotNone(inline_plan)
-        self.assertFalse(inline_plan.isHidden())
-        self.assertEqual(inline_plan.toggle_button.text(), "✓ Plan completed (2 steps)")
-        self.assertTrue(inline_plan.markdown_body.isHidden())
-        self.assertTrue(inline_plan.actions_host.isHidden())
-
-    def test_initialized_payload_restores_pending_plan_review_choice(self):
-        payload = self._snapshot_payload()
-        payload["pending_user_choice"] = {
-            "choice_type": "plan_review",
-            "question": "Что сделать с этим планом?",
-            "current_plan": self._plan_progress_payload("pending_approval")["current_plan"],
-            "options": [{"key": "implement", "label": "Реализовать", "submit_text": "implement"}],
-            "restored_from_checkpoint": True,
-        }
-        payload["checkpoint_notice"] = {
-            "message": "Восстановлен ожидающий план из checkpoint. Выберите действие, чтобы продолжить.",
-            "kind": "plan_checkpoint_restored",
-            "level": "warning",
-        }
-
-        self.window._handle_initialized(payload)
-        self._process_events()
-
-        self.assertTrue(self.window.user_choice_card.isHidden())
-        inline_plan = self.window.current_turn.inline_plan_widget
-        self.assertIsNotNone(inline_plan)
-        self.assertFalse(inline_plan.isHidden())
-        self.assertTrue(self.window.awaiting_user_choice)
-        self.assertNotIn("notice", self.window.current_turn.block_kinds())
-        self.assertIn("checkpoint", self.window.statusBar().currentMessage().lower())
-        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
-
-        option_buttons[0].click()
-        self._process_events()
-
-        self.assertEqual(self.controller.resume_choice_calls, ["implement"])
-
-    def test_inspector_button_can_close_plan_execution_while_busy(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_busy_changed(True)
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-
-        self.assertTrue(self.window.info_button.isEnabled())
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        self.window._toggle_info_popup()
-
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-        self.assertTrue(self.window.inspector_container.isHidden())
-
-    def test_session_switch_clears_plan_execution_panel(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        self.window._switch_session("session-older")
-
-        self.assertEqual(self.controller.switch_session_calls, ["session-older"])
-        self.assertTrue(self.window.plan_progress_panel.isHidden())
-
-
-    def test_plan_replan_choice_keeps_plan_execution_panel_visible(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Реализуй план"}))
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("executing")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
-
-        self.window._handle_event(StreamEvent("plan_progress", self._plan_progress_payload("rebuild_requested")))
-        self.assertFalse(self.window.plan_progress_panel.isHidden())
 
     def _press_composer_key(self, key: int, text: str = "", modifiers: Qt.KeyboardModifier = Qt.NoModifier):
         self.window.composer.setFocus()
@@ -864,47 +527,6 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(self.controller.start_calls, [])
         self.assertEqual(self.controller.resume_choice_calls, ["direct_api"])
         self.assertTrue(self.window.user_choice_card.isHidden())
-
-    def test_plan_review_inline_widget_shows_structured_plan_before_actions(self):
-        self.window._handle_event(StreamEvent("run_started", {"text": "Составь план"}))
-        self.controller.user_choice_requested.emit(
-            {
-                "choice_type": "plan_review",
-                "question": "Что сделать с этим планом?",
-                "recommended_key": "Реализовать",
-                "current_plan": {
-                    "title": "Plan",
-                    "summary": "Создание игры Тетрис в винтажном стиле",
-                    "status": "pending_approval",
-                    "steps": [
-                        {"id": f"step-{index}", "title": f"Шаг {index}", "description": "Подробное описание", "status": "pending"}
-                        for index in range(1, 8)
-                    ],
-                    "risks": ["Риск 1", "Риск 2"],
-                    "assumptions": ["Допущение 1"],
-                },
-                "options": [{"key": "approve", "label": "Реализовать", "submit_text": "approve"}],
-            }
-        )
-        self._process_events()
-
-        self.assertTrue(self.window.user_choice_card.isHidden())
-        inline_plan = self.window.current_turn.inline_plan_widget
-        self.assertIsNotNone(inline_plan)
-        self.assertFalse(inline_plan.isHidden())
-        self.assertEqual(inline_plan.count_label.text(), "7 steps")
-        self.assertIn("Key Changes", inline_plan.markdown_body.toPlainText())
-        self.assertIn("7", inline_plan.markdown_body.toPlainText())
-        option_buttons = inline_plan.findChildren(QPushButton, "UserChoiceOptionButton")
-        self.assertEqual(len(option_buttons), 4)
-        self.assertTrue(option_buttons[0].property("recommended"))
-
-        option_buttons[0].click()
-        self._process_events()
-
-        self.assertEqual(self.controller.resume_choice_calls, ["implement"])
-        self.assertTrue(inline_plan.markdown_body.isHidden())
-        self.assertTrue(inline_plan.actions_host.isHidden())
 
     def test_user_choice_card_custom_option_arms_composer_and_resumes_on_submit(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1732,20 +1354,20 @@ class GuiUxTests(unittest.TestCase):
         self.assertTrue(tool_card.args_container.isHidden())
         self.assertTrue(tool_card.tool_button.isEnabled())
         self.assertTrue(tool_card.tool_button.isCheckable())
-        self.assertFalse(tool_card.tool_button.isChecked())
+        self.assertTrue(tool_card.tool_button.isChecked())
         self.assertEqual(tool_card.tool_button.text(), "")
         self.assertEqual(tool_card.action_label.full_text(), "Выполнение команды echo hello")
         self.assertIsNotNone(tool_card.cli_exec_widget)
-        self.assertTrue(tool_card.cli_exec_widget.isHidden())
+        self.assertFalse(tool_card.cli_exec_widget.isHidden())
         self.assertEqual(tool_card.cli_exec_widget.command_label.text(), "$ echo hello")
         output_text = tool_card.cli_exec_widget.output_view.toPlainText()
         self.assertIn("hello", output_text)
         self.assertIn("world", output_text)
-        self.assertLessEqual(tool_card.cli_exec_widget.output_view.height(), 90)
+        self.assertGreaterEqual(tool_card.cli_exec_widget.output_view.height(), 96)
 
         tool_card.tool_button.click()
         self._process_events()
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
 
     def test_cli_exec_header_command_is_single_line_for_multiline_command(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1917,14 +1539,14 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-cli-finish-open"]
-        self.assertFalse(tool_card.tool_button.isChecked())
+        self.assertTrue(tool_card.tool_button.isChecked())
         self.assertIsNotNone(tool_card.cli_exec_widget)
-        self.assertTrue(tool_card.cli_exec_widget.isHidden())
+        self.assertFalse(tool_card.cli_exec_widget.isHidden())
 
-        # User toggles while running; finish still keeps the compact row collapsed.
+        # User can still toggle while running; finish keeps the compact row collapsed.
         tool_card.tool_button.click()
         self._process_events()
-        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
 
         self.window._handle_event(
             StreamEvent("tool_finished", {"tool_id": "call-cli-finish-open", "name": "cli_exec", "content": "done\n"})
@@ -2455,7 +2077,13 @@ class GuiUxTests(unittest.TestCase):
         tool_card = self.window.current_turn.tool_cards["call-cli-run"]
         self.assertEqual(tool_card.action_label.full_text(), "Выполнение команды echo hi")
         self.assertTrue(tool_card.phase_badge.isHidden())
+        self.assertTrue(tool_card.tool_button.isChecked())
+        self.assertFalse(tool_card.cli_exec_widget.isHidden())
+
+        tool_card.tool_button.click()
+        self._process_events()
         self.assertFalse(tool_card.tool_button.isChecked())
+        self.assertTrue(tool_card.cli_exec_widget.isHidden())
 
         tool_card.tool_button.click()
         self._process_events()

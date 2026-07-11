@@ -663,115 +663,22 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertNotIn("call:read_file", processor.full_text)
         self.assertNotIn("<tool_call|>", processor.full_text)
 
-    def test_stream_processor_filters_implementation_plan_from_assistant_delta(self):
+    def test_stream_processor_hides_request_user_input_tool_events(self):
         events = []
         processor = StreamProcessor(events.append)
 
         processor._handle_agent_message(
-            AIMessageChunk(
-                content=(
-                    "Analyzing project...\n"
-                    "<implementation_plan>\n"
-                    "# Implementation Plan\n\n- Step 1\n"
-                    "</implementation_plan>ignored"
-                )
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "choice-1", "name": "request_user_input", "args": {"question": "Continue?"}}],
             ),
-            source="messages",
+            source="updates_agent",
         )
-        processor._emit_plan_buffer_if_available()
-
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(len(deltas), 1)
-        self.assertEqual(deltas[0]["full_text"], "Analyzing project...")
-        self.assertNotIn("Implementation Plan", deltas[0]["full_text"])
-        plan_buffers = [event.payload for event in events if event.type == "implementation_plan_buffer"]
-        self.assertEqual(len(plan_buffers), 1)
-        self.assertIn("# Implementation Plan", plan_buffers[0]["plan_markdown"])
-        self.assertTrue(plan_buffers[0]["closed"])
-
-    def test_stream_processor_uses_unclosed_implementation_plan_buffer(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        async def _stream():
-            yield {
-                "type": "messages",
-                "data": (
-                    AIMessageChunk(content="Reading files...\n<implementation_plan>\n# Plan\n- Step"),
-                    {"langgraph_node": "agent"},
-                ),
-            }
-
-        result = asyncio.run(processor.process_stream(_stream()))
-
-        self.assertIsNotNone(result.stats)
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(len(deltas), 1)
-        self.assertEqual(deltas[0]["full_text"], "Reading files...")
-        plan_buffers = [event.payload for event in events if event.type == "implementation_plan_buffer"]
-        self.assertEqual(len(plan_buffers), 1)
-        self.assertEqual(plan_buffers[0]["plan_markdown"], "# Plan\n- Step")
-        self.assertFalse(plan_buffers[0]["closed"])
-
-    def test_stream_processor_filters_chunked_implementation_plan_open_tag(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        processor._handle_agent_message(AIMessageChunk(content="Reading files...\n<imple"), source="messages")
-        processor._handle_agent_message(
-            AIMessageChunk(content="mentation_plan>\n# Plan\n- Step"),
-            source="messages",
+        processor._handle_tool_result(
+            ToolMessage(content="implement", name="request_user_input", tool_call_id="choice-1")
         )
 
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(len(deltas), 1)
-        self.assertEqual(deltas[0]["full_text"], "Reading files...")
-        self.assertNotIn("<imple", processor.full_text)
-        self.assertNotIn("implementation_plan", processor.full_text)
-        plan_buffers = [event.payload for event in events if event.type == "implementation_plan_buffer"]
-        self.assertEqual(len(plan_buffers), 1)
-        self.assertEqual(plan_buffers[0]["plan_markdown"], "# Plan\n- Step")
-        self.assertFalse(plan_buffers[0]["closed"])
-
-    def test_stream_processor_reports_creating_plan_status_when_plan_tag_is_detected(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        processor._handle_agent_message(AIMessageChunk(content="<implementation_plan>\n# Plan"), source="messages")
-
-        statuses = [event.payload for event in events if event.type == "status_changed"]
-        self.assertTrue(statuses)
-        self.assertEqual(statuses[-1]["node"], "agent")
-        self.assertEqual(statuses[-1]["label"], "Creating Plan...")
-        self.assertEqual(statuses[-1]["phase"], "creating_plan")
-
-    def test_stream_processor_reports_creating_plan_status_for_chunked_plan_tag(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        processor._handle_agent_message(AIMessageChunk(content="Reading files...\n<imple"), source="messages")
-        processor._handle_agent_message(AIMessageChunk(content="mentation_plan>\n# Plan"), source="messages")
-
-        statuses = [event.payload for event in events if event.type == "status_changed"]
-        self.assertTrue(statuses)
-        self.assertEqual(statuses[-1]["label"], "Creating Plan...")
-        self.assertEqual(statuses[-1]["phase"], "creating_plan")
-
-    def test_stream_processor_emits_implementation_plan_buffer_while_streaming(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        processor._handle_agent_message(AIMessageChunk(content="<implementation_plan>\n# Plan"), source="messages")
-        processor._handle_agent_message(AIMessageChunk(content="\n- Step"), source="messages")
-        processor._handle_agent_message(AIMessageChunk(content="\n</implementation_plan>"), source="messages")
-
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(deltas, [])
-        plan_buffers = [event.payload for event in events if event.type == "implementation_plan_buffer"]
-        self.assertEqual([payload["plan_markdown"] for payload in plan_buffers], ["# Plan", "# Plan\n- Step", "# Plan\n- Step"])
-        self.assertFalse(plan_buffers[0]["closed"])
-        self.assertFalse(plan_buffers[1]["closed"])
-        self.assertTrue(plan_buffers[2]["closed"])
+        self.assertEqual([event.type for event in events if event.type.startswith("tool_")], [])
 
     def test_stream_processor_emits_cumulative_full_text_for_chunked_string_output(self):
         events = []
@@ -851,61 +758,6 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(len(deltas), 2)
         self.assertEqual(deltas[-1]["full_text"], "Читаю файл.Готово, вот анализ.")
         self.assertLess(event_types.index("tool_finished"), event_types.index("assistant_delta", 2))
-
-    def test_stream_processor_streams_plan_execution_text_while_tool_is_active(self):
-        events = []
-        processor = StreamProcessor(events.append)
-        processor._handle_updates(
-            {
-                "plan_select_step": {
-                    "plan_status": "executing",
-                    "active_plan_step_id": "s1",
-                    "current_plan": {
-                        "id": "plan-1",
-                        "version": 1,
-                        "summary": "Do work",
-                        "status": "executing",
-                        "active_step_id": "s1",
-                        "steps": [
-                            {
-                                "id": "s1",
-                                "title": "Create HTML",
-                                "description": "Create index.html",
-                                "status": "in_progress",
-                            }
-                        ],
-                        "risks": [],
-                        "assumptions": [],
-                        "verification": [],
-                        "estimated_tools": [],
-                        "estimated_files": [],
-                        "complexity": "low",
-                    },
-                }
-            }
-        )
-        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
-
-        processor._handle_agent_message(AIMessageChunk(content="Проверю HTML."), source="messages")
-
-        event_types = [event.type for event in events]
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(deltas[-1]["full_text"], "Проверю HTML.")
-        self.assertLess(event_types.index("assistant_delta"), event_types.index("tool_finished") if "tool_finished" in event_types else len(event_types))
-        self.assertEqual(processor.full_text, "Проверю HTML.")
-
-    def test_stream_processor_streams_plan_execution_text_before_first_plan_progress(self):
-        events = []
-        processor = StreamProcessor(events.append, plan_execution_active=True)
-        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
-
-        processor._handle_agent_message(AIMessageChunk(content="Проверю HTML."), source="messages")
-
-        event_types = [event.type for event in events]
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(deltas[-1]["full_text"], "Проверю HTML.")
-        self.assertLess(event_types.index("assistant_delta"), event_types.index("tool_finished") if "tool_finished" in event_types else len(event_types))
-        self.assertFalse(processor._deferred_assistant_delta)
 
     def test_stream_processor_keeps_tool_call_message_text_visible_before_result(self):
         events = []
@@ -1220,65 +1072,6 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(deltas[0]["full_text"], "План готов.")
         self.assertNotIn("thought_markdown", deltas[0])
         self.assertNotIn("has_thought", deltas[0])
-
-    def test_stream_processor_hides_plan_step_completion_marker(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        processor._handle_agent_message(AIMessage(content="Шаг выполнен.\n<!--plan-step-complete:s1-->"))
-
-        deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(len(deltas), 1)
-        self.assertEqual(deltas[0]["full_text"], "Шаг выполнен.")
-        self.assertNotIn("plan-step-complete", deltas[0]["full_text"])
-
-    def test_stream_processor_emits_plan_progress_from_structured_plan_update(self):
-        events = []
-        processor = StreamProcessor(events.append)
-
-        async def _stream():
-            yield {
-                "type": "updates",
-                "data": {
-                    "plan_select_step": {
-                        "current_plan": {
-                            "id": "plan-1",
-                            "version": 2,
-                            "summary": "Implement feature",
-                            "status": "executing",
-                            "active_step_id": "s2",
-                            "steps": [
-                                {
-                                    "id": "s1",
-                                    "title": "Inspect",
-                                    "description": "Inspect files",
-                                    "status": "completed",
-                                },
-                                {
-                                    "id": "s2",
-                                    "title": "Edit",
-                                    "description": "Apply changes",
-                                    "status": "in_progress",
-                                },
-                            ],
-                        },
-                        "plan_status": "executing",
-                        "active_plan_step_id": "s2",
-                    }
-                },
-            }
-
-        result = asyncio.run(processor.process_stream(_stream()))
-        progress = [event.payload for event in events if event.type == "plan_progress"]
-        self.assertEqual(len(progress), 1)
-        self.assertEqual(progress[0]["plan_id"], "plan-1")
-        self.assertEqual(progress[0]["version"], 2)
-        self.assertEqual(progress[0]["status"], "executing")
-        self.assertEqual(progress[0]["active_step_id"], "s2")
-        self.assertEqual(progress[0]["completed_steps"], 1)
-        self.assertEqual(progress[0]["total_steps"], 2)
-        self.assertEqual(progress[0]["current_plan"]["summary"], "Implement feature")
-        self.assertEqual(result.stats is not None, True)
 
     def test_stream_processor_returns_user_choice_interrupt_from_updates(self):
         events = []

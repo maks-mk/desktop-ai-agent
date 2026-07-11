@@ -38,7 +38,6 @@ from core.providers.gemini import (
     _decode_gemini_thought_signature,
     create_gemini_chat_model,
 )
-from core.planning import RuntimePlanDraft
 from core.reasoning_debug import preview_value
 from core.providers.openai_reasoning import (
     _build_reasoning_debug_chat_openai,
@@ -251,6 +250,9 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         self.assertTrue(hasattr(cls, "_attach_raw_reasoning_delta"))
 
     def test_safe_openai_model_dump_excludes_structured_parsed_without_warning(self):
+        class FakeParsedPayload(BaseModel):
+            summary: str
+
         class FakeOpenAIMessage(BaseModel):
             model_config = ConfigDict(extra="allow")
             parsed: None = None
@@ -261,19 +263,7 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         class FakeOpenAICompletion(BaseModel):
             choices: list[FakeOpenAIChoice]
 
-        draft = RuntimePlanDraft.model_validate(
-            {
-                "summary": "Implement a fix",
-                "steps": [
-                    {
-                        "id": "inspect",
-                        "title": "Inspect code",
-                        "description": "Find the failing serialization path.",
-                        "status": "pending",
-                    }
-                ],
-            }
-        )
+        draft = FakeParsedPayload(summary="Implement a fix")
         message = FakeOpenAIMessage.model_construct(parsed=draft)
         completion = FakeOpenAICompletion(choices=[FakeOpenAIChoice(message=message)])
 
@@ -285,6 +275,9 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         self.assertNotIn("parsed", dumped["choices"][0]["message"])
 
     def test_reasoning_debug_preview_excludes_structured_parsed_without_warning(self):
+        class FakeParsedPayload(BaseModel):
+            summary: str
+
         class FakeOpenAIMessage(BaseModel):
             model_config = ConfigDict(extra="allow")
             parsed: None = None
@@ -295,19 +288,7 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         class FakeOpenAICompletion(BaseModel):
             choices: list[FakeOpenAIChoice]
 
-        draft = RuntimePlanDraft.model_validate(
-            {
-                "summary": "Implement a fix",
-                "steps": [
-                    {
-                        "id": "inspect",
-                        "title": "Inspect code",
-                        "description": "Find the failing serialization path.",
-                        "status": "pending",
-                    }
-                ],
-            }
-        )
+        draft = FakeParsedPayload(summary="Implement a fix")
         message = FakeOpenAIMessage.model_construct(parsed=draft)
         completion = FakeOpenAICompletion(choices=[FakeOpenAIChoice(message=message)])
 
@@ -319,23 +300,14 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         self.assertNotIn("parsed", rendered)
 
     def test_reasoning_debug_preview_excludes_top_level_parsed_without_warning(self):
+        class FakeParsedPayload(BaseModel):
+            summary: str
+
         class FakeParsedCompletion(BaseModel):
             model_config = ConfigDict(extra="allow")
             parsed: None = None
 
-        draft = RuntimePlanDraft.model_validate(
-            {
-                "summary": "Implement a fix",
-                "steps": [
-                    {
-                        "id": "inspect",
-                        "title": "Inspect code",
-                        "description": "Find the failing serialization path.",
-                        "status": "pending",
-                    }
-                ],
-            }
-        )
+        draft = FakeParsedPayload(summary="Implement a fix")
         completion = FakeParsedCompletion.model_construct(parsed=draft)
 
         with warnings.catch_warnings(record=True) as captured:

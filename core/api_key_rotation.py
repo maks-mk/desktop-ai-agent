@@ -47,6 +47,21 @@ def _extract_provider_code_text(error: Exception) -> str:
     return " ".join(str(part or "").strip().lower() for part in parts if str(part or "").strip())
 
 
+def _format_error_for_user(error: Exception | None, error_kind: str | None = None) -> str:
+    if error is None:
+        return "неизвестная ошибка"
+    parts = [type(error).__name__]
+    status_code = _extract_status_code(error)
+    if error_kind:
+        parts.append(f"тип: {error_kind}")
+    if status_code is not None:
+        parts.append(f"HTTP {status_code}")
+    message = " ".join(str(error or "").split())
+    if message:
+        parts.append(message)
+    return " | ".join(parts)
+
+
 def classify_api_key_error(error: Exception) -> str | None:
     status_code = _extract_status_code(error)
     if status_code in {401, 403}:
@@ -236,12 +251,17 @@ class RotatingChatModel:
         tried_summary = ", ".join(
             f"#{i}({_mask_key(k)})" for i, k in enumerate(api_keys)
         )
+        last_error_text = _format_error_for_user(
+            last_error,
+            classify_api_key_error(last_error) if last_error is not None else None,
+        )
         self._logger.error(
             f"All {total} keys exhausted for profile '{self._profile_id}' "
-            f"[{tried_summary}]. Last error: {last_error}"
+            f"[{tried_summary}]. Last error: {last_error_text}"
         )
         raise ApiKeyRotationExhaustedError(
             f"Все API-ключи для '{model_label}' исчерпаны за один полный цикл. "
+            f"Последняя ошибка: {last_error_text}. "
             "Проверьте лимиты и действительность ключей, либо повторите запрос позже."
         ) from last_error
 

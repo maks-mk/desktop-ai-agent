@@ -394,12 +394,10 @@ def normalize_request_payload(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         text = str(payload.get("text") or "")
         attachments = normalize_image_attachments(payload.get("attachments"))
-        plan_mode = bool(payload.get("plan_mode", False))
     else:
         text = str(payload or "")
         attachments = []
-        plan_mode = False
-    return {"text": text, "attachments": attachments, "plan_mode": plan_mode}
+    return {"text": text, "attachments": attachments}
 
 
 def request_has_content(payload: Any) -> bool:

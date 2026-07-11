@@ -21,13 +21,6 @@ class AgentState(TypedDict):
 
     # Original user task for the current request
     current_task: NotRequired[str]
-    turn_mode: NotRequired[str]
-    plan_status: NotRequired[str]
-    plan_revision: NotRequired[int]
-    current_plan: NotRequired[Dict[str, Any] | None]
-    plan_graph_active: NotRequired[bool]
-    active_plan_step_id: NotRequired[str]
-    plan_feedback: NotRequired[str]
     requires_evidence: NotRequired[bool]
     safety_mode: NotRequired[str]
 

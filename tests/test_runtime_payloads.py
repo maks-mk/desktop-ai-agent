@@ -7,40 +7,12 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from core.summarize_policy import estimate_tokens, should_summarize
 from ui.runtime_payloads import (
     append_project_label,
-    build_pending_plan_review_payload,
     build_summary_progress_payload,
     build_transcript_payload,
     build_ui_payload,
     build_user_choice_payload,
     generate_chat_title,
 )
-
-
-def _pending_plan_state():
-    return {
-        "plan_status": "pending_approval",
-        "current_plan": {
-            "id": "plan-1",
-            "version": 1,
-            "summary": "Внести изменение",
-            "steps": [
-                {
-                    "id": "inspect",
-                    "title": "Проверить код",
-                    "description": "Найти точку изменения.",
-                    "status": "pending",
-                }
-            ],
-            "risks": [],
-            "assumptions": [],
-            "verification": ["Запустить тесты"],
-            "estimated_tools": [],
-            "estimated_files": [],
-            "complexity": "low",
-            "status": "pending_approval",
-            "active_step_id": "",
-        },
-    }
 
 
 class RuntimePayloadTests(unittest.TestCase):
@@ -136,25 +108,6 @@ class RuntimePayloadTests(unittest.TestCase):
         self.assertEqual(payload["recommended_key"], "Retry")
         self.assertEqual([item["recommended"] for item in payload["options"]], [False, True])
 
-    def test_build_pending_plan_review_payload_restores_checkpointed_plan_choice(self):
-        payload = build_pending_plan_review_payload(_pending_plan_state())
-
-        self.assertIsNotNone(payload)
-        self.assertEqual(payload["choice_type"], "plan_review")
-        self.assertEqual(payload["current_plan"]["summary"], "Внести изменение")
-        self.assertEqual(payload["current_plan"]["verification"], ["Запустить тесты"])
-        self.assertEqual(
-            [option["submit_text"] for option in payload["options"]],
-            ["implement", "revise", "rebuild", "cancel"],
-        )
-
-    def test_build_pending_plan_review_payload_ignores_invalid_checkpoint_plan(self):
-        payload = build_pending_plan_review_payload(
-            {"plan_status": "pending_approval", "current_plan": {"summary": "broken"}}
-        )
-
-        self.assertIsNone(payload)
-
     def test_build_transcript_payload_restores_turns_attachments_and_tool_args(self):
         payload = build_transcript_payload(
             {
@@ -199,70 +152,6 @@ class RuntimePayloadTests(unittest.TestCase):
         tool_block = turn["blocks"][-1]["payload"]
         self.assertEqual(tool_block["args"]["path"], "app.py")
         self.assertEqual(tool_block["diff"], "-a\n+b")
-
-    def test_build_transcript_payload_restores_implementation_plan_as_collapsed_plan_block(self):
-        payload = build_transcript_payload(
-            {
-                "current_plan": {
-                    "id": "plan-1",
-                    "version": 1,
-                    "summary": "Small UI update",
-                    "status": "completed",
-                    "steps": [
-                        {"id": "inspect", "title": "Inspect", "description": "Read UI code", "status": "completed"},
-                        {"id": "fix", "title": "Fix", "description": "Keep card", "status": "completed"},
-                    ],
-                    "risks": [],
-                    "assumptions": [],
-                    "estimated_tools": [],
-                    "estimated_files": [],
-                    "complexity": "low",
-                    "active_step_id": "",
-                },
-                "messages": [
-                    HumanMessage(content="implement plan"),
-                    AIMessage(content="<implementation_plan>\n# Plan\n- Inspect\n- Fix\n</implementation_plan>"),
-                ],
-            }
-        )
-
-        blocks = payload["turns"][0]["blocks"]
-        self.assertEqual([block["type"] for block in blocks], ["plan"])
-        self.assertEqual(blocks[0]["payload"]["plan_markdown"], "# Plan\n- Inspect\n- Fix")
-        self.assertEqual(blocks[0]["payload"]["current_plan"]["id"], "plan-1")
-        self.assertFalse(blocks[0]["actions_visible"])
-        self.assertTrue(blocks[0]["implemented"])
-
-    def test_build_transcript_payload_strips_implementation_plan_tags_from_assistant_text(self):
-        payload = build_transcript_payload(
-            {
-                "messages": [
-                    HumanMessage(content="implement plan"),
-                    AIMessage(content="Before\n<implementation_plan>\n# Plan\n</implementation_plan>\nAfter"),
-                ],
-            }
-        )
-
-        blocks = payload["turns"][0]["blocks"]
-        self.assertEqual([block["type"] for block in blocks], ["plan", "assistant"])
-        self.assertEqual(blocks[0]["payload"]["plan_markdown"], "# Plan")
-        self.assertEqual(blocks[1]["markdown"], "Before\n\nAfter")
-        self.assertNotIn("implementation_plan", blocks[1]["markdown"])
-
-    def test_build_transcript_payload_hides_plan_step_completion_marker(self):
-        payload = build_transcript_payload(
-            {
-                "messages": [
-                    HumanMessage(content="continue"),
-                    AIMessage(content="Шаг выполнен.\n<!--plan-step-complete:s1-->"),
-                ],
-            }
-        )
-
-        blocks = payload["turns"][0]["blocks"]
-        self.assertEqual([block["type"] for block in blocks], ["assistant"])
-        self.assertEqual(blocks[0]["markdown"], "Шаг выполнен.")
-        self.assertNotIn("plan-step-complete", blocks[0]["markdown"])
 
     def test_build_transcript_payload_does_not_parse_assistant_thought_markdown(self):
         payload = build_transcript_payload(
@@ -427,7 +316,7 @@ class RuntimePayloadAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def _build_payload(self, *, tasks):
         class FakeApp:
             async def aget_state(self, _config):
-                return SimpleNamespace(values=_pending_plan_state(), tasks=tasks)
+                return SimpleNamespace(values={}, tasks=tasks)
 
         store = SimpleNamespace(list_sessions=lambda: [])
         registry = SimpleNamespace(
@@ -445,14 +334,7 @@ class RuntimePayloadAsyncTests(unittest.IsolatedAsyncioTestCase):
             agent_app=FakeApp(),
         )
 
-    async def test_build_ui_payload_restores_plan_choice_only_with_pending_interrupt(self):
-        interrupt = SimpleNamespace(value={"choice_type": "plan_review"})
-        payload = await self._build_payload(tasks=[SimpleNamespace(interrupts=(interrupt,))])
-
-        self.assertIn("pending_user_choice", payload)
-        self.assertEqual(payload["pending_user_choice"]["choice_type"], "plan_review")
-
-    async def test_build_ui_payload_skips_stale_pending_plan_without_interrupt(self):
+    async def test_build_ui_payload_omits_pending_user_choice_without_runtime_interrupt(self):
         payload = await self._build_payload(tasks=[])
 
         self.assertNotIn("pending_user_choice", payload)

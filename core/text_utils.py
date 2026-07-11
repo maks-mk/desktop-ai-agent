@@ -214,6 +214,12 @@ def _single_line_preview(value: Any) -> str:
     return " ".join(text.split())
 
 
+def _first_non_empty_item(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return next((str(item) for item in value if str(item).strip()), "")
+    return str(value or "")
+
+
 def abbreviate_path(path_str: str, max_length: int = 60) -> str:
     try:
         path = Path(path_str)
@@ -243,9 +249,10 @@ def _format_path_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
 
 
 def _format_query_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
-    query = tool_args.get("query")
-    if query is not None:
-        return f'{tool_name}("{truncate_value(_single_line_preview(query), 80)}")'
+    query = tool_args.get("queries") if tool_name == "batch_web_search" else tool_args.get("query")
+    query_text = _first_non_empty_item(query)
+    if query_text:
+        return f'{tool_name}("{truncate_value(_single_line_preview(query_text), 80)}")'
     return None
 
 
@@ -270,14 +277,15 @@ def _format_list_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
 
 def _format_url_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
     url_val = tool_args.get("url") or tool_args.get("urls")
-    if url_val:
-        return f'{tool_name}("{truncate_value(_single_line_preview(url_val), 80)}")'
+    url_text = _first_non_empty_item(url_val)
+    if url_text:
+        return f'{tool_name}("{truncate_value(_single_line_preview(url_text), 80)}")'
     return None
 
 
 DISPLAY_RULES: tuple[tuple[set[str], Callable[[str, Dict[str, Any]], str | None]], ...] = (
     ({"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace"}, _format_path_tool),
-    ({"web_search", "WebSearch"}, _format_query_tool),
+    ({"web_search", "WebSearch", "batch_web_search"}, _format_query_tool),
     ({"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}, _format_pattern_tool),
     ({"execute", "RunCommand", "cli_exec"}, _format_command_tool),
     ({"ls", "LS", "list_directory"}, _format_list_tool),
@@ -307,6 +315,8 @@ def classify_tool_args_state(tool_name: str, tool_args: Dict[str, Any]) -> str:
         anchor_keys = ("path", "file_path")
     elif tool_name in {"web_search", "WebSearch"}:
         anchor_keys = ("query",)
+    elif tool_name == "batch_web_search":
+        anchor_keys = ("queries",)
     elif tool_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
         anchor_keys = ("pattern", "name_pattern")
     elif tool_name in {"execute", "RunCommand", "cli_exec"}:
@@ -348,6 +358,9 @@ def tool_target_summary(tool_name: str, tool_args: Dict[str, Any]) -> str:
     if normalized_name in {"web_search", "WebSearch"}:
         query = args.get("query")
         return truncate_value(_single_line_preview(query), 80) if query else ""
+    if normalized_name == "batch_web_search":
+        query = _first_non_empty_item(args.get("queries"))
+        return truncate_value(_single_line_preview(query), 80) if query else ""
     if normalized_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
         pattern_val = args.get("pattern") or args.get("name_pattern")
         return truncate_value(_single_line_preview(pattern_val), 70) if pattern_val else ""
@@ -355,8 +368,8 @@ def tool_target_summary(tool_name: str, tool_args: Dict[str, Any]) -> str:
         command = args.get("command")
         return truncate_value(_single_line_preview(command), 100) if command else ""
     if normalized_name in {"fetch_url", "WebFetch", "fetch_content", "download_file"}:
-        url_val = args.get("url") or args.get("urls")
-        return truncate_value(_single_line_preview(url_val), 80) if url_val else ""
+        url_text = _first_non_empty_item(args.get("url") or args.get("urls"))
+        return truncate_value(_single_line_preview(url_text), 80) if url_text else ""
     return ""
 
 
@@ -384,6 +397,7 @@ def build_tool_ui_labels(
         "list_directory": "Listing directory",
         "web_search": "Searching web",
         "WebSearch": "Searching web",
+        "batch_web_search": "Searching web",
         "grep": "Searching files",
         "Grep": "Searching files",
         "glob": "Finding files",
@@ -411,6 +425,7 @@ def build_tool_ui_labels(
         "list_directory": "Preparing directory listing",
         "web_search": "Preparing search",
         "WebSearch": "Preparing search",
+        "batch_web_search": "Preparing search",
         "grep": "Preparing search",
         "Grep": "Preparing search",
         "glob": "Preparing file search",

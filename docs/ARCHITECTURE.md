@@ -36,20 +36,6 @@ START
 | Safety | `core/context_builder.py` | Workspace boundary, shell warning |
 | Recovery | `core/recovery_manager.py` | Инструкции при активной ошибке |
 | Memory | state: `summary` | Автосуммаризованный контекст прошлых ходов |
-| Plan Mode | `core/runtime_prompt_policy.py` | Инструкция для режима планирования (включается при `turn_mode == "plan"`) |
-
----
-
-## Plan Mode
-
-Когда `turn_mode == "plan"` (устанавливается через `plan_mode: True` в payload запроса):
-
-- **Prompt**: добавляется короткий `PLAN_MODE_TEXT` контракт. Он требует сначала исследовать repo read-only, затем при необходимости запросить только одно блокирующее решение через `request_user_input`, а финальный ответ вернуть ровно одним блоком `<implementation_plan>...</implementation_plan>`. Approval моделью не запрашивается: runtime сам показывает обязательный interrupt `choice_type='plan_review'`.
-- **Tools**: `_active_tools_for_turn` фильтрует набор до read-only инструментов + `request_user_input`. Мутирующие и деструктивные инструменты недоступны.
-- **Protocol**: `_sanitize_user_input_tool_calls` сохраняет общий guard "at most once per turn" для legacy flow. В Plan Mode mutating tool calls отбрасываются до маршрутизации; `plan_build` собирает structured plan по `RuntimePlanDraft`, а `plan_review` формирует review interrupt из `current_plan`.
-- **State**: structured plan сохраняется в `current_plan`; кроме `summary`, `steps`, `risks` и `assumptions`, схема также хранит `verification`. `plan_status` переходит в `pending_approval` до выбора пользователя. События `plan_progress` несут `current_plan`, `completed_steps`, `total_steps` и active-step context для UI.
-- **Resume**: UI продолжает graph через `Command(resume={"choice_type": "plan_review", "choice": <selected option>, "feedback": <selected option>})`. `implement` переводит план к выполнению, `revise` запрашивает правки, `rebuild` перестраивает план, `cancel` отклоняет его. Legacy `plan_approval` resume сохраняется только для обратной совместимости.
-- **Execution UI**: во время реализации `plan_progress` управляет отдельной side panel. Она остаётся видимой через retry/follow-up runs и скрывается только в terminal states (`completed`, `rejected`, `cancelled`).
 
 ---
 

@@ -24,8 +24,9 @@ _NETWORK_DIAGNOSTIC_COMMAND_RE = re.compile(
 )
 _MUTATING_COMMAND_RE = re.compile(
     r"\b(?:taskkill|stop-process|remove-item|rm|del|rmdir|move-item|rename-item|"
-    r"copy-item|set-content|add-content|npm\s+install|npm\s+uninstall|"
-    r"pip\s+install|git\s+checkout)\b",
+    r"copy-item|set-content|add-content|out-file|new-item|npm\s+install|npm\s+uninstall|"
+    r"pip\s+install|python\s+-m\s+pip\s+install|git\s+checkout|git\s+reset)\b"
+    r"|python\s+-c\b.*\b(?:write_text|write_bytes|open\s*\([^)]*,\s*['\"]?[wax])",
     re.IGNORECASE,
 )
 _DESTRUCTIVE_COMMAND_RE = re.compile(

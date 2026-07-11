@@ -36,12 +36,11 @@ The project does not try to compete with AI IDEs by feature count and does not t
 
 - Graph runtime on `LangGraph` with bounded recovery and self-correction
 - Mixed-mode parallel tool batch: read-only tools run in parallel via `asyncio.gather`, the rest run sequentially; results are reassembled in original order
-- GUI: chat history, streaming transcript, tool cards, approvals, compact plan review card, plan execution side panel, attachments
+- GUI: chat history, streaming transcript, tool cards, approvals, user-choice cards, attachments
 - Fuzzy replay suppression: the model's repeated preface after a tool call is suppressed even with minor text drift (typos, punctuation)
 - Live CLI output streaming: shell command output is shown in the tool card in real time, not only after completion
 - Exit-code-neutral commands: `grep`, `rg`, `vulture`, `pytest`, `diff`, etc. with a non-zero exit code are not marked as errors — the output is returned with an `Exit Code: N` prefix
 - Stream-interruption recovery with error classification (`rate_limit` / `timeout` / `server_error` / `network`) and exponential backoff with jitter before auto-continue
-- Plan Mode: analysis and planning mode without making changes, featuring a mandatory review card before switching to implementation and a live side panel during plan execution
 - Tools: filesystem, shell, web search, system info, process management, MCP
 - Approval pauses before mutating and destructive actions
 - Automatic context summarization for long sessions

@@ -17,7 +17,6 @@ from core.nodes.tool_preflight import ToolPreflightMixin
 from core.nodes.protocol import ProtocolMixin
 from core.nodes.summarize import SummarizeMixin
 from core.nodes.agent import AgentMixin
-from core.nodes.planning import PlanningMixin
 from core.nodes.approval import ApprovalMixin
 from core.nodes.tools import ToolsMixin
 from core.nodes.recovery import RecoveryMixin
@@ -33,7 +32,6 @@ class AgentNodes(
     ProtocolMixin,
     SummarizeMixin,
     AgentMixin,
-    PlanningMixin,
     ApprovalMixin,
     ToolsMixin,
     RecoveryMixin,

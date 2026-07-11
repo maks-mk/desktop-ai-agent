@@ -85,43 +85,12 @@ def create_agent_workflow(
 
     workflow.add_node("summarize", nodes.summarize_node)
     workflow.add_node("agent", nodes.agent_node)
-    workflow.add_node("plan_build", nodes.plan_build_node)
-    workflow.add_node("plan_review", nodes.plan_review_node)
-    workflow.add_node("plan_revision_input", nodes.plan_revision_input_node)
-    workflow.add_node("plan_select_step", nodes.plan_select_step_node)
-    workflow.add_node("plan_complete_step", nodes.plan_complete_step_node)
-    workflow.add_node("plan_block_step", nodes.plan_block_step_node)
     workflow.add_node("recovery", nodes.recovery_node)
     workflow.add_node("update_step", lambda state: {"steps": state.get("steps", 0) + 1})
 
     workflow.add_edge(START, "summarize")
     workflow.add_edge("summarize", "update_step")
-
-    def _plan_graph_active(state: AgentState) -> bool:
-        return bool(state.get("plan_graph_active") or state.get("current_plan"))
-
-    def _plan_status(state: AgentState) -> str:
-        return str(state.get("plan_status") or "").strip().lower()
-
-    def route_after_update_step(state: AgentState):
-        if _plan_graph_active(state):
-            status = _plan_status(state)
-            # If the previous run was interrupted right before ``plan_review``
-            # (e.g. by a 429 error), the checkpoint may contain
-            # ``plan_status='pending_approval'`` with a valid ``current_plan``
-            # but no active interrupt task. A plain text follow-up ("Продолжай")
-            # must not bypass approval and jump straight to the agent.
-            if status == "pending_approval" and state.get("current_plan"):
-                return "plan_review"
-            if status == "approved":
-                return "plan_select_step"
-            if status == "executing" and not str(state.get("active_plan_step_id") or "").strip():
-                return "plan_select_step"
-        return "agent"
-
-    workflow.add_conditional_edges(
-        "update_step", route_after_update_step, ["plan_select_step", "plan_review", "agent"],
-    )
+    workflow.add_edge("update_step", "agent")
 
     if tools_enabled:
         workflow.add_node("tools", nodes.tools_node)
@@ -139,35 +108,6 @@ def create_agent_workflow(
         turn_outcome = normalize_turn_outcome(state.get("turn_outcome"))
         has_open_tool_issue = bool(state.get("open_tool_issue"))
         has_protocol_error = bool(state.get("has_protocol_error"))
-        plan_graph_active = _plan_graph_active(state)
-        plan_status = _plan_status(state)
-
-        if plan_graph_active and plan_status in {"draft", "needs_changes", "rebuild_requested"}:
-            if tools_enabled and turn_outcome == TURN_OUTCOME_RUN_TOOLS:
-                if steps >= config.max_loops:
-                    logger.warning(
-                        "Plan-mode loop guard reached at step %s/%s with pending tool calls. Routing to recovery.",
-                        steps,
-                        config.max_loops,
-                    )
-                    return "recovery"
-                pending_ai_with_tools = nodes._get_last_pending_ai_with_tool_calls(messages)
-                if isinstance(pending_ai_with_tools, AIMessage) and pending_ai_with_tools.tool_calls:
-                    return "tools"
-                return "recovery"
-            if turn_outcome == TURN_OUTCOME_RECOVER_AGENT or has_open_tool_issue or has_protocol_error:
-                return "recovery"
-            return "plan_build"
-
-        if plan_graph_active and plan_status == "executing" and str(state.get("active_plan_step_id") or "").strip():
-            if (
-                turn_outcome == TURN_OUTCOME_FINISH_TURN
-                and not has_open_tool_issue
-                and not has_protocol_error
-                and nodes.plan_step_completion_requested(state)
-            ):
-                return "plan_complete_step"
-
         if tools_enabled and turn_outcome == TURN_OUTCOME_RUN_TOOLS:
             if steps >= config.max_loops:
                 logger.warning(
@@ -199,64 +139,21 @@ def create_agent_workflow(
 
     def route_after_recovery(state: AgentState):
         normalized = normalize_turn_outcome(state.get("turn_outcome"))
-        if (
-            _plan_graph_active(state)
-            and _plan_status(state) == "executing"
-            and str(state.get("active_plan_step_id") or "").strip()
-            and normalized == TURN_OUTCOME_FINISH_TURN
-        ):
-            return "plan_block_step"
         if normalized in (TURN_OUTCOME_RECOVER_AGENT, TURN_OUTCOME_CONTINUE_AGENT):
             return "update_step"
         return END
 
-    def route_after_plan_build(state: AgentState):
-        if state.get("open_tool_issue") or state.get("has_protocol_error"):
-            return "recovery"
-        if _plan_status(state) == "pending_approval" and state.get("current_plan"):
-            return "plan_review"
-        return "recovery"
-
-    def route_after_plan_review(state: AgentState):
-        status = _plan_status(state)
-        if status == "approved":
-            return "plan_select_step"
-        if status == "needs_changes":
-            return "plan_revision_input"
-        if status == "rebuild_requested":
-            return "plan_build"
-        return END
-
-    def route_after_plan_select(state: AgentState):
-        if state.get("open_tool_issue") or state.get("has_protocol_error"):
-            return "recovery"
-        status = _plan_status(state)
-        if status in {"completed", "rejected"}:
-            return END
-        return "agent"
-
-    def route_after_plan_block(state: AgentState):
-        if _plan_status(state) == "rebuild_requested":
-            return "plan_build"
-        return END
-
     if tools_enabled:
-        agent_routes = ["tools", "recovery", "plan_build", "plan_complete_step", END]
+        agent_routes = ["tools", "recovery", END]
         if approval_enabled:
             agent_routes.insert(0, "approval")
             workflow.add_edge("approval", "tools")
         workflow.add_conditional_edges("agent", route_after_agent, agent_routes)
         workflow.add_conditional_edges("tools", route_after_tools, ["recovery", "update_step"])
     else:
-        workflow.add_conditional_edges("agent", route_after_agent, ["recovery", "plan_build", "plan_complete_step", END])
+        workflow.add_conditional_edges("agent", route_after_agent, ["recovery", END])
 
-    workflow.add_conditional_edges("plan_build", route_after_plan_build, ["plan_review", "recovery"])
-    workflow.add_conditional_edges("plan_review", route_after_plan_review, ["plan_select_step", "plan_revision_input", "plan_build", END])
-    workflow.add_edge("plan_revision_input", "plan_build")
-    workflow.add_conditional_edges("plan_select_step", route_after_plan_select, ["agent", "recovery", END])
-    workflow.add_edge("plan_complete_step", "plan_select_step")
-    workflow.add_conditional_edges("plan_block_step", route_after_plan_block, ["plan_build", END])
-    workflow.add_conditional_edges("recovery", route_after_recovery, ["update_step", "plan_block_step", END])
+    workflow.add_conditional_edges("recovery", route_after_recovery, ["update_step", END])
 
     return workflow
 

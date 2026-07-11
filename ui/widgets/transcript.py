@@ -9,7 +9,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from .foundation import TRANSCRIPT_MAX_WIDTH, _fa_icon
-from .messages import AssistantMessageWidget, InlinePlanWidget, NoticeWidget, RunStatsWidget, StatusIndicatorWidget, UserMessageWidget
+from .messages import AssistantMessageWidget, NoticeWidget, RunStatsWidget, StatusIndicatorWidget, UserMessageWidget
 from .tool_group import ToolGroupWidget
 from .tools import ToolCardWidget
 
@@ -30,7 +30,6 @@ class ConversationTurnWidget(QWidget):
         self.assistant_segments: list[AssistantMessageWidget] = []
         self.tool_cards: dict[str, ToolCardWidget] = {}
         self.tool_group: ToolGroupWidget | None = None
-        self.inline_plan_widget: InlinePlanWidget | None = None
         self.status_widget: StatusIndicatorWidget | None = None
         self.summary_notice_widget: NoticeWidget | None = None
         self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or []), parent=self))
@@ -192,20 +191,6 @@ class ConversationTurnWidget(QWidget):
             return
         self.assistant_segments[-1].set_streaming(active)
 
-    def add_inline_plan(self, payload: dict[str, Any], *, actions_visible: bool = True, implemented: bool = False) -> InlinePlanWidget:
-        if self.inline_plan_widget is None:
-            self.inline_plan_widget = InlinePlanWidget(parent=self)
-            self._append_block("plan", self.inline_plan_widget)
-        self.inline_plan_widget.set_payload(payload)
-        self.inline_plan_widget.set_actions_visible(actions_visible)
-        if implemented:
-            self.inline_plan_widget.collapse_after_implement()
-        return self.inline_plan_widget
-
-    def collapse_inline_plan_after_implement(self) -> None:
-        if self.inline_plan_widget is not None:
-            self.inline_plan_widget.collapse_after_implement()
-
     def add_notice(self, message: str, level: str = "info") -> None:
         self._append_block("notice", NoticeWidget(message, level=level, parent=self))
 
@@ -290,14 +275,6 @@ class ConversationTurnWidget(QWidget):
                 level = str(block.get("level") or "info")
                 if message and level == "error":
                     self.add_notice(message, level)
-            elif block_type == "plan":
-                payload = dict(block.get("payload") or {})
-                if payload:
-                    self.add_inline_plan(
-                        payload,
-                        actions_visible=bool(block.get("actions_visible", False)),
-                        implemented=bool(block.get("implemented", False)),
-                    )
             elif block_type == "stats":
                 stats = str(block.get("stats", "") or "").strip()
                 if stats:

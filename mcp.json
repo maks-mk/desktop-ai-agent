@@ -11,7 +11,7 @@
     "type": "remote",
     "url": "https://mcp.context7.com/mcp",
     "transport": "http",
-    "enabled": true,
+    "enabled": false,
     "policy": {
       "read_only": true
     }

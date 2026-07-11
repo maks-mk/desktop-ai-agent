@@ -36,12 +36,11 @@
 
 - Графовый runtime на `LangGraph` с bounded recovery и self-correction
 - Mixed-mode parallel tool batch: read-only инструменты запускаются параллельно через `asyncio.gather`, остальные — последовательно; результаты собираются в исходном порядке
-- GUI: история чатов, streaming transcript, tool cards, approvals, компактная review-карточка плана, боковая панель выполнения плана, вложения
+- GUI: история чатов, streaming transcript, tool cards, approvals, user-choice карточки, вложения
 - Fuzzy replay suppression: повторный префейс модели после tool-вызова подавляется даже при минимальных расхождениях текста (опечатки, пунктуация)
 - Live CLI output streaming: вывод shell-команд отображается в карточке инструмента в реальном времени, а не только после завершения
 - Exit-code-neutral команды: `grep`, `rg`, `vulture`, `pytest`, `diff` и др. с ненулевым exit code не помечаются как ошибка — вывод возвращается с префиксом `Exit Code: N`
 - Stream-interruption recovery с классификацией ошибок (`rate_limit` / `timeout` / `server_error` / `network`) и экспоненциальным backoff с джиттером перед авто-продолжением
-- Plan Mode: режим анализа и планирования без внесения изменений с обязательной review-карточкой перед переходом к реализации и живой боковой панелью прогресса во время выполнения
 - Инструменты: filesystem, shell, web search, system info, process management, MCP
 - Approval-паузы перед мутирующими и деструктивными действиями
 - Автосуммаризация контекста при длинных сессиях

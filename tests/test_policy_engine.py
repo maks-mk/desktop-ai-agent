@@ -62,6 +62,9 @@ class ToolApprovalPolicyTests(unittest.TestCase):
         self.assertTrue(shell_command_requires_approval("npm run dev"))
         self.assertTrue(shell_command_requires_approval("curl -X POST https://example.com -d 'x=1'"))
         self.assertTrue(shell_command_requires_approval("git reset --hard HEAD~1"))
+        self.assertTrue(shell_command_requires_approval("Get-Content README.md | Out-File copy.txt"))
+        self.assertTrue(shell_command_requires_approval("python -m pip install demo-package"))
+        self.assertTrue(shell_command_requires_approval("python -c \"from pathlib import Path; Path('x').write_text('x')\""))
 
     def test_shell_approval_defaults_to_conservative_for_unknown_commands(self):
         self.assertTrue(shell_command_requires_approval("git status"))

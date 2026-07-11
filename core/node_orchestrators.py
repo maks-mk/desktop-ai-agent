@@ -40,9 +40,6 @@ class AgentTurnOrchestrator:
         current_turn_id = owner._current_turn_id(state, messages)
         open_tool_issue = owner._get_active_open_tool_issue(state, messages, current_turn_id)
         recovery_state = owner._get_recovery_state(state, current_turn_id=current_turn_id)
-        plan_mode = str(state.get("turn_mode", "") or "").strip().lower() == "plan"
-        plan_graph_active = bool(state.get("plan_graph_active"))
-
         active_tools, active_tool_names = owner._active_tools_for_turn(
             state,
             messages,
@@ -167,8 +164,6 @@ class AgentTurnOrchestrator:
                 open_tool_issue=open_tool_issue,
                 recovery_state=recovery_state,
                 allowed_tool_names=active_tool_names,
-                plan_mode=plan_mode,
-                legacy_plan_approval=not plan_graph_active,
             )
             if result.pop("_retry_user_input_turn", False):
                 owner._log_run_event(
@@ -206,8 +201,6 @@ class AgentTurnOrchestrator:
                     open_tool_issue=open_tool_issue,
                     recovery_state=recovery_state,
                     allowed_tool_names=active_tool_names,
-                    plan_mode=plan_mode,
-                    legacy_plan_approval=not plan_graph_active,
                 )
                 result.pop("_retry_user_input_turn", None)
             if result.get("open_tool_issue") and result.get("has_protocol_error"):

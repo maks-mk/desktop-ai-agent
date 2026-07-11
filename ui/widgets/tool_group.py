@@ -89,8 +89,12 @@ class ToolGroupWidget(QFrame):
             return "command"
         if name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
             return "search"
-        if name in {"web_search", "WebSearch", "fetch_url", "WebFetch", "fetch_content", "download_file"}:
+        if name in {"web_search", "WebSearch", "batch_web_search"}:
             return "network"
+        if name in {"fetch_url", "WebFetch", "fetch_content"}:
+            return "fetch"
+        if name == "download_file":
+            return "download"
         if name in {"ls", "LS", "list_directory"}:
             return "list"
         return "tool"
@@ -126,7 +130,11 @@ class ToolGroupWidget(QFrame):
         if role == "search":
             return "Поиск завершён" if completed else "Поиск по файлам"
         if role == "network":
-            return "Запрос выполнен" if completed else "Выполняется запрос"
+            return "Поиск в интернете завершён" if completed else "Ищу в интернете"
+        if role == "fetch":
+            return "Страницы получены" if completed else "Получаю страницы"
+        if role == "download":
+            return "Файлы скачаны" if completed else "Скачиваю файлы"
         if role == "list":
             return "Список получен" if completed else "Просмотр каталога"
         noun = self._plural_ru(total, "инструмент", "инструмента", "инструментов")
@@ -142,6 +150,8 @@ class ToolGroupWidget(QFrame):
                 "command": "Команда не выполнена",
                 "search": "Поиск не удался",
                 "network": "Запрос не выполнен",
+                "fetch": "Страницу получить не удалось",
+                "download": "Файл скачать не удалось",
                 "list": "Просмотр не удался",
             }.get(role, "Инструмент завершился ошибкой")
         noun = self._plural_ru(errors, "ошибка", "ошибки", "ошибок")

@@ -15,7 +15,6 @@ from langgraph.types import Command
 from core.config import AgentConfig
 from core.logging_config import setup_logging
 from core.model_profiles import ModelProfileStore, find_active_profile, normalize_profiles_payload
-from core.planning import coerce_runtime_plan, update_plan_status
 from core.multimodal import (
     DEFAULT_MODEL_CAPABILITIES,
     build_user_message_content,
@@ -66,19 +65,11 @@ def build_initial_state(user_input: Any, session_id: str, safety_mode: str = "de
     user_text = request_payload["text"]
     attachments = request_payload["attachments"]
     current_task = request_task_text(request_payload)
-    plan_mode = bool(request_payload.get("plan_mode", False))
     return {
         "messages": [HumanMessage(content=build_user_message_content(user_text, attachments))],
         "steps": 0,
         "token_usage": {},
         "current_task": current_task,
-        "turn_mode": "plan" if plan_mode else "chat",
-        "plan_status": "draft" if plan_mode else "",
-        "plan_revision": 0,
-        "current_plan": None,
-        "plan_graph_active": bool(plan_mode),
-        "active_plan_step_id": "",
-        "plan_feedback": "",
         "requires_evidence": False,
         "session_id": session_id,
         "run_id": uuid.uuid4().hex,
@@ -149,7 +140,6 @@ class AgentRunWorker(QObject):
         self._pending_user_choice_type = ""
         self._active_run_elapsed_seconds = 0.0
         self._active_request_has_images = False
-        self._active_plan_stream_hint = False
         self._active_summary_estimated_tokens = 0
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
@@ -506,58 +496,6 @@ class AgentRunWorker(QObject):
             self.event_emitted.emit(StreamEvent("run_failed", {"message": str(exc)}))
             self._set_busy(False)
 
-    async def _merge_plan_checkpoint_into_initial_state(self, initial_state: dict) -> dict:
-        """Preserve an active plan graph when the user sends a non-plan follow-up.
-
-        ``build_initial_state`` resets ``plan_graph_active`` to ``False`` and
-        ``current_plan`` to ``None``. If the previous run left a pending plan in
-        the checkpoint (e.g. interrupted right before ``plan_review`` by a 429
-        error), this would silently destroy it, letting a plain "Продолжай"
-        bypass plan approval and jump straight into execution.
-
-        This method loads the checkpoint values and, if a non-terminal plan
-        exists, restores the plan-related fields so the graph routes correctly.
-        """
-        request_plan_mode = bool(initial_state.get("plan_graph_active"))
-        if request_plan_mode:
-            return initial_state
-        if self.agent_app is None or self.current_session is None:
-            return initial_state
-        try:
-            from ui.runtime_payloads import load_state_values
-
-            values = await load_state_values(self.agent_app, self.current_session.thread_id)
-        except Exception:
-            logger.debug("Failed to load checkpoint state for plan merge.", exc_info=True)
-            return initial_state
-        if not isinstance(values, dict):
-            return initial_state
-        plan_status = str(values.get("plan_status") or "").strip().lower()
-        current_plan = coerce_runtime_plan(values.get("current_plan"))
-        plan_graph_active = bool(values.get("plan_graph_active") or current_plan)
-        if (
-            not plan_graph_active
-            or current_plan is None
-            or plan_status in {"", "completed", "rejected", "cancelled", "canceled"}
-        ):
-            return initial_state
-        try:
-            plan_revision = int(values.get("plan_revision") or current_plan.get("version") or 1)
-        except (TypeError, ValueError):
-            plan_revision = 1
-        initial_state["plan_graph_active"] = True
-        initial_state["current_plan"] = current_plan
-        initial_state["plan_status"] = plan_status
-        initial_state["plan_revision"] = plan_revision
-        initial_state["active_plan_step_id"] = str(values.get("active_plan_step_id") or "")
-        initial_state["plan_feedback"] = str(values.get("plan_feedback") or "")
-        self._log_ui_run_event(
-            "plan_state_preserved_from_checkpoint",
-            thread_id=getattr(self.current_session, "thread_id", ""),
-            plan_status=plan_status,
-        )
-        return initial_state
-
     async def _start_run_async(self, user_text: object) -> None:
         request_payload = normalize_request_payload(user_text)
         self._active_run_elapsed_seconds = 0.0
@@ -568,19 +506,17 @@ class AgentRunWorker(QObject):
         repair_notices = await self._repair_current_session_if_needed()
         if repair_notices:
             self._log_ui_run_event("pre_run_session_repair", repaired_count=len(repair_notices))
+        initial_state = build_initial_state(request_payload, session_id=self.current_session.session_id)
         self.event_emitted.emit(
             StreamEvent(
                 "run_started",
-                {"text": request_payload["text"], "attachments": request_payload["attachments"]},
+                {
+                    "text": request_payload["text"],
+                    "attachments": request_payload["attachments"],
+                },
             )
         )
-        initial_state = await self._merge_plan_checkpoint_into_initial_state(
-            build_initial_state(request_payload, session_id=self.current_session.session_id)
-        )
-        await self._run_graph_payload(
-            initial_state,
-            plan_execution_hint=self._payload_has_active_plan(initial_state),
-        )
+        await self._run_graph_payload(initial_state)
 
     # --- Stream-interruption recovery helpers ---
 
@@ -615,18 +551,8 @@ class AgentRunWorker(QObject):
         effective_base = base_delay * 1.5 if error_kind == "rate_limit" else base_delay
         return effective_base * (2 ** attempt) + random.uniform(0, effective_base)
 
-    @staticmethod
-    def _payload_has_active_plan(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        plan_status = str(payload.get("plan_status") or "").strip().lower()
-        if plan_status in {"", "completed", "rejected", "cancelled", "canceled", "pending_approval"}:
-            return False
-        return bool(payload.get("plan_graph_active") or payload.get("current_plan"))
-
-    async def _run_graph_payload(self, payload: dict | Command | None, *, plan_execution_hint: bool = False) -> None:
+    async def _run_graph_payload(self, payload: dict | Command | None) -> None:
         try:
-            self._active_plan_stream_hint = bool(plan_execution_hint or self._payload_has_active_plan(payload))
             stream_repair_resume_attempts = 0
             max_stream_repair_resumes = max(0, min(int(getattr(self.config, "max_retries", 1) or 1), 2))
             while True:
@@ -642,7 +568,6 @@ class AgentRunWorker(QObject):
                     events_max=self.config.stream_events_max,
                     tool_buffer_max=self.config.stream_tool_buffer_max,
                     base_elapsed_seconds=self._active_run_elapsed_seconds,
-                    plan_execution_active=self._active_plan_stream_hint,
                 )
                 result = await processor.process_stream(stream)
                 self._active_run_elapsed_seconds = result.elapsed_seconds
@@ -812,10 +737,7 @@ class AgentRunWorker(QObject):
         self.event_emitted.emit(
             StreamEvent("approval_resolved", {"approved": approved, "always": always, "auto": False})
         )
-        await self._run_graph_payload(
-            Command(resume={"approved": approved}),
-            plan_execution_hint=bool(getattr(self, "_active_plan_stream_hint", False)),
-        )
+        await self._run_graph_payload(Command(resume={"approved": approved}))
 
     @Slot(str)
     def resume_user_choice(self, chosen: str) -> None:
@@ -837,74 +759,7 @@ class AgentRunWorker(QObject):
         self._awaiting_interrupt_kind = ""
         self._pending_user_choice_type = ""
         self.event_emitted.emit(StreamEvent("user_choice_resolved", {"chosen": chosen, "choice_type": choice_type}))
-        if choice_type in {"plan_review", "plan_revision", "plan_replan"}:
-            await self._run_graph_payload(
-                Command(resume={"choice_type": choice_type, "choice": chosen, "feedback": chosen}),
-                plan_execution_hint=True,
-            )
-            return
-
-        if choice_type == "plan_approval":
-            resume_payload = {"choice_type": choice_type, "choice": chosen}
-            if chosen == "Да, реализовать":
-                await self._run_graph_payload(
-                    Command(
-                        update={"turn_mode": "chat", "plan_status": "approved"},
-                        resume=resume_payload,
-                    ),
-                    plan_execution_hint=True,
-                )
-            elif chosen == "Нет, отказаться от реализации":
-                await self._run_graph_payload(
-                    Command(update={"plan_status": "rejected"}, resume=resume_payload)
-                )
-            else:
-                await self._run_graph_payload(
-                    Command(update={"plan_status": "needs_changes"}, resume=resume_payload)
-                )
-            return
-
         await self._run_graph_payload(Command(resume=chosen))
-
-    async def _reject_active_plan_before_stop(self) -> None:
-        if not self.agent_app or not self.current_session:
-            return
-        try:
-            config = build_graph_config(self.current_session.thread_id, self.config.max_loops)
-            state_snapshot = await self.agent_app.aget_state(config)
-            values = getattr(state_snapshot, "values", {}) or {}
-            plan_status = str(values.get("plan_status") or "").strip().lower()
-            current_plan = values.get("current_plan")
-            if plan_status not in {"approved", "executing"} or not isinstance(current_plan, dict):
-                return
-            rejected_plan = update_plan_status(current_plan, status="rejected", active_step_id="")
-            if rejected_plan is None:
-                rejected_plan = dict(current_plan)
-                rejected_plan["status"] = "rejected"
-                rejected_plan["active_step_id"] = ""
-            await self.agent_app.aupdate_state(
-                config,
-                {
-                    "current_plan": rejected_plan,
-                    "plan_status": "rejected",
-                    "active_plan_step_id": "",
-                    "turn_mode": "chat",
-                },
-                as_node="plan_cancel",
-            )
-            self._log_ui_run_event("plan_execution_cancelled_by_user", plan_status=plan_status)
-            self.event_emitted.emit(
-                StreamEvent(
-                    "plan_progress",
-                    {
-                        "current_plan": rejected_plan,
-                        "status": "rejected",
-                        "active_step_id": "",
-                    },
-                )
-            )
-        except Exception:
-            logger.debug("Failed to reject active plan before stopping run.", exc_info=True)
 
     @Slot()
     def stop_run(self) -> None:
@@ -917,12 +772,6 @@ class AgentRunWorker(QObject):
                 task.cancel()
 
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(_cancel_task()))
-
-    @Slot()
-    def cancel_active_plan(self) -> None:
-        if not self._loop:
-            return
-        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reject_active_plan_before_stop()))
 
     @Slot()
     def new_session(self) -> None:
@@ -1143,7 +992,6 @@ class AgentRuntimeController(QObject):
     _initialize_requested = Signal()
     _start_run_requested = Signal(object)
     _stop_run_requested = Signal()
-    _cancel_active_plan_requested = Signal()
     _resume_requested = Signal(bool, bool)
     _resume_user_choice_requested = Signal(str)
     _new_session_requested = Signal()
@@ -1174,7 +1022,6 @@ class AgentRuntimeController(QObject):
         self._reinitialize_requested.connect(self._worker.reinitialize)
         self._start_run_requested.connect(self._worker.start_run)
         self._stop_run_requested.connect(self._worker.stop_run, Qt.DirectConnection)
-        self._cancel_active_plan_requested.connect(self._worker.cancel_active_plan, Qt.DirectConnection)
         self._resume_requested.connect(self._worker.resume_approval)
         self._resume_user_choice_requested.connect(self._worker.resume_user_choice)
         self._new_session_requested.connect(self._worker.new_session)
@@ -1206,7 +1053,6 @@ class AgentRuntimeController(QObject):
             (self._reinitialize_requested, worker.reinitialize),
             (self._start_run_requested, worker.start_run),
             (self._stop_run_requested, worker.stop_run),
-            (self._cancel_active_plan_requested, worker.cancel_active_plan),
             (self._resume_requested, worker.resume_approval),
             (self._resume_user_choice_requested, worker.resume_user_choice),
             (self._new_session_requested, worker.new_session),
@@ -1310,9 +1156,6 @@ class AgentRuntimeController(QObject):
         self._stop_run_requested.emit()
         if self._worker_busy:
             self._force_stop_timer.start(self._force_stop_timeout_ms)
-
-    def cancel_active_plan(self) -> None:
-        self._cancel_active_plan_requested.emit()
 
     def resume_approval(self, approved: bool, always: bool = False) -> None:
         self._resume_requested.emit(approved, always)
