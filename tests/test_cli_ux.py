@@ -528,6 +528,24 @@ class GuiUxTests(unittest.TestCase):
         self.assertNotIn("**", markdown_widget.toPlainText())
         self.assertNotIn(r"\**Live\**", markdown_widget.toMarkdown())
 
+    def test_assistant_streaming_state_does_not_add_visual_indicator_or_change_geometry(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+        widget.resize(720, 200)
+        widget.set_content("Первая строка ответа.\n\nВторая строка ответа.")
+        widget.set_streaming(True)
+        widget.show()
+        self._wait_for_gui(40)
+        streaming_height = widget.sizeHint().height()
+        body_font_size = widget.parts_widgets[-1].font().pointSizeF()
+        self.assertEqual(widget.findChildren(QLabel, "AssistantStreamCursor"), [])
+
+        widget.set_streaming(False)
+        self._wait_for_gui(40)
+
+        self.assertEqual(widget.sizeHint().height(), streaming_height)
+        self.assertEqual(widget.parts_widgets[-1].font().pointSizeF(), body_font_size)
+
     def test_assistant_message_widget_freezes_completed_prose_paragraphs(self):
         widget = AssistantMessageWidget()
         self.addCleanup(widget.deleteLater)

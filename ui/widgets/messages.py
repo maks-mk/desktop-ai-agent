@@ -224,10 +224,6 @@ class AssistantMessageWidget(QFrame):
         self._layout.addWidget(self.content_widget, 1)
 
         self.parts_widgets = []
-        self.cursor_label = QLabel("▌", self.content_widget)
-        self.cursor_label.setObjectName("AssistantStreamCursor")
-        self.cursor_label.setVisible(False)
-        self.content_layout.addWidget(self.cursor_label, 0, Qt.AlignLeft)
 
     @staticmethod
     def _looks_like_plain_text_unclosed_fence(text: str) -> bool:
@@ -392,7 +388,9 @@ class AssistantMessageWidget(QFrame):
         self.set_content(markdown)
 
     def set_streaming(self, active: bool) -> None:
-        self.cursor_label.setVisible(bool(active))
+        # Kept as a compatibility hook for the streaming pipeline. Streaming is
+        # already visible from the growing message; no extra cursor is rendered.
+        _ = active
 
     def markdown(self) -> str:
         return self._markdown
