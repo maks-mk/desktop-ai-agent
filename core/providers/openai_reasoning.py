@@ -464,6 +464,12 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
         "max_retries": 0,
         "stream_usage": True,
     }
+
+    # Explicit API mode selection: "responses" forces /v1/responses, "chat" forces
+    # /v1/chat/completions. When omitted, LangChain auto-detects based on payload.
+    api_mode = str(getattr(config, "llm_api_mode", "chat") or "chat").strip().lower()
+    if api_mode == "responses":
+        openai_kwargs["use_responses_api"] = True
     registry = ProviderRegistry.from_path(config.provider_registry_path)
     provider_config = registry.match(config.openai_base_url)
     reasoning_enabled = bool(getattr(config, "enable_model_reasoning", True))
@@ -493,6 +499,16 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
             provider_config,
             normalized_reasoning_effort(getattr(config, "model_reasoning_effort", "medium")),
         )
+        # In chat mode, a top-level "reasoning" dict (set by providers whose registry
+        # path is "reasoning.effort") would cause LangChain to auto-switch to the
+        # Responses API. Flatten it to the chat-completions "reasoning_effort" string
+        # so the explicit API mode is respected.
+        if api_mode != "responses" and isinstance(openai_kwargs.get("reasoning"), dict):
+            reasoning_dict = openai_kwargs.pop("reasoning")
+            effort = reasoning_dict.get("effort")
+            if effort and "reasoning_effort" not in openai_kwargs:
+                openai_kwargs["reasoning_effort"] = str(effort)
+            # reasoning.summary is Responses-API-only; drop it in chat mode.
         reasoning_logger.debug(
             "openai reasoning kwargs applied model=%s provider_id=%s reasoning_path=%s has_reasoning_key=%s has_extra_body=%s reasoning_effort=%s extra_body_keys=%s applied_keys=%s",
             config.openai_model,

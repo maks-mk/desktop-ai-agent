@@ -277,30 +277,6 @@
       },
       "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through freemodel.dev."
     },
-    {
-      "id": "tokenbay",
-      "enabled": true,
-      "priority": 60,
-      "match": [
-        "api.tokenbay.com"
-      ],
-      "match_type": "exact",
-      "supports_reasoning": true,
-      "validation": "map",
-      "reasoning": {
-        "path": "reasoning_effort",
-        "allowed_values": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "value_map": {
-          "minimal": "low",
-          "xhigh": "high"
-        }
-      },
-      "notes": "TokenBay OpenAI-compatible Chat Completions documents top-level reasoning_effort. Responses API documents reasoning.effort and reasoning.summary, but ChatOpenAI uses chat completions here."
-    },
 	{
       "id": "ai-router",
       "enabled": true,

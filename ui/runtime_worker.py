@@ -568,6 +568,15 @@ class AgentRunWorker(QObject):
                     events_max=self.config.stream_events_max,
                     tool_buffer_max=self.config.stream_tool_buffer_max,
                     base_elapsed_seconds=self._active_run_elapsed_seconds,
+                    tool_sources={
+                        name: str(getattr(metadata, "source", "local") or "local")
+                        for name, metadata in getattr(self.tool_registry, "tool_metadata", {}).items()
+                    },
+                    mcp_tool_servers={
+                        tool_name: str(status.get("server", "") or "")
+                        for status in getattr(self.tool_registry, "mcp_server_status", [])
+                        for tool_name in status.get("loaded_tools", [])
+                    },
                 )
                 result = await processor.process_stream(stream)
                 self._active_run_elapsed_seconds = result.elapsed_seconds

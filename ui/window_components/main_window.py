@@ -332,6 +332,7 @@ class MainWindow(QMainWindow):
             return
         full_text = str(payload.get("full_text", "") or "")
         sequence = payload.get("sequence")
+        sequence_reset = False
         if isinstance(sequence, int):
             if sequence <= self._last_assistant_delta_sequence:
                 if not self._assistant_delta_sequence_reset_is_new_content(full_text):
@@ -342,6 +343,7 @@ class MainWindow(QMainWindow):
                         len(full_text),
                     )
                     return
+                sequence_reset = True
                 logger.debug(
                     "Stream accepted reset main_window_assistant_delta sequence=%s previous_sequence=%s full_len=%s",
                     sequence,
@@ -358,7 +360,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_assistant_delta_text = full_text
-        self._queue_assistant_delta({"full_text": full_text})
+        self._queue_assistant_delta({"full_text": full_text}, force=sequence_reset)
 
     def _assistant_delta_sequence_reset_is_new_content(self, full_text: str) -> bool:
         previous = self._last_assistant_delta_text
@@ -370,17 +372,20 @@ class MainWindow(QMainWindow):
             kinds = []
         return bool(full_text.strip()) and bool(kinds) and kinds[-1] != "assistant"
 
-    def _queue_assistant_delta(self, payload: dict) -> None:
+    def _queue_assistant_delta(self, payload: dict, *, force: bool = False) -> None:
         self._pending_assistant_delta_payload = dict(payload)
-        self._flush_pending_assistant_delta()
+        if force or self._should_flush_assistant_delta_immediately():
+            self._flush_pending_assistant_delta()
+            return
+        timer = getattr(self, "_assistant_delta_flush_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
 
     def _should_flush_assistant_delta_immediately(self) -> bool:
         if self.current_turn is None:
             return True
-        if not getattr(self, "_pending_assistant_delta_payload", None):
-            kinds = self.current_turn.block_kinds()
-            return not kinds or kinds[-1] != "assistant"
-        return False
+        kinds = self.current_turn.block_kinds()
+        return not kinds or kinds[-1] != "assistant"
 
     def _flush_pending_assistant_delta(self) -> None:
         pending_payload = getattr(self, "_pending_assistant_delta_payload", None)

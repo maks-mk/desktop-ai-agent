@@ -385,5 +385,87 @@ class FactoryUnknownProviderTests(unittest.TestCase):
         self.assertIn("unknown_provider", str(ctx.exception))
 
 
+class LlmApiModeTests(unittest.TestCase):
+    """Tests for LLM_API_MODE config field and its effect on the OpenAI factory."""
+
+    def _make_config(self, api_mode: str | None) -> "AgentConfig":
+        import os
+        from core.config import AgentConfig
+
+        env = {
+            "PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-test",
+            "OPENAI_MODEL": "gpt-5",
+            "OPENAI_BASE_URL": "https://api.openai.com/v1",
+            "MODEL_REASONING_EFFORT": "medium",
+        }
+        if api_mode is not None:
+            env["LLM_API_MODE"] = api_mode
+        with mock.patch.dict(os.environ, env, clear=False):
+            # Remove LLM_API_MODE if explicitly None to test default
+            if api_mode is None:
+                os.environ.pop("LLM_API_MODE", None)
+            return AgentConfig()
+
+    def test_default_is_chat(self):
+        cfg = self._make_config(None)
+        self.assertEqual(cfg.llm_api_mode, "chat")
+
+    def test_responses_mode(self):
+        cfg = self._make_config("responses")
+        self.assertEqual(cfg.llm_api_mode, "responses")
+
+    def test_invalid_falls_back_to_chat(self):
+        cfg = self._make_config("bogus")
+        self.assertEqual(cfg.llm_api_mode, "chat")
+
+    def test_case_insensitive(self):
+        cfg = self._make_config("RESPONSES")
+        self.assertEqual(cfg.llm_api_mode, "responses")
+
+    def test_responses_mode_sets_use_responses_api(self):
+        cfg = self._make_config("responses")
+        model = create_openai_chat_model(cfg)
+        self.assertTrue(model.use_responses_api)
+
+    def test_chat_mode_does_not_set_use_responses_api(self):
+        cfg = self._make_config("chat")
+        model = create_openai_chat_model(cfg)
+        self.assertFalse(model.use_responses_api)
+
+    def test_chat_mode_flattens_reasoning_dict_to_effort_string(self):
+        """In chat mode, the registry's reasoning.effort path must not create a
+        top-level 'reasoning' dict that would auto-trigger the Responses API."""
+        cfg = self._make_config("chat")
+        model = create_openai_chat_model(cfg)
+        # reasoning_effort should be set as a plain string
+        self.assertEqual(model.reasoning_effort, "medium")
+        # reasoning dict should NOT be set (it would auto-switch to Responses API)
+        self.assertIsNone(model.reasoning)
+
+    def test_responses_mode_keeps_reasoning_dict(self):
+        """In responses mode, the registry's reasoning.effort path should produce
+        a 'reasoning' dict with effort and summary fields."""
+        cfg = self._make_config("responses")
+        model = create_openai_chat_model(cfg)
+        self.assertIsInstance(model.reasoning, dict)
+        self.assertEqual(model.reasoning.get("effort"), "medium")
+        self.assertEqual(model.reasoning.get("summary"), "auto")
+
+    def test_chat_mode_use_responses_api_returns_false_with_reasoning(self):
+        """Even with reasoning enabled, chat mode must not route to Responses API."""
+        cfg = self._make_config("chat")
+        model = create_openai_chat_model(cfg)
+        payload = model._get_request_payload([{"role": "user", "content": "hi"}])
+        self.assertFalse(model._use_responses_api(payload))
+
+    def test_responses_mode_use_responses_api_returns_true(self):
+        """In responses mode, _use_responses_api must return True."""
+        cfg = self._make_config("responses")
+        model = create_openai_chat_model(cfg)
+        payload = model._get_request_payload([{"role": "user", "content": "hi"}])
+        self.assertTrue(model._use_responses_api(payload))
+
+
 if __name__ == "__main__":
     unittest.main()

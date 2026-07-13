@@ -180,8 +180,8 @@ class ToolRegistry:
                 name="search",
                 enabled=lambda config: config.enable_search_tools,
                 module_name="tools.search_tools",
-                tool_names=("web_search", "batch_web_search", "fetch_content"),
-                #tool_names=("batch_web_search", "fetch_content"),
+                #tool_names=("web_search", "batch_web_search", "fetch_content"),
+                tool_names=("batch_web_search", "fetch_content"),
                 optional_tool_names=("crawl_site",),
                 configure=self._configure_search,
                 metadata={

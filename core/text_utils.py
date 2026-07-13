@@ -11,6 +11,7 @@ _CRAWL_DEPTH_RE = re.compile(r"max_depth: (\d+)")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _FILE_EXT_RE = re.compile(r"\.([a-z0-9]+)\b", re.IGNORECASE)
 _SIMPLE_LATEX_INLINE_RE = re.compile(r"\$\s*(\\[A-Za-z]+)\s*\$")
+_MARKDOWN_FENCE_RE = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})(?P<info>[^`~\r\n]*)[ \t]*(?:\r?\n)?$")
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ def split_markdown_segments(text: str) -> list[MarkdownSegment]:
     markdown_lines: list[str] = []
     code_lines: list[str] = []
     open_fence = ""
+    fence_marker = ""
     language = ""
     in_fence = False
 
@@ -39,28 +41,48 @@ def split_markdown_segments(text: str) -> list[MarkdownSegment]:
             segments.append(MarkdownSegment("markdown", markdown_text, markdown_text))
         markdown_lines.clear()
 
+    def _fence_match(line: str) -> re.Match | None:
+        return _MARKDOWN_FENCE_RE.match(line)
+
+    def _is_closing_fence(line: str) -> bool:
+        match = _fence_match(line)
+        if not match:
+            return False
+        marker = match.group("fence")
+        return bool(
+            fence_marker
+            and not match.group("info").strip()
+            and marker[0] == fence_marker[0]
+            and len(marker) >= len(fence_marker)
+        )
+
     for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        if stripped.startswith("```"):
+        fence_match = _fence_match(line)
+        if fence_match:
             if in_fence:
-                code_text = "".join(code_lines)
-                segments.append(
-                    MarkdownSegment(
-                        "code",
-                        code_text,
-                        f"{open_fence}{code_text}{line}",
-                        language=language,
-                        closed=True,
+                if _is_closing_fence(line):
+                    code_text = "".join(code_lines)
+                    segments.append(
+                        MarkdownSegment(
+                            "code",
+                            code_text,
+                            f"{open_fence}{code_text}{line}",
+                            language=language,
+                            closed=True,
+                        )
                     )
-                )
-                code_lines.clear()
-                open_fence = ""
-                language = ""
-                in_fence = False
+                    code_lines.clear()
+                    open_fence = ""
+                    fence_marker = ""
+                    language = ""
+                    in_fence = False
+                else:
+                    code_lines.append(line)
             else:
                 _flush_markdown()
                 open_fence = line
-                language = stripped[3:].strip()
+                fence_marker = fence_match.group("fence")
+                language = fence_match.group("info").strip()
                 in_fence = True
             continue
 
@@ -338,6 +360,52 @@ def tool_source_kind(tool_name: str) -> str:
     return "tool"
 
 
+def _humanize_tool_name(tool_name: str) -> str:
+    words = str(tool_name or "").replace(":", " ").replace("-", " ").replace("_", " ").strip().split()
+    return " ".join(word.upper() if word.casefold() == "id" else word.capitalize() for word in words) or "Tool"
+
+
+def _mcp_target_summary(tool_args: Dict[str, Any]) -> str:
+    preferred_keys = (
+        "query", "topic", "question", "library_name", "libraryName", "library_id", "libraryId",
+        "path", "file_path", "url", "uri", "name", "id",
+    )
+    for key in preferred_keys:
+        value = tool_args.get(key)
+        if value not in (None, "", [], {}):
+            return truncate_value(_single_line_preview(value), 100)
+    for value in tool_args.values():
+        if value not in (None, "", [], {}):
+            return truncate_value(_single_line_preview(value), 100)
+    return ""
+
+
+def build_mcp_tool_ui_labels(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    *,
+    phase: str = "running",
+    is_error: bool = False,
+    server_name: str = "",
+) -> Dict[str, str]:
+    human_name = _humanize_tool_name(tool_name)
+    server = _humanize_tool_name(server_name) if server_name else "MCP"
+    if is_error:
+        title = f"{server}: {human_name} failed"
+    elif phase == "finished":
+        title = f"{server}: {human_name} completed"
+    else:
+        title = f"{server}: {human_name}"
+    args = dict(tool_args or {})
+    return {
+        "title": title,
+        "subtitle": _mcp_target_summary(args),
+        "raw_display": format_tool_display(tool_name, args),
+        "args_state": "complete" if args else "pending",
+        "source_kind": "mcp",
+    }
+
+
 def tool_title_case(tool_name: str) -> str:
     words = str(tool_name or "").replace(":", " ").replace("_", " ").strip().split()
     if not words:
@@ -609,7 +677,10 @@ def normalize_markdown_code_blocks(text: str) -> str:
 def prepare_markdown_for_render(text: str) -> str:
     text = _normalize_simple_latex_inline(text)
     text = _rewrite_local_file_links(text)
-    return normalize_markdown_code_blocks(clean_markdown_text(text))
+    # Do not infer fenced code while text is streaming. The inference can change
+    # its mind as a line grows, which makes ordinary prose flash as a code block.
+    # Explicit Markdown fences remain fully supported by the renderer.
+    return clean_markdown_text(text)
 
 
 def _hint_for_error(content: str) -> str:

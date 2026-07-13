@@ -135,6 +135,7 @@ class AgentConfig(BaseSettings):
     model_reasoning_effort: str = Field(default="medium", alias="MODEL_REASONING_EFFORT")
     gemini_thinking_budget: int = Field(default=4096, alias="GEMINI_THINKING_BUDGET")
     show_model_thoughts: bool = Field(default=False, alias="SHOW_MODEL_THOUGHTS")
+    llm_api_mode: Literal["chat", "responses"] = Field(default="chat", alias="LLM_API_MODE")
 
     # Common Logic
     temperature: float = Field(default=0.2, alias="TEMPERATURE")
@@ -293,6 +294,14 @@ class AgentConfig(BaseSettings):
         value = str(v or "sqlite").strip().lower()
         if value not in {"sqlite", "memory"}:
             return "sqlite"
+        return value
+
+    @field_validator("llm_api_mode", mode="before")
+    @classmethod
+    def normalize_llm_api_mode(cls, v: Any) -> str:
+        value = str(v or "chat").strip().lower()
+        if value not in {"chat", "responses"}:
+            return "chat"
         return value
 
     @field_validator(

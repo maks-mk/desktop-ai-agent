@@ -12,6 +12,7 @@ from core.message_utils import is_tool_message_error, stringify_content
 from core.text_utils import (
     TokenTracker,
     build_tool_ui_labels,
+    build_mcp_tool_ui_labels,
     classify_tool_args_state,
     format_tool_display,
     format_tool_output,
@@ -193,6 +194,8 @@ class StreamProcessor:
         "_deferred_assistant_delta",
         "_assistant_delta_sequence",
         "_messages_replay_cursor",
+        "_tool_sources",
+        "_mcp_tool_servers",
     )
 
     def __init__(
@@ -203,6 +206,8 @@ class StreamProcessor:
         events_max: int = 400,
         tool_buffer_max: int = 128,
         base_elapsed_seconds: float = 0.0,
+        tool_sources: Dict[str, str] | None = None,
+        mcp_tool_servers: Dict[str, str] | None = None,
     ):
         self.emit_event = emit_event
         self.tracker = TokenTracker()
@@ -236,6 +241,8 @@ class StreamProcessor:
         self._deferred_assistant_delta = False
         self._assistant_delta_sequence = 0
         self._messages_replay_cursor: int | None = None
+        self._tool_sources = dict(tool_sources or {})
+        self._mcp_tool_servers = dict(mcp_tool_servers or {})
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -1500,7 +1507,17 @@ class StreamProcessor:
         is_error: bool = False,
     ) -> Dict[str, Any]:
         args_state = classify_tool_args_state(tool_name, tool_args)
-        labels = build_tool_ui_labels(tool_name, tool_args, phase=phase, is_error=is_error)
+        source_kind = self._tool_sources.get(tool_name, "")
+        if source_kind == "mcp":
+            labels = build_mcp_tool_ui_labels(
+                tool_name,
+                tool_args,
+                phase=phase,
+                is_error=is_error,
+                server_name=self._mcp_tool_servers.get(tool_name, ""),
+            )
+        else:
+            labels = build_tool_ui_labels(tool_name, tool_args, phase=phase, is_error=is_error)
         display_state = "finished" if phase == "finished" else ("resolved" if args_state == "complete" else "preview")
         if phase == "preparing" and args_state == "complete":
             phase = "running"

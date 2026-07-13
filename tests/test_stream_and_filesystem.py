@@ -55,10 +55,10 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(path, ignore_errors=True))
         return path
 
-    def test_prepare_markdown_wraps_plain_go_code_block(self):
+    def test_prepare_markdown_does_not_guess_code_blocks_from_plain_text(self):
         source = 'Пример (файл main.go):\npackage main\nimport "fmt"\nfunc main() {\n    fmt.Println("hi")\n}'
         rendered = prepare_markdown_for_render(source)
-        self.assertIn("```go", rendered)
+        self.assertNotIn("```", rendered)
         self.assertIn("package main", rendered)
         self.assertIn("fmt.Println", rendered)
 
@@ -82,6 +82,24 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("Hint: Check your API keys in .env", summary)
         self.assertNotIn("[red]", summary)
         self.assertNotIn("[/]", summary)
+
+    def test_stream_processor_formats_registered_mcp_tool_for_people(self):
+        processor = StreamProcessor(
+            tool_sources={"resolve_library_id": "mcp"},
+            mcp_tool_servers={"resolve_library_id": "context7"},
+        )
+
+        payload = processor._build_tool_event_payload(
+            "call-mcp",
+            "resolve_library_id",
+            {"libraryName": "PySide6"},
+            phase="preparing",
+        )
+
+        self.assertEqual(payload["source_kind"], "mcp")
+        self.assertEqual(payload["display"], "Context7: Resolve Library ID")
+        self.assertEqual(payload["subtitle"], "PySide6")
+        self.assertNotIn("libraryName=", payload["display"])
 
     def test_prepare_markdown_normalizes_simple_latex_symbols(self):
         source = (
@@ -121,6 +139,30 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(segments[1].language, "python")
         self.assertEqual(segments[1].text.rstrip("\n"), "print('hi')")
         self.assertFalse(segments[1].closed)
+
+    def test_split_markdown_segments_supports_tilde_fences(self):
+        segments = split_markdown_segments("Intro\n~~~python\nprint('hi')\n~~~\nTail")
+
+        self.assertEqual([segment.kind for segment in segments], ["markdown", "code", "markdown"])
+        self.assertEqual(segments[1].language, "python")
+        self.assertEqual(segments[1].text, "print('hi')\n")
+        self.assertTrue(segments[1].closed)
+
+    def test_split_markdown_segments_matches_closing_fence_marker_and_length(self):
+        segments = split_markdown_segments("````python\n```\nprint('hi')\n````\n")
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].kind, "code")
+        self.assertEqual(segments[0].text, "```\nprint('hi')\n")
+        self.assertTrue(segments[0].closed)
+
+    def test_split_markdown_segments_ignores_nested_looking_other_fence_type(self):
+        segments = split_markdown_segments("~~~text\n```\nvalue\n~~~\n")
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].kind, "code")
+        self.assertEqual(segments[0].text, "```\nvalue\n")
+        self.assertTrue(segments[0].closed)
 
     def test_download_headers_request_binary_content(self):
         self.assertEqual(_DOWNLOAD_HEADERS["Accept"], "*/*")
@@ -2392,6 +2434,13 @@ class StreamAndFilesystemTests(unittest.TestCase):
         def notify_content_changed(self):
             self.notify_count += 1
 
+    class _FakeStatusController:
+        def __init__(self):
+            self.run_finished_payload = None
+
+        def on_run_finished(self, payload):
+            self.run_finished_payload = payload
+
     def _make_lightweight_main_window(self):
         window = MainWindow.__new__(MainWindow)
         window.current_turn = self._FakeTurn()
@@ -2400,21 +2449,44 @@ class StreamAndFilesystemTests(unittest.TestCase):
         window._last_assistant_delta_text = ""
         window._pending_assistant_delta_payload = None
         window._assistant_delta_flush_timer = self._FakeAssistantDeltaTimer()
+        window._status_controller = self._FakeStatusController()
         return window
 
-    def test_main_window_renders_fast_assistant_delta_updates_immediately(self):
+    def test_main_window_coalesces_fast_assistant_delta_updates(self):
         window = self._make_lightweight_main_window()
 
-        MainWindow._on_assistant_delta(window, {"full_text": "А", "sequence": 1})
-        self.assertEqual(window.current_turn.markdown, "А")
+        MainWindow._on_assistant_delta(window, {"full_text": "A", "sequence": 1})
+        self.assertEqual(window.current_turn.markdown, "A")
         self.assertTrue(window.current_turn.streaming)
         self.assertFalse(window._assistant_delta_flush_timer.isActive())
 
-        MainWindow._on_assistant_delta(window, {"full_text": "АБ", "sequence": 2})
-        self.assertEqual(window.current_turn.markdown, "АБ")
+        MainWindow._on_assistant_delta(window, {"full_text": "AB", "sequence": 2})
+        self.assertEqual(window.current_turn.markdown, "A")
+        self.assertTrue(window._assistant_delta_flush_timer.isActive())
+
+        MainWindow._on_assistant_delta(window, {"full_text": "ABC", "sequence": 3})
+        self.assertEqual(window.current_turn.markdown, "A")
+        self.assertTrue(window._assistant_delta_flush_timer.isActive())
+
+        MainWindow._flush_pending_assistant_delta(window)
+        self.assertEqual(window.current_turn.markdown, "ABC")
         self.assertTrue(window.current_turn.streaming)
         self.assertFalse(window._assistant_delta_flush_timer.isActive())
         self.assertEqual(window.transcript.notify_count, 2)
+
+    def test_main_window_run_finished_flushes_last_coalesced_delta(self):
+        window = self._make_lightweight_main_window()
+
+        MainWindow._on_assistant_delta(window, {"full_text": "A", "sequence": 1})
+        MainWindow._on_assistant_delta(window, {"full_text": "AB", "sequence": 2})
+        MainWindow._on_run_finished(window, {"stats": "done"})
+
+        self.assertEqual(window.current_turn.markdown, "AB")
+        self.assertFalse(window.current_turn.streaming)
+        self.assertIsNone(window._pending_assistant_delta_payload)
+        self.assertFalse(window._assistant_delta_flush_timer.isActive())
+        self.assertEqual(window.transcript.notify_count, 2)
+        self.assertEqual(window._status_controller.run_finished_payload, {"stats": "done"})
 
     def test_main_window_tool_start_flushes_pending_delta_and_stops_streaming(self):
         window = self._make_lightweight_main_window()

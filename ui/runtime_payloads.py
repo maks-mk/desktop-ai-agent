@@ -19,7 +19,7 @@ from core.session_store import (
     normalize_project_path,
 )
 from core.summarize_policy import estimate_context_tokens, should_summarize
-from core.text_utils import build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
+from core.text_utils import build_mcp_tool_ui_labels, build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
 from ui.tool_message_utils import extract_tool_args
@@ -339,7 +339,13 @@ def _diff_from_tool_content(content: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_stats: str = "") -> dict[str, Any]:
+def build_transcript_payload(
+    state_values: dict[str, Any] | None,
+    *,
+    last_run_stats: str = "",
+    tool_sources: dict[str, str] | None = None,
+    mcp_tool_servers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     values = state_values or {}
     summary_text = str(values.get("summary") or "").strip()
     normalized_last_run_stats = str(last_run_stats or "").strip()
@@ -409,7 +415,16 @@ def build_transcript_payload(state_values: dict[str, Any] | None, *, last_run_st
                 tool_args = extract_tool_args(message)
             content = stringify_content(message.content)
             is_error = is_tool_message_error(message)
-            labels = build_tool_ui_labels(tool_name, tool_args, phase="finished", is_error=is_error)
+            if (tool_sources or {}).get(tool_name) == "mcp":
+                labels = build_mcp_tool_ui_labels(
+                    tool_name,
+                    tool_args,
+                    phase="finished",
+                    is_error=is_error,
+                    server_name=(mcp_tool_servers or {}).get(tool_name, ""),
+                )
+            else:
+                labels = build_tool_ui_labels(tool_name, tool_args, phase="finished", is_error=is_error)
             current_turn["blocks"].append(
                 {
                     "type": "tool",
@@ -637,9 +652,20 @@ async def build_ui_payload(
         "model_capabilities": effective_capabilities,
     }
     if include_transcript and agent_app is not None:
+        tool_sources = {
+            name: str(getattr(metadata, "source", "local") or "local")
+            for name, metadata in getattr(tool_registry, "tool_metadata", {}).items()
+        }
+        mcp_tool_servers = {
+            tool_name: str(status.get("server", "") or "")
+            for status in getattr(tool_registry, "mcp_server_status", [])
+            for tool_name in status.get("loaded_tools", [])
+        }
         payload["transcript"] = build_transcript_payload(
             state_values,
             last_run_stats=getattr(snapshot, "last_run_stats", ""),
+            tool_sources=tool_sources,
+            mcp_tool_servers=mcp_tool_servers,
         )
     return payload
 

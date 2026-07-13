@@ -26,6 +26,11 @@ GEMINI_THINKING_BUDGET=4096
 # OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 # OPENAI_MODEL=gpt-4o
 # OPENAI_BASE_URL=https://api.openai.com/v1
+# API mode: chat (/v1/chat/completions) or responses (/v1/responses).
+# "chat" is the default and works with all OpenAI-compatible providers.
+# "responses" enables the OpenAI Responses API (gpt-5, o-series reasoning, etc.).
+# When unset, LangChain auto-detects based on model and payload.
+LLM_API_MODE=chat
 # OpenAI-compatible reasoning effort: none, minimal, low, medium, high, xhigh.
 # Для кастомных base_url отправляется через extra_body.reasoning без OpenAI summary.
 MODEL_REASONING_EFFORT=medium

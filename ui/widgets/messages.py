@@ -25,6 +25,7 @@ _CODE_LIKE_RE = re.compile(
     r"(^|\s)(def|class|import|from|return|if|else|elif|for|while|try|except|with|function|const|let|var)\b"
     r"|[{};]|=>|==|!=|:=|::|->|\w+\([^)]*\)"
 )
+_STREAMING_BLOCK_RE = re.compile(r"^(?:\s{4,}|\s*(?:[-+*]|\d+[.)])\s+|\s*>|\s*\|)")
 
 class NoticeWidget(QFrame):
     def __init__(self, message: str, level: str = "info", parent: QWidget | None = None) -> None:
@@ -208,6 +209,9 @@ class AssistantMessageWidget(QFrame):
         self.setObjectName("TranscriptRow")
         self.setFrameShape(QFrame.NoFrame)
         self._markdown = ""
+        self._parts_source_text = ""
+        self._split_parts_cache: list[tuple[str, str, str]] = []
+        self._rendered_parts: list[tuple[str, str, str]] = []
         
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 1, 0, 3)
@@ -236,16 +240,84 @@ class AssistantMessageWidget(QFrame):
         return letters >= 8 and any(char in stripped for char in " .,!?;:—–-«»()")
 
     @classmethod
+    def _segment_to_part(cls, segment) -> tuple[str, str, str] | None:
+        if segment.kind == "code":
+            if not segment.closed and not segment.language:
+                if not segment.text.strip():
+                    # A bare streaming fence is ambiguous. Keep it invisible
+                    # until code arrives instead of flashing an empty code card.
+                    return ("markdown", "", "")
+                if cls._looks_like_plain_text_unclosed_fence(segment.text):
+                    # Some providers occasionally leak a bare fence before prose.
+                    # Dropping the fence is the only way to prevent Qt from still
+                    # interpreting this fallback as a code block.
+                    return ("markdown", segment.text, "")
+            return ("code", segment.text, segment.language)
+        if segment.text.strip():
+            return ("markdown", segment.text, "")
+        return None
+
+    @classmethod
+    def _split_stable_markdown_blocks(cls, text: str) -> list[str]:
+        """Freeze completed prose blocks while keeping compound Markdown intact."""
+        if "\n\n" not in text and "\r\n\r\n" not in text:
+            return [text]
+        chunks: list[str] = []
+        pending: list[str] = []
+        compound = False
+        for line in text.splitlines(keepends=True):
+            pending.append(line)
+            stripped = line.rstrip("\r\n")
+            if stripped and _STREAMING_BLOCK_RE.match(stripped):
+                compound = True
+            if not stripped and not compound:
+                chunks.append("".join(pending))
+                pending.clear()
+            elif not stripped and compound:
+                # Lists, quotes, tables and indented blocks may legally continue
+                # after a blank line, so they remain one mutable Markdown part.
+                continue
+        if pending:
+            chunks.append("".join(pending))
+        return chunks or [text]
+
+    @classmethod
     def _split_markdown_parts(cls, markdown: str) -> list[tuple[str, str, str]]:
         parts: list[tuple[str, str, str]] = []
         for segment in split_markdown_segments(markdown):
-            if segment.kind == "code":
-                if not segment.closed and not segment.language and cls._looks_like_plain_text_unclosed_fence(segment.text):
-                    parts.append(("markdown", f"```\n{segment.text}", ""))
-                else:
-                    parts.append(("code", segment.text, segment.language))
-            elif segment.text.strip() or not parts:
-                parts.append(("markdown", segment.text, ""))
+            if segment.kind == "markdown":
+                for block in cls._split_stable_markdown_blocks(segment.text):
+                    if block.strip() or not parts:
+                        parts.append(("markdown", block, ""))
+                continue
+            part = cls._segment_to_part(segment)
+            if part is not None or not parts:
+                parts.append(part or ("markdown", segment.text, ""))
+        return parts
+
+    def _split_markdown_parts_incremental(self, markdown: str) -> list[tuple[str, str, str]]:
+        previous_text = self._parts_source_text
+        previous_parts = self._split_parts_cache
+        if not previous_text or not previous_parts or not markdown.startswith(previous_text):
+            parts = self._split_markdown_parts(markdown)
+            self._parts_source_text = markdown
+            self._split_parts_cache = parts
+            return parts
+
+        suffix = markdown[len(previous_text):]
+        if not suffix:
+            return previous_parts
+
+        tail_start = max(0, len(previous_text) - len(previous_parts[-1][1]))
+        if previous_parts[-1][0] == "code":
+            fence_start = max(previous_text.rfind("```"), previous_text.rfind("~~~"))
+            if fence_start >= 0:
+                tail_start = fence_start
+        stable_parts = previous_parts[:-1]
+        tail_parts = self._split_markdown_parts(markdown[tail_start:])
+        parts = [*stable_parts, *tail_parts]
+        self._parts_source_text = markdown
+        self._split_parts_cache = parts
         return parts
 
     def _make_part_widget(self, kind: str) -> QWidget:
@@ -271,10 +343,17 @@ class AssistantMessageWidget(QFrame):
         return widget
 
     def set_content(self, markdown: str) -> None:
+        if markdown == self._markdown:
+            return
         self._markdown = markdown
         text = markdown.strip()
 
-        parts = self._split_markdown_parts(text) if text else []
+        if text:
+            parts = self._split_markdown_parts_incremental(text)
+        else:
+            parts = []
+            self._parts_source_text = ""
+            self._split_parts_cache = []
 
         while len(self.parts_widgets) < len(parts):
             idx = len(self.parts_widgets)
@@ -288,22 +367,26 @@ class AssistantMessageWidget(QFrame):
             w.deleteLater()
 
         for idx, part in enumerate(parts):
+            previous_part = self._rendered_parts[idx] if idx < len(self._rendered_parts) else None
             w = self.parts_widgets[idx]
             part_kind, part_text, part_language = part
             is_code = part_kind == "code"
             if not self._part_widget_matches_kind(w, part_kind):
                 w = self._replace_part_widget(idx, part_kind)
+                previous_part = None
 
             if is_code:
                 title = part_language.upper() if part_language else "CODE"
-                w.set_code(part_text, part_language, title)
+                if previous_part != part:
+                    w.set_code(part_text, part_language, title)
                 w.setVisible(True)
             else:
-                if part_text.strip() or idx == 0:
+                visible = bool(part_text.strip() or idx == 0)
+                if visible and previous_part != part:
                     w.setMarkdown(part_text)
-                    w.setVisible(True)
-                else:
-                    w.setVisible(False)
+                w.setVisible(visible)
+
+        self._rendered_parts = parts
 
     def set_markdown(self, markdown: str) -> None:
         self.set_content(markdown)

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButt
 
 import main as agent_cli
 from core.model_fetcher import ModelEntry
+from core.text_utils import split_markdown_segments
 from core.model_profiles import normalize_profiles_payload
 from core.tool_policy import ToolMetadata
 from ui.runtime import build_runtime_snapshot, summarize_approval_request
@@ -451,6 +452,19 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertEqual(len(widget.parts_widgets), 1)
         self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+        self.assertNotIn("```", widget.parts_widgets[0].toPlainText())
+        self.assertIn("Теперь проверю", widget.parts_widgets[0].toPlainText())
+
+    def test_assistant_message_widget_does_not_flash_empty_bare_fence_as_code(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("```\n")
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 1)
+        self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+        self.assertEqual(widget.parts_widgets[0].toPlainText(), "")
 
     def test_assistant_message_widget_replaces_part_widget_when_stream_opens_code_block(self):
         widget = AssistantMessageWidget()
@@ -464,6 +478,105 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(len(widget.parts_widgets), 1)
         self.assertIsInstance(widget.parts_widgets[0], CodeBlockWidget)
         self.assertEqual(widget.parts_widgets[0].editor.toPlainText(), "print('hi')")
+
+    def test_assistant_message_widget_updates_only_changed_stream_part(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("Intro\n\n```python\nprint('hi')\n```\n\nTail")
+        self._process_events()
+        markdown_widget = widget.parts_widgets[0]
+        code_widget = widget.parts_widgets[1]
+        markdown_widget.setMarkdown = mock.Mock(wraps=markdown_widget.setMarkdown)
+        code_widget.set_code = mock.Mock(wraps=code_widget.set_code)
+
+        widget.set_content("Intro\n\n```python\nprint('hi')\n```\n\nTail updated")
+        self._process_events()
+
+        markdown_widget.setMarkdown.assert_not_called()
+        code_widget.set_code.assert_not_called()
+        self.assertIs(widget.parts_widgets[0], markdown_widget)
+        self.assertIs(widget.parts_widgets[1], code_widget)
+
+    def test_assistant_message_widget_incrementally_splits_only_last_segment(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("Intro\n\n```python\nprint('hi')\n```\n\nTail")
+        self._process_events()
+
+        with mock.patch("ui.widgets.messages.split_markdown_segments", wraps=split_markdown_segments) as split_mock:
+            widget.set_content("Intro\n\n```python\nprint('hi')\n```\n\nTail updated")
+            self._process_events()
+
+        split_mock.assert_called_once_with("\nTail updated")
+        self.assertEqual(len(widget.parts_widgets), 3)
+        self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+        self.assertIsInstance(widget.parts_widgets[1], CodeBlockWidget)
+        self.assertIsInstance(widget.parts_widgets[2], AutoTextBrowser)
+
+    def test_assistant_message_widget_renders_markdown_live_while_streaming(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_streaming(True)
+        widget.set_content("**Live** text")
+        self._process_events()
+        markdown_widget = widget.parts_widgets[0]
+
+        self.assertIn("Live", markdown_widget.toPlainText())
+        self.assertNotIn("**", markdown_widget.toPlainText())
+        self.assertNotIn(r"\**Live\**", markdown_widget.toMarkdown())
+
+    def test_assistant_message_widget_freezes_completed_prose_paragraphs(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("First paragraph.\n\nSecond")
+        self._process_events()
+        first_widget = widget.parts_widgets[0]
+        first_widget.setMarkdown = mock.Mock(wraps=first_widget.setMarkdown)
+
+        widget.set_content("First paragraph.\n\nSecond paragraph grows")
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 2)
+        self.assertIs(widget.parts_widgets[0], first_widget)
+        first_widget.setMarkdown.assert_not_called()
+
+    def test_assistant_message_widget_does_not_plain_text_draft_while_streaming(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_streaming(True)
+        widget.set_content("**Live** text")
+        self._process_events()
+        markdown_widget = widget.parts_widgets[0]
+        markdown_widget.setMarkdown = mock.Mock(wraps=markdown_widget.setMarkdown)
+        markdown_widget.setPlainText = mock.Mock(wraps=markdown_widget.setPlainText)
+
+        widget.set_content("**Live** text updated")
+        self._process_events()
+
+        markdown_widget.setMarkdown.assert_called_once_with("**Live** text updated")
+        markdown_widget.setPlainText.assert_not_called()
+
+    def test_assistant_message_widget_incremental_split_restarts_at_tilde_fence(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        widget.set_content("Intro\n\n~~~python\nprint('hi')\n")
+        self._process_events()
+
+        with mock.patch("ui.widgets.messages.split_markdown_segments", wraps=split_markdown_segments) as split_mock:
+            widget.set_content("Intro\n\n~~~python\nprint('hi')\n~~~\n\nTail")
+            self._process_events()
+
+        split_mock.assert_called_once_with("~~~python\nprint('hi')\n~~~\n\nTail")
+        self.assertEqual(len(widget.parts_widgets), 3)
+        self.assertIsInstance(widget.parts_widgets[0], AutoTextBrowser)
+        self.assertIsInstance(widget.parts_widgets[1], CodeBlockWidget)
+        self.assertIsInstance(widget.parts_widgets[2], AutoTextBrowser)
 
     def test_assistant_message_widget_has_no_thought_panel(self):
         widget = AssistantMessageWidget()

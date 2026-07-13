@@ -286,6 +286,8 @@ class ToolCardWidget(QFrame):
     @classmethod
     def _localized_title(cls, name: Any, payload: dict[str, Any]) -> str:
         normalized_name = str(name or "").strip()
+        if str(payload.get("source_kind", "") or "") == "mcp":
+            return str(payload.get("display", "") or normalized_name or "MCP")
         role = cls._tool_role(name)
         phase = str(payload.get("phase", "running") or "running")
         is_error = bool(payload.get("is_error", False))
