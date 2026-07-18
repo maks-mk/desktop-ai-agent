@@ -62,9 +62,6 @@ class NoticeWidget(QFrame):
         icon_name, color = self._icon_for_level(normalized)
         self.icon_label.setPixmap(_fa_icon(icon_name, color=color, size=11).pixmap(11, 11))
 
-    def set_message(self, message: str) -> None:
-        self.text_label.setText(str(message or ""))
-
 
 class RunStatsWidget(QWidget):
     def __init__(self, stats: str, parent: QWidget | None = None) -> None:

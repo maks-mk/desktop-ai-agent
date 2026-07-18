@@ -7,6 +7,7 @@ from PySide6.QtGui import QActionGroup, QColor
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -97,14 +98,19 @@ class WorkspaceBuilder:
         sidebar_layout.addWidget(sidebar, 1)
 
         center_panel = QWidget()
-        center_layout = QVBoxLayout(center_panel)
+        center_layout = QGridLayout(center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(0)
+        center_layout.setHorizontalSpacing(8)
+        center_layout.setVerticalSpacing(0)
 
         transcript = ChatTranscriptWidget()
         transcript.setAccessibleName("Conversation transcript")
         transcript.setAccessibleDescription("Shows user messages, assistant output, tools, and notices")
-        center_layout.addWidget(transcript, 1)
+        center_layout.addWidget(transcript, 0, 0)
+        center_layout.setRowStretch(0, 1)
+        center_layout.setRowStretch(1, 0)
+        center_layout.setColumnStretch(0, 1)
+        center_layout.setColumnStretch(1, 0)
 
         composer_shell = QHBoxLayout()
         composer_shell.setContentsMargins(0, 18, 0, 12)
@@ -239,7 +245,8 @@ class WorkspaceBuilder:
         outer_layout.addWidget(composer_pill)
         composer_shell.addWidget(composer_container, 3)
         composer_shell.addStretch(1)
-        center_layout.addLayout(composer_shell)
+        # Transcript and composer share column 0.
+        center_layout.addLayout(composer_shell, 1, 0)
 
         inspector_container = QFrame()
         inspector_container.setObjectName("SidebarCard")

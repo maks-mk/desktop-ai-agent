@@ -56,9 +56,75 @@ def _safe_openai_model_dump(value: Any) -> dict[str, Any]:
     if not hasattr(value, "model_dump"):
         return value
     try:
-        return value.model_dump(exclude=STRUCTURED_OUTPUT_PARSED_EXCLUDE)
+        return value.model_dump(
+            exclude=STRUCTURED_OUTPUT_PARSED_EXCLUDE,
+            warnings="none",
+        )
     except TypeError:
         return value.model_dump()
+
+
+def _flatten_provider_text(value: Any) -> str:
+    """Extract text from nested provider blocks without including metadata."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "".join(_flatten_provider_text(item) for item in value)
+    if not isinstance(value, dict):
+        return ""
+    return "".join(
+        _flatten_provider_text(value.get(key))
+        for key in ("text", "content", "delta", "thinking", "reasoning")
+        if value.get(key) not in (None, "")
+    )
+
+
+def _normalize_responses_text_delta(chunk: Any) -> tuple[Any, str]:
+    """Normalize non-standard block-list Responses API text deltas.
+
+    Some OpenAI-compatible providers emit ``response.output_text.delta`` with
+    a list of ``thinking``/``text`` blocks even though the OpenAI SDK declares
+    that field as ``str``. Keep visible text in ``delta`` and return reasoning
+    separately so it can remain available to downstream diagnostics/UI.
+    """
+    if getattr(chunk, "type", None) != "response.output_text.delta":
+        return chunk, ""
+    delta = getattr(chunk, "delta", None)
+    if isinstance(delta, str) or not isinstance(delta, (list, tuple)):
+        return chunk, ""
+
+    visible_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    for block in delta:
+        if isinstance(block, str):
+            visible_parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type in {"thinking", "reasoning", "analysis", "thought"}:
+            reasoning_parts.append(_flatten_provider_text(block))
+            continue
+        for key in ("thinking", "reasoning", "analysis"):
+            if block.get(key) not in (None, ""):
+                reasoning_parts.append(_flatten_provider_text(block.get(key)))
+        visible_parts.append(
+            "".join(
+                _flatten_provider_text(block.get(key))
+                for key in ("text", "content", "delta")
+                if block.get(key) not in (None, "")
+            )
+        )
+
+    visible_text = "".join(visible_parts)
+    reasoning_text = "".join(reasoning_parts)
+    if hasattr(chunk, "model_copy"):
+        return chunk.model_copy(update={"delta": visible_text}), reasoning_text
+    try:
+        chunk.delta = visible_text
+    except Exception:
+        pass
+    return chunk, reasoning_text
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +218,10 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
 
         def _attach_raw_reasoning_delta(self, generation_chunk: Any, chunk: Any) -> None:
             reasoning_delta = extract_openai_reasoning_delta(chunk)
+            self._attach_reasoning_content(generation_chunk, reasoning_delta)
+
+        @staticmethod
+        def _attach_reasoning_content(generation_chunk: Any, reasoning_delta: Any) -> None:
             if reasoning_delta in (None, ""):
                 return
             message = getattr(generation_chunk, "message", None)
@@ -193,6 +263,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                         current_sub_index = -1
                         has_reasoning = False
                         for chunk in response:
+                            chunk, reasoning_delta = _normalize_responses_text_delta(chunk)
                             self._log_raw_provider_chunk("openai_responses_stream", chunk)
                             metadata = headers if is_first_chunk else {}
                             (
@@ -211,6 +282,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                                 output_version=self.output_version,
                             )
                             if generation_chunk:
+                                self._attach_reasoning_content(generation_chunk, reasoning_delta)
                                 if run_manager:
                                     run_manager.on_llm_new_token(generation_chunk.text, chunk=generation_chunk)
                                 is_first_chunk = False
@@ -334,6 +406,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                             self.stream_chunk_timeout,
                             model_name=self.model_name,
                         ):
+                            chunk, reasoning_delta = _normalize_responses_text_delta(chunk)
                             self._log_raw_provider_chunk("openai_responses_stream", chunk)
                             metadata = headers if is_first_chunk else {}
                             (
@@ -352,6 +425,7 @@ def _build_reasoning_debug_chat_openai(base_cls: type) -> type:
                                 output_version=self.output_version,
                             )
                             if generation_chunk:
+                                self._attach_reasoning_content(generation_chunk, reasoning_delta)
                                 if run_manager:
                                     await run_manager.on_llm_new_token(
                                         generation_chunk.text,

@@ -34,9 +34,9 @@ _DESTRUCTIVE_COMMAND_RE = re.compile(
     re.IGNORECASE,
 )
 _LONG_RUNNING_SERVICE_RE = re.compile(
-    r"\b(?:python(?:3(?:\.\d+)?)?\s+-m\s+http\.server|http-server|npm\s+start|"
+    r"(?:^|[;&|()])\s*(?:python(?:3(?:\.\d+)?)?\s+-m\s+http\.server|http-server|npm\s+start|"
     r"npm\s+run\s+dev|npm\s+exec\b.*\bhttp-server\b|npx\b.*\bhttp-server\b|"
-    r"uvicorn|flask\s+run|webpack(?:\.cmd)?\s+serve|serve)\b",
+    r"uvicorn|flask\s+run|webpack(?:\.cmd)?\s+serve|serve(?:\.cmd|\.ps1|\.exe)?)(?=$|[;&|()\s])",
     re.IGNORECASE,
 )
 _HTTP_PROBE_COMMAND_RE = re.compile(

@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from core.config import AgentConfig
 from core.context_builder import ContextBuilder
 from core.recovery_manager import RecoveryManager
-from core.runtime_prompt_policy import RuntimePromptPolicyBuilder
+from core.runtime_prompt_policy import RuntimePromptContext, RuntimePromptPolicyBuilder
 from core.self_correction_engine import RepairPlan
 from core.tool_executor import ToolExecutor
 from core.tool_issues import build_tool_issue
@@ -90,10 +90,10 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertIn("Never send an empty assistant message when tool_calls are present.", joined)
         self.assertIn("Execution environment: os=windows;", joined)
         self.assertIn("paths=windows.", joined)
-        self.assertIn("Workspace root:", joined)
-        self.assertIn("Current working directory:", joined)
-        self.assertIn("Local timezone:", joined)
-        self.assertIn("Current date:", joined)
+        self.assertIn("Workspace:", joined)
+        self.assertNotIn("Working directory:", joined)
+        self.assertIn("Local time:", joined)
+        self.assertIn("date=", joined)
 
     def test_prompt_file_controls_default_response_language(self):
         prompt_text = (Path(__file__).resolve().parents[1] / "prompt.txt").read_text(encoding="utf-8")
@@ -176,6 +176,38 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertNotIn("THOUGHT VISIBILITY POLICY:", joined)
         self.assertNotIn("<think>", joined)
         self.assertNotIn("舞台上边...dr", joined)
+
+    def test_runtime_prompt_policy_detects_environment_once_per_builder(self):
+        with mock.patch("core.runtime_prompt_policy.platform.system", return_value="Windows") as detect_os:
+            builder = RuntimePromptPolicyBuilder(config=self._make_config())
+            context = RuntimePromptContext(
+                current_task="Проверь задачу",
+                tools_available=False,
+                active_tool_names=(),
+            )
+
+            builder.build_messages(context)
+            builder.build_messages(context)
+
+        self.assertEqual(detect_os.call_count, 1)
+
+    def test_runtime_prompt_policy_updates_workspace_after_directory_change(self):
+        first = Path("C:/projects/first")
+        second = Path("C:/projects/second")
+        with mock.patch("core.runtime_prompt_policy.Path.cwd", side_effect=[first, first, second]):
+            builder = RuntimePromptPolicyBuilder(config=self._make_config())
+            context = RuntimePromptContext(
+                current_task="Проверь задачу",
+                tools_available=False,
+                active_tool_names=(),
+            )
+
+            first_contract = str(builder.build_messages(context)[0].content)
+            second_contract = str(builder.build_messages(context)[0].content)
+
+        self.assertIn(str(first.resolve()), first_contract)
+        self.assertIn(str(second.resolve()), second_contract)
+        self.assertNotIn(str(first.resolve()), second_contract)
 
     def test_runtime_prompt_policy_maps_supported_operating_systems(self):
         builder = RuntimePromptPolicyBuilder(config=self._make_config())

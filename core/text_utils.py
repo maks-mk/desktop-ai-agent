@@ -9,7 +9,6 @@ _CLEAN_MD_RE = re.compile(r"\n{3,}")
 _CRAWL_PAGES_RE = re.compile(r"(\d+) pages processed")
 _CRAWL_DEPTH_RE = re.compile(r"max_depth: (\d+)")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
-_FILE_EXT_RE = re.compile(r"\.([a-z0-9]+)\b", re.IGNORECASE)
 _SIMPLE_LATEX_INLINE_RE = re.compile(r"\$\s*(\\[A-Za-z]+)\s*\$")
 _MARKDOWN_FENCE_RE = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})(?P<info>[^`~\r\n]*)[ \t]*(?:\r?\n)?$")
 
@@ -170,6 +169,14 @@ def _normalize_simple_latex_inline(text: str) -> str:
     return _rewrite_outside_code(text, _replace_segment)
 
 
+_ESCAPED_MARKDOWN_MARKERS_RE = re.compile(r"\\([\*_`#>!|\[\]\(\){}+\-.])")
+
+
+def _unescape_common_markdown_markers(text: str) -> str:
+    """Undo provider-overescaped Markdown markers outside code spans/blocks."""
+    return _rewrite_outside_code(text, lambda segment: _ESCAPED_MARKDOWN_MARKERS_RE.sub(r"\1", segment))
+
+
 def _rewrite_local_file_links(text: str) -> str:
     """Convert Markdown local-file links to inline code to prevent Rich URL-encoding.
 
@@ -186,43 +193,6 @@ def _rewrite_local_file_links(text: str) -> str:
         return f"`{href}` ({label})"
 
     return _rewrite_outside_code(text, lambda segment: _LOCAL_LINK_RE.sub(_replace, segment))
-
-_LANG_BY_EXTENSION = {
-    "py": "python",
-    "js": "javascript",
-    "jsx": "jsx",
-    "ts": "typescript",
-    "tsx": "tsx",
-    "go": "go",
-    "rs": "rust",
-    "java": "java",
-    "cs": "csharp",
-    "cpp": "cpp",
-    "c": "c",
-    "h": "c",
-    "hpp": "cpp",
-    "json": "json",
-    "yml": "yaml",
-    "yaml": "yaml",
-    "sh": "bash",
-    "bash": "bash",
-    "ps1": "powershell",
-    "sql": "sql",
-    "html": "html",
-    "css": "css",
-    "md": "markdown",
-}
-_CODE_PREFIXES = (
-    "package ", "import ", "func ", "def ", "class ", "const ", "let ", "var ",
-    "if ", "elif ", "else:", "for ", "while ", "return ", "public ", "private ",
-    "protected ", "interface ", "type ", "struct ", "fn ", "using ", "namespace ",
-    "#include", "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ",
-)
-_CODE_TOKENS = (
-    " := ", " => ", " == ", " != ", ".Println(", "fmt.", "console.", "System.out",
-    "->", "::", "();", "{", "}", "[", "]",
-)
-
 
 def truncate_value(value: str, max_length: int = 60) -> str:
     if len(value) > max_length:
@@ -553,129 +523,9 @@ def clean_markdown_text(text: str) -> str:
     return _collapse_non_code_markdown(text)
 
 
-def _code_signal_score(line: str) -> int:
-    stripped = line.strip()
-    if not stripped:
-        return 0
-    if stripped.startswith(("```", "- ", "* ", "> ")) or re.match(r"^\d+\.\s", stripped):
-        return 0
-
-    score = 0
-    if any(stripped.startswith(prefix) for prefix in _CODE_PREFIXES):
-        score += 2
-    if stripped in {"{", "}", "};"}:
-        score += 2
-    if stripped.startswith(("//", "/*", "*/", "#include")):
-        score += 1
-    if any(token in stripped for token in _CODE_TOKENS):
-        score += 1
-    if stripped.endswith(("{", "}", ";", ")")):
-        score += 1
-    if re.match(r"^[A-Za-z_][\w.]*\([^)]*\)\s*\{?$", stripped):
-        score += 1
-    if re.match(r"^[A-Za-z_][\w<>\[\]]+\s+[A-Za-z_][\w<>\[\]]*\s*=", stripped):
-        score += 1
-    return score
-
-
-def _guess_code_language(context_line: str, code_lines: list[str]) -> str:
-    context = f"{context_line}\n" + "\n".join(code_lines[:3])
-    ext_match = _FILE_EXT_RE.search(context)
-    if ext_match:
-        language = _LANG_BY_EXTENSION.get(ext_match.group(1).lower())
-        if language:
-            return language
-
-    joined = "\n".join(code_lines[:5]).strip()
-    if joined.startswith("package ") or 'fmt."' in joined or ".Println(" in joined:
-        return "go"
-    if joined.startswith(("def ", "class ", "import ")) and ":" in joined:
-        return "python"
-    if joined.startswith(("const ", "let ", "function ")) or "console." in joined:
-        return "javascript"
-    if joined.startswith(("fn ", "let ")) and "println!" in joined:
-        return "rust"
-    if joined.startswith(("SELECT ", "INSERT ", "UPDATE ", "DELETE ")):
-        return "sql"
-    return ""
-
-
-def normalize_markdown_code_blocks(text: str) -> str:
-    if not text:
-        return text
-
-    lines = text.splitlines()
-    output: list[str] = []
-    in_fence = False
-    index = 0
-
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            output.append(line)
-            index += 1
-            continue
-
-        if in_fence:
-            output.append(line)
-            index += 1
-            continue
-
-        block: list[str] = []
-        block_scores = 0
-        code_line_count = 0
-        scan = index
-
-        while scan < len(lines):
-            current = lines[scan]
-            current_stripped = current.strip()
-            if current_stripped.startswith("```"):
-                break
-            if not current_stripped:
-                if not block:
-                    break
-                lookahead = scan + 1
-                while lookahead < len(lines) and not lines[lookahead].strip():
-                    lookahead += 1
-                if lookahead >= len(lines) or _code_signal_score(lines[lookahead]) == 0:
-                    break
-                block.append(current)
-                scan += 1
-                continue
-
-            score = _code_signal_score(current)
-            if score == 0:
-                break
-
-            block.append(current)
-            block_scores += score
-            code_line_count += 1
-            scan += 1
-
-        if code_line_count >= 2 and block_scores >= 4:
-            context_line = next((prev for prev in reversed(output) if prev.strip() and not prev.strip().startswith("```")), "")
-            language = _guess_code_language(context_line, [entry for entry in block if entry.strip()])
-            if output and output[-1].strip():
-                output.append("")
-            output.append(f"```{language}" if language else "```")
-            output.extend(block)
-            output.append("```")
-            if scan < len(lines) and lines[scan].strip():
-                output.append("")
-            index = scan
-            continue
-
-        output.append(line)
-        index += 1
-
-    return "\n".join(output)
-
-
 def prepare_markdown_for_render(text: str) -> str:
     text = _normalize_simple_latex_inline(text)
+    text = _unescape_common_markdown_markers(text)
     text = _rewrite_local_file_links(text)
     # Do not infer fenced code while text is streaming. The inference can change
     # its mind as a line grows, which makes ordinary prose flash as a code block.

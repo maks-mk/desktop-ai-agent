@@ -54,13 +54,9 @@ _WINDOWS_NULL_REDIRECT_RE = re.compile(
     r"(?i)(?P<redir>\d?>)\s*(?P<quote>['\"]?)/dev/null(?P=quote)"
 )
 _NPM_LIKE_COMMAND_RE = re.compile(r"(^|[;&|()\s])(?:npm|npx)(?=$|[;&|()\s])", re.IGNORECASE)
-_INTERACTIVE_PROMPT_PATTERNS = (
-    re.compile(r"ok to proceed\?\s*\(y\)", re.IGNORECASE),
-    re.compile(r"do you want to continue\?\s*\[(?:y|yes)/(?:n|no)\]", re.IGNORECASE),
-    re.compile(r"\[(?:y|yes)/(?:n|no)\]", re.IGNORECASE),
-    re.compile(r"\[(?:n|no)/(?:y|yes)\]", re.IGNORECASE),
-    re.compile(r"press any key", re.IGNORECASE),
-    re.compile(r"hit ctrl-c to stop", re.IGNORECASE),
+_INTERACTIVE_PROMPT_COMMAND_RE = re.compile(
+    r"(^|[;&|()\s])(?:npm|npx|pnpm|yarn)(?=$|[;&|()\s])",
+    re.IGNORECASE,
 )
 _INSPECT_ONLY_COMMAND_PATTERNS = (
     re.compile(r"\bget-process\b"),
@@ -222,14 +218,28 @@ def _prepare_shell_env(command: str) -> dict[str, str]:
     return env
 
 
+def _should_detect_interactive_prompts(command: str) -> bool:
+    """Limit prompt heuristics to package managers that commonly ask for confirmation."""
+    return bool(_INTERACTIVE_PROMPT_COMMAND_RE.search(command or ""))
+
+
 def _detect_interactive_prompt(text: str) -> str | None:
     sample = str(text or "")
     if not sample:
         return None
-    for pattern in _INTERACTIVE_PROMPT_PATTERNS:
-        match = pattern.search(sample)
-        if match:
-            return match.group(0)
+    prompt_markers = (
+        "ok to proceed? (y)",
+        "do you want to continue? [y/n]",
+        "do you want to continue? [yes/no]",
+        "[y/n]",
+        "[yes/no]",
+        "[n/y]",
+        "[no/yes]",
+    )
+    lowered = sample.lower()
+    for marker in prompt_markers:
+        if marker in lowered:
+            return marker
     return None
 
 
@@ -345,6 +355,7 @@ async def cli_exec(command: str) -> str:
             "Foreground service/server commands are not supported in cli_exec. Use run_background_process instead.",
         )
     command_env = _prepare_shell_env(normalized_command)
+    detect_interactive_prompts = _should_detect_interactive_prompts(normalized_command)
 
     try:
         if os.name == "nt":
@@ -406,7 +417,7 @@ async def cli_exec(command: str) -> str:
                     stderr_chunks.append(chunk)
                 _emit_cli_output(chunk, stream_name)
 
-                if not interactive_prompt:
+                if detect_interactive_prompts and not interactive_prompt:
                     prompt_window = (prompt_window + chunk)[-1200:]
                     detected_prompt = _detect_interactive_prompt(prompt_window)
                     if detected_prompt:

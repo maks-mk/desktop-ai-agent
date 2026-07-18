@@ -22,5 +22,7 @@ def get_internal_ui_notice(message: Any) -> str:
     internal = get_agent_internal_metadata(message)
     if not internal or internal.get("visible_in_ui") is not False:
         return ""
+    if internal.get("silent_in_ui") is True:
+        return ""
     notice = str(internal.get("ui_notice") or "").strip()
     return notice or DEFAULT_INTERNAL_UI_NOTICE

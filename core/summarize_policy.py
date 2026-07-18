@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Callable, List, Optional
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from core.message_utils import stringify_content
 
@@ -131,6 +131,13 @@ def estimate_tokens(messages: List[BaseMessage]) -> int:
         total += _count_single_message_tokens(message, use_tiktoken=use_tiktoken)
 
     return total
+
+
+def estimate_summary_tokens(summary: str) -> int:
+    summary_text = str(summary or "").strip()
+    if not summary_text:
+        return 0
+    return estimate_tokens([SystemMessage(content=f"<memory>\n{summary_text}\n</memory>")])
 
 
 def estimate_context_tokens(messages: List[BaseMessage], *, reserved_tokens: int = 0) -> int:

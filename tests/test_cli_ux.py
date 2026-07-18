@@ -15,13 +15,13 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QFrame, QPushButt
 
 import main as agent_cli
 from core.model_fetcher import ModelEntry
-from core.text_utils import split_markdown_segments
+from core.text_utils import prepare_markdown_for_render, split_markdown_segments
 from core.model_profiles import normalize_profiles_payload
 from core.tool_policy import ToolMetadata
 from ui.runtime import build_runtime_snapshot, summarize_approval_request
 from ui.runtime_worker import AgentRuntimeController
 from ui.streaming import StreamEvent
-from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SUCCESS_GREEN, SURFACE_BG, SURFACE_CARD, TEXT_MUTED
+from ui.theme import AMBER_WARNING, BORDER, ERROR_RED, SUCCESS_GREEN, SURFACE_BG, SURFACE_CARD, TEXT_MUTED, build_stylesheet
 from ui.widgets.composer import _ComposerMentionItemWidget
 from ui.widgets.foundation import AutoTextBrowser, CodeBlockWidget, CopySafePlainTextEdit, DiffBlockWidget, TRANSCRIPT_MAX_WIDTH
 from ui.widgets.messages import AssistantMessageWidget
@@ -396,7 +396,10 @@ class GuiUxTests(unittest.TestCase):
 
         self.window._submit_request()
 
-        self.assertEqual(self.controller.start_calls, [{"text": "Собери summary", "attachments": []}])
+        self.assertEqual(
+            self.controller.start_calls,
+            [{"text": "Собери summary", "attachments": []}],
+        )
         self.assertEqual(self.window.composer.toPlainText(), "")
 
     def test_submit_request_sanitizes_and_truncates_input_before_runtime(self):
@@ -527,6 +530,24 @@ class GuiUxTests(unittest.TestCase):
         self.assertIn("Live", markdown_widget.toPlainText())
         self.assertNotIn("**", markdown_widget.toPlainText())
         self.assertNotIn(r"\**Live\**", markdown_widget.toMarkdown())
+
+    def test_assistant_message_widget_renders_overescaped_markdown(self):
+        widget = AssistantMessageWidget()
+        self.addCleanup(widget.deleteLater)
+
+        markdown = prepare_markdown_for_render(r"""\# Header
+
+\- \*\*bold\*\* item""")
+        widget.set_content(markdown)
+        self._process_events()
+
+        self.assertEqual(len(widget.parts_widgets), 2)
+        header_widget = widget.parts_widgets[0]
+        list_widget = widget.parts_widgets[1]
+        self.assertIn("Header", header_widget.toPlainText())
+        self.assertIn("bold item", list_widget.toPlainText())
+        self.assertIn("<ul", list_widget.toHtml().lower())
+        self.assertNotIn("**", list_widget.toPlainText())
 
     def test_assistant_streaming_state_does_not_add_visual_indicator_or_change_geometry(self):
         widget = AssistantMessageWidget()
@@ -704,7 +725,10 @@ class GuiUxTests(unittest.TestCase):
         self.window.composer.moveCursor(QTextCursor.MoveOperation.End)
         self._press_composer_key(Qt.Key_Return, "\r")
 
-        self.assertEqual(self.controller.start_calls, [{"text": "Сделай задачу", "attachments": []}])
+        self.assertEqual(
+            self.controller.start_calls,
+            [{"text": "Сделай задачу", "attachments": []}],
+        )
         self.assertEqual(self.window.composer.toPlainText(), "")
 
     def test_paste_image_creates_draft_attachment_chip(self):
@@ -1242,13 +1266,13 @@ class GuiUxTests(unittest.TestCase):
         self.window._handle_event(
             StreamEvent("status_changed", {"label": "Compressing context", "node": "summarize"})
         )
-        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertNotIn("notice", self.window.current_turn.block_kinds())
         self.assertIn("compress", self.window.statusBar().currentMessage().lower())
 
         self.window._handle_event(
             StreamEvent("status_changed", {"label": "Working...", "node": "agent"})
         )
-        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertNotIn("notice", self.window.current_turn.block_kinds())
         self.assertIn("context compressed", self.window.statusBar().currentMessage().lower())
 
         self.window._handle_event(
@@ -1262,7 +1286,7 @@ class GuiUxTests(unittest.TestCase):
             )
         )
         self._process_events()
-        self.assertIsNone(self.window.current_turn.summary_notice_widget)
+        self.assertNotIn("notice", self.window.current_turn.block_kinds())
 
     def test_auto_summary_notice_event_is_transient_not_persistent_notice_block(self):
         self.window._handle_initialized(self._snapshot_payload())
@@ -1275,7 +1299,6 @@ class GuiUxTests(unittest.TestCase):
         )
         self._process_events()
 
-        self.assertIsNone(self.window.current_turn.summary_notice_widget)
         self.assertIn("context compressed automatically", self.window.statusBar().currentMessage().lower())
         self.assertNotIn("notice", self.window.current_turn.block_kinds())
 
@@ -1707,7 +1730,6 @@ class GuiUxTests(unittest.TestCase):
         self._process_events()
 
         tool_card = self.window.current_turn.tool_cards["call-cli-long"]
-        tool_card._cli_started_at_monotonic = time.monotonic() - 1.2
 
         self.window._handle_event(
             StreamEvent("tool_finished", {"tool_id": "call-cli-long", "name": "cli_exec", "content": "done\n"})
@@ -2221,7 +2243,6 @@ class GuiUxTests(unittest.TestCase):
         self.assertTrue(tool_card.tool_button.isChecked())
         self.assertFalse(tool_card.cli_exec_widget.isHidden())
 
-        tool_card._cli_started_at_monotonic = time.monotonic() - 1.2
         self.window._handle_event(
             StreamEvent(
                 "tool_finished",

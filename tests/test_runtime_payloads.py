@@ -49,6 +49,30 @@ class RuntimePayloadTests(unittest.TestCase):
         self.assertEqual(payload["estimated_tokens"], estimate_tokens(messages) + 25)
         self.assertEqual(payload["remaining_tokens"], max(0, 100 - payload["estimated_tokens"]))
 
+    def test_build_summary_progress_payload_reports_summary_and_provider_input_separately(self):
+        config = type(
+            "Config",
+            (),
+            {"summary_threshold": 10000, "summary_keep_last": 4, "summary_reserved_tokens": 25},
+        )()
+        messages = [HumanMessage(content="recent question")]
+
+        payload = build_summary_progress_payload(
+            config,
+            {
+                "messages": messages,
+                "summary": "compressed memory " * 20,
+                "token_usage": {"input_tokens": 229094, "output_tokens": 2426},
+            },
+        )
+
+        self.assertGreater(payload["summary_tokens"], 0)
+        self.assertEqual(
+            payload["estimated_tokens"],
+            estimate_tokens(messages) + payload["summary_tokens"] + 25,
+        )
+        self.assertEqual(payload["provider_input_tokens"], 229094)
+
     def test_should_summarize_uses_reserved_context_tokens(self):
         messages = [
             HumanMessage(content="old question"),
@@ -152,6 +176,31 @@ class RuntimePayloadTests(unittest.TestCase):
         tool_block = turn["blocks"][-1]["payload"]
         self.assertEqual(tool_block["args"]["path"], "app.py")
         self.assertEqual(tool_block["diff"], "-a\n+b")
+
+    def test_build_transcript_payload_skips_replayed_pretool_commentary_after_tool(self):
+        payload = build_transcript_payload(
+            {
+                "messages": [
+                    HumanMessage(content="Проверь файл"),
+                    AIMessage(
+                        content="Проверю файл перед изменением.",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "name": "read_file",
+                                "args": {"path": "index.html"},
+                            }
+                        ],
+                    ),
+                    ToolMessage(content="ok", tool_call_id="call-1", name="read_file"),
+                    AIMessage(content="Проверю файл перед изменением.\n\nТеперь внесу правку."),
+                ]
+            }
+        )
+
+        turn = payload["turns"][0]
+        assistant_blocks = [block["markdown"] for block in turn["blocks"] if block["type"] == "assistant"]
+        self.assertEqual(assistant_blocks, ["Проверю файл перед изменением.", "Теперь внесу правку."])
 
     def test_build_transcript_payload_does_not_parse_assistant_thought_markdown(self):
         payload = build_transcript_payload(

@@ -437,11 +437,6 @@ class SessionSidebarWidget(QWidget):
         if str(current.data(SessionListModel.KindRole) or "session") == "more":
             self.list_view.clearSelection()
 
-    def _delete_selected_session(self) -> None:
-        session_id = self._selected_session_id()
-        if session_id:
-            self.session_delete_requested.emit(session_id)
-
     def _show_context_menu(self, pos) -> None:
         index = self.list_view.indexAt(pos)
         if not index.isValid():

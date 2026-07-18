@@ -108,6 +108,7 @@ def build_stylesheet() -> str:
     approval_dialog_card = blend_hex(SURFACE_CARD, "#FFFFFF", 0.03)
     approval_dialog_border = blend_hex(BORDER, "#FFFFFF", 0.10)
     approval_dialog_soft = blend_hex(SURFACE_ALT, "#FFFFFF", 0.05)
+
     approval_dialog_code = blend_hex(CODE_BG, "#FFFFFF", 0.02)
     return f"""
     QWidget {{

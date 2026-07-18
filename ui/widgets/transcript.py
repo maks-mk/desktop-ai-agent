@@ -23,6 +23,7 @@ class ConversationTurnWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self._assistant_markdown = ""
+        self._force_new_assistant_block = False
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(8)
@@ -31,7 +32,6 @@ class ConversationTurnWidget(QWidget):
         self.tool_cards: dict[str, ToolCardWidget] = {}
         self.tool_group: ToolGroupWidget | None = None
         self.status_widget: StatusIndicatorWidget | None = None
-        self.summary_notice_widget: NoticeWidget | None = None
         self._append_block("user", UserMessageWidget(user_text, attachments=list(attachments or []), parent=self))
 
     @staticmethod
@@ -88,8 +88,6 @@ class ConversationTurnWidget(QWidget):
         return incoming
 
     def _append_block(self, kind: str, widget: QWidget) -> QWidget:
-        if kind in {"assistant", "tool", "tool_group", "notice", "stats"}:
-            self.clear_summary_notice()
         self._layout.addWidget(widget)
         self._timeline.append((kind, widget))
         if self.status_widget is not None and kind != "stats":
@@ -113,30 +111,10 @@ class ConversationTurnWidget(QWidget):
         self.status_widget.deleteLater()
         self.status_widget = None
 
-    def set_summary_notice(self, message: str, level: str = "info") -> None:
-        text = str(message or "").strip()
-        if not text:
-            return
-        if self.summary_notice_widget is None:
-            self.summary_notice_widget = NoticeWidget(text, level=level, parent=self)
-            self._layout.addWidget(self.summary_notice_widget)
-        else:
-            self.summary_notice_widget.set_message(text)
-            self.summary_notice_widget.set_level(level)
-        if self.status_widget is not None:
-            self._layout.removeWidget(self.status_widget)
-            self._layout.addWidget(self.status_widget)
-
-    def clear_summary_notice(self) -> None:
-        if self.summary_notice_widget is None:
-            return
-        self._layout.removeWidget(self.summary_notice_widget)
-        self.summary_notice_widget.deleteLater()
-        self.summary_notice_widget = None
-
     def _ensure_assistant_segment(self) -> AssistantMessageWidget:
-        if self._timeline and self._timeline[-1][0] == "assistant":
+        if self._timeline and self._timeline[-1][0] == "assistant" and not self._force_new_assistant_block:
             return self._timeline[-1][1]  # type: ignore[return-value]
+        self._force_new_assistant_block = False
         segment = AssistantMessageWidget(parent=self)
         self.assistant_segments.append(segment)
         self._append_block("assistant", segment)
@@ -186,6 +164,12 @@ class ConversationTurnWidget(QWidget):
 
         self._assistant_markdown = markdown
 
+    def begin_assistant_block(self) -> None:
+        """Make the next streamed response a new timeline block."""
+        self.set_assistant_streaming(False)
+        self._assistant_markdown = ""
+        self._force_new_assistant_block = True
+
     def set_assistant_streaming(self, active: bool) -> None:
         if not self.assistant_segments:
             return
@@ -227,12 +211,12 @@ class ConversationTurnWidget(QWidget):
             parent = parent.parentWidget()
         return None
 
-    def finish_tool(self, payload: dict[str, Any], *, collapse_delay_ms: int | None = None) -> None:
+    def finish_tool(self, payload: dict[str, Any]) -> None:
         tool_id = payload.get("tool_id", "")
         card = self.tool_cards.get(tool_id)
         if card is None:
             card = self.start_tool(payload)
-        card.finish(payload, collapse_delay_ms=collapse_delay_ms)
+        card.finish(payload)
         group = self._tool_group_for_card(card)
         if group is not None:
             group.refresh_completion(auto_collapse=False)
@@ -269,7 +253,7 @@ class ConversationTurnWidget(QWidget):
             elif block_type == "tool":
                 payload = dict(block.get("payload") or {})
                 if payload:
-                    self.finish_tool(payload, collapse_delay_ms=0)
+                    self.finish_tool(payload)
             elif block_type == "notice":
                 message = str(block.get("message", "") or "").strip()
                 level = str(block.get("level") or "info")
@@ -349,6 +333,13 @@ class ChatTranscriptWidget(QWidget):
     def add_global_notice(self, message: str, level: str = "info") -> None:
         self.layout.insertWidget(self.layout.count() - 1, NoticeWidget(message, level=level, parent=self.column))
         self.notify_content_changed()
+
+    def last_turn(self) -> ConversationTurnWidget | None:
+        for index in range(self.layout.count() - 2, -1, -1):
+            widget = self.layout.itemAt(index).widget()
+            if isinstance(widget, ConversationTurnWidget):
+                return widget
+        return None
 
     def start_turn(self, user_text: str, attachments: list[dict[str, Any]] | None = None) -> ConversationTurnWidget:
         turn = ConversationTurnWidget(user_text, attachments=attachments, parent=self.column)

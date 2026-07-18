@@ -196,6 +196,10 @@ class StreamProcessor:
         "_messages_replay_cursor",
         "_tool_sources",
         "_mcp_tool_servers",
+        "_previous_assistant_section_text",
+        "_post_tool_replay_text",
+        "_post_tool_text_buffer",
+        "_post_tool_needs_boundary",
     )
 
     def __init__(
@@ -243,6 +247,10 @@ class StreamProcessor:
         self._messages_replay_cursor: int | None = None
         self._tool_sources = dict(tool_sources or {})
         self._mcp_tool_servers = dict(mcp_tool_servers or {})
+        self._previous_assistant_section_text = ""
+        self._post_tool_replay_text = ""
+        self._post_tool_text_buffer = ""
+        self._post_tool_needs_boundary = False
 
     def _elapsed_seconds(self) -> float:
         return self._base_elapsed_seconds + max(0.0, time.perf_counter() - self.start_time)
@@ -385,10 +393,6 @@ class StreamProcessor:
             messages = [messages]
 
         last_message = messages[-1] if messages else None
-        if isinstance(last_message, AIMessage) and last_message.tool_calls:
-            for tool_call in last_message.tool_calls:
-                self._remember_tool_call(tool_call)
-                self._emit_tool_started(tool_call)
         if isinstance(last_message, (AIMessage, AIMessageChunk)):
             self._handle_agent_message(last_message, source="updates_agent")
 
@@ -431,7 +435,7 @@ class StreamProcessor:
         self.tracker.update_from_message(message)
 
         if node:
-            self.active_node = node
+            self.active_node = "agent" if node == "agent" else node
             if node == "agent" and isinstance(message, (AIMessage, AIMessageChunk)):
                 self._agent_is_thinking = self._has_thinking_content(message)
                 if self._agent_is_thinking and self._first_reasoning_at is None:
@@ -450,9 +454,14 @@ class StreamProcessor:
         elif node == "tools" and isinstance(message, ToolMessage):
             self._handle_tool_result(message)
 
-    def _handle_agent_message(self, message: AIMessage | AIMessageChunk, *, source: str = "messages") -> None:
-        message_has_tool_calls = self._message_has_tool_calls(message)
+    def _handle_agent_message(
+        self,
+        message: AIMessage | AIMessageChunk,
+        *,
+        source: str = "messages",
+    ) -> None:
         self._handle_tool_calls_from_message(message, source=source)
+        message_has_tool_calls = self._message_has_tool_calls(message)
         if is_hidden_internal_message(message):
             notice = get_internal_ui_notice(message)
             if notice and notice != self._last_internal_notice:
@@ -518,6 +527,19 @@ class StreamProcessor:
         chunk = self._filter_visible_text_tool_call_chunk(chunk)
         if not chunk:
             return
+        chunk = self._strip_previous_section_replay(chunk)
+        if not chunk:
+            return
+        guarded_chunk = self._guard_post_tool_replay(
+            chunk,
+            source=source,
+            message_has_tool_calls=message_has_tool_calls,
+        )
+        if guarded_chunk is None:
+            return
+        chunk = guarded_chunk
+        if not chunk:
+            return
         if source == "messages" and self._consume_messages_replay_chunk(chunk):
             logger.debug(
                 "Stream suppressed messages replay after updates_agent chunk_len=%s preview=%s",
@@ -539,6 +561,10 @@ class StreamProcessor:
             return
         if self._first_token_at is None:
             self._first_token_at = now()
+
+        if self._post_tool_needs_boundary:
+            self._post_tool_needs_boundary = False
+            self._begin_assistant_stream_section(flush_deferred=False)
 
         merged_text = self._merge_assistant_text(chunk, source=source)
         if merged_text is None:
@@ -1021,6 +1047,142 @@ class StreamProcessor:
             or list(getattr(message, "invalid_tool_calls", []) or [])
         )
 
+    def _begin_assistant_stream_section(self, *, flush_deferred: bool = True) -> None:
+        """Close one assistant response before the next agent invocation."""
+        if flush_deferred:
+            self._flush_deferred_assistant_delta()
+        previous_text = self.full_text or self._visible_full_text
+        self._previous_assistant_section_text = previous_text.strip()
+        self._emit("assistant_boundary", {})
+        self.full_text = ""
+        self.clean_full = ""
+        self._visible_full_text = ""
+        self._messages_text_seen = False
+        self._messages_replay_cursor = None
+        self._deferred_assistant_delta = False
+
+    def _begin_post_tool_assistant_section(self) -> str:
+        """Start a fresh assistant section after tools and return deferred tail text."""
+        visible_before_tool = self._visible_full_text or ""
+        full_before_boundary = self.full_text or ""
+        deferred_tail = ""
+        if self._deferred_assistant_delta and visible_before_tool:
+            if full_before_boundary.startswith(visible_before_tool):
+                deferred_tail = full_before_boundary[len(visible_before_tool) :]
+            elif full_before_boundary.strip() != visible_before_tool.strip():
+                deferred_tail = full_before_boundary
+        elif self._deferred_assistant_delta:
+            deferred_tail = full_before_boundary
+
+        previous_section_text = visible_before_tool or full_before_boundary
+        if deferred_tail.strip():
+            self._begin_assistant_stream_section(flush_deferred=False)
+        elif previous_section_text.strip():
+            self._post_tool_needs_boundary = True
+        return deferred_tail
+
+    def _strip_previous_section_replay(self, incoming_text: str) -> str:
+        """Remove a cumulative replay after a section boundary.
+
+        Some providers occasionally start the next agent response with the
+        complete commentary from the preceding step.  The transcript has
+        already closed that step, so forwarding the cumulative text creates a
+        second copy above the next tool card.
+        """
+        previous = self._previous_assistant_section_text
+        incoming = str(incoming_text or "")
+        if not previous or not incoming.strip():
+            return incoming
+
+        self._previous_assistant_section_text = ""
+        if incoming.startswith(previous):
+            remainder = incoming[len(previous) :].lstrip()
+            logger.debug(
+                "Stream removed previous section replay previous_len=%s incoming_len=%s",
+                len(previous),
+                len(incoming),
+            )
+            return remainder
+
+        boundary = self._similar_prefix_boundary(previous, incoming)
+        previous_normalized = self._normalized_text(previous)
+        replayed_prefix = self._normalized_text(incoming[:boundary]) if boundary is not None else ""
+        significant_replay = bool(replayed_prefix) and (
+            len(replayed_prefix) >= min(len(previous_normalized), 48)
+            or len(replayed_prefix) >= int(len(previous_normalized) * 0.8)
+        )
+        if boundary is not None and significant_replay:
+            remainder = incoming[boundary:].lstrip()
+            logger.debug(
+                "Stream removed approximate previous section replay boundary=%s incoming_len=%s",
+                boundary,
+                len(incoming),
+            )
+            return remainder
+        return incoming
+
+    def _guard_post_tool_replay(
+        self,
+        incoming_text: str,
+        *,
+        source: str,
+        message_has_tool_calls: bool,
+    ) -> str | None:
+        """Buffer the first post-tool tokens until they are known to be new.
+
+        Final node updates can replace duplicated text, but that happens too
+        late for a live transcript.  Holding only the ambiguous prefix prevents
+        a replayed comment from flashing in the UI while distinct commentary
+        still appears as soon as it diverges from the previous paragraph.
+        """
+        replay = self._post_tool_replay_text
+        if not replay:
+            return incoming_text
+
+        incoming = str(incoming_text or "")
+        if source == "messages":
+            self._post_tool_text_buffer += incoming
+            candidate = self._post_tool_text_buffer
+        else:
+            candidate = incoming
+
+        replay_normalized = self._normalized_text(replay)
+        candidate_normalized = self._normalized_text(candidate)
+        if not candidate_normalized:
+            return None
+
+        if replay_normalized.startswith(candidate_normalized):
+            if message_has_tool_calls or source == "updates_agent":
+                self._post_tool_replay_text = ""
+                self._post_tool_text_buffer = ""
+                return ""
+            return None
+
+        remainder = ""
+        if candidate.startswith(replay):
+            remainder = candidate[len(replay) :]
+        else:
+            boundary = self._similar_prefix_boundary(replay, candidate)
+            replayed_prefix = self._normalized_text(candidate[:boundary]) if boundary is not None else ""
+            significant_replay = bool(replayed_prefix) and (
+                len(replayed_prefix) >= min(len(replay_normalized), 48)
+                or len(replayed_prefix) >= int(len(replay_normalized) * 0.8)
+            )
+            if boundary is not None and significant_replay:
+                remainder = candidate[boundary:]
+            else:
+                remainder = candidate
+
+        self._post_tool_replay_text = ""
+        self._post_tool_text_buffer = ""
+        if remainder != candidate:
+            logger.debug(
+                "Stream removed live post-tool commentary replay replay_len=%s candidate_len=%s",
+                len(replay),
+                len(candidate),
+            )
+        return remainder
+
     def _handle_tool_calls_from_message(self, message: AIMessage | AIMessageChunk, *, source: str) -> None:
         if isinstance(message, AIMessageChunk):
             chunk_calls = list(getattr(message, "tool_call_chunks", []) or [])
@@ -1029,6 +1191,8 @@ class StreamProcessor:
                 accumulator_key = source or "messages"
                 accumulators = self._tool_chunk_accumulators.setdefault(accumulator_key, {})
                 processed_any = False
+                has_arg_fragment = False
+                is_last_chunk = getattr(message, "chunk_position", None) == "last"
                 for chunk in chunk_calls:
                     chunk_name = str(chunk.get("name") or "").strip() if isinstance(chunk, dict) else str(getattr(chunk, "name", "") or "").strip()
                     raw_index = chunk.get("index") if isinstance(chunk, dict) else getattr(chunk, "index", None)
@@ -1036,6 +1200,10 @@ class StreamProcessor:
                         index = int(raw_index)
                     except (TypeError, ValueError):
                         continue
+                    raw_id = chunk.get("id") if isinstance(chunk, dict) else getattr(chunk, "id", None)
+                    raw_args = chunk.get("args") if isinstance(chunk, dict) else getattr(chunk, "args", None)
+                    if str(raw_args or "").strip():
+                        has_arg_fragment = True
                     previous = accumulators.get(index)
                     current_chunk = AIMessageChunk(content="", tool_call_chunks=[self._tool_call_chunk_payload(chunk)])
                     if previous is None:
@@ -1056,13 +1224,13 @@ class StreamProcessor:
                             for tool_call in tool_calls
                         ],
                         index_order=None,
-                        require_args_before_start=True,
+                        require_args_before_start=(is_last_chunk and not has_arg_fragment),
                     )
                 if not processed_any:
                     self._process_tool_calls(
                         list(getattr(message, "tool_calls", []) or []),
                         index_order=None,
-                        require_args_before_start=True,
+                        require_args_before_start=(is_last_chunk and not has_arg_fragment),
                     )
                 if getattr(message, "chunk_position", None) == "last":
                     self._tool_chunk_accumulators.pop(accumulator_key, None)
@@ -1412,7 +1580,15 @@ class StreamProcessor:
 
         self.active_node = "agent"
         self._emit_status(force=True)
-        self._flush_deferred_assistant_delta()
+        if not self.tool_start_times:
+            visible = self._visible_full_text or self.full_text
+            self._post_tool_replay_text = self._last_nonempty_paragraph(visible).strip()
+            deferred_tail = self._begin_post_tool_assistant_section()
+            self._post_tool_text_buffer = ""
+            if deferred_tail.strip():
+                self._handle_agent_message(AIMessage(content=deferred_tail), source="post_tool_deferred")
+        else:
+            self._flush_deferred_assistant_delta()
 
     @staticmethod
     def _normalize_tool_name(tool_name: Any) -> str:

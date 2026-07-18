@@ -122,6 +122,19 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("`$\\\\rightarrow$`", rendered)
         self.assertIn("```text\n$\\\\Rightarrow$\n```", rendered)
 
+    def test_prepare_markdown_unescapes_common_markdown_markers_outside_code(self):
+        source = r"""\# Title
+
+\- \*\*bold\*\* item
+
+`\*literal\*`"""
+
+        rendered = prepare_markdown_for_render(source)
+
+        self.assertIn("# Title", rendered)
+        self.assertIn("- **bold** item", rendered)
+        self.assertIn(r"`\*literal\*`", rendered)
+
     def test_prepare_markdown_keeps_open_fenced_code_literal_while_streaming(self):
         source = "```text\n$\\\\Rightarrow$\n"
 
@@ -798,8 +811,10 @@ class StreamAndFilesystemTests(unittest.TestCase):
         event_types = [event.type for event in events]
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
         self.assertEqual(len(deltas), 2)
-        self.assertEqual(deltas[-1]["full_text"], "Читаю файл.Готово, вот анализ.")
-        self.assertLess(event_types.index("tool_finished"), event_types.index("assistant_delta", 2))
+        self.assertEqual(deltas[-1]["full_text"], "Готово, вот анализ.")
+        self.assertIn("assistant_boundary", event_types)
+        self.assertLess(event_types.index("tool_finished"), event_types.index("assistant_boundary"))
+        self.assertLess(event_types.index("assistant_boundary"), event_types.index("assistant_delta", 2))
 
     def test_stream_processor_keeps_tool_call_message_text_visible_before_result(self):
         events = []
@@ -978,9 +993,8 @@ class StreamAndFilesystemTests(unittest.TestCase):
         )
 
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(deltas[-1]["full_text"].count("Открою официальные страницы."), 1)
-        self.assertEqual(processor.full_text.count("Открою официальные страницы."), 1)
-        self.assertIn("Вот полная информация.", deltas[-1]["full_text"])
+        self.assertEqual(deltas[-1]["full_text"], "Вот полная информация.")
+        self.assertNotIn("Открою официальные страницы.", deltas[-1]["full_text"])
 
     def test_stream_processor_suppresses_similar_replayed_preface_before_more_text(self):
         events = []
@@ -1007,9 +1021,8 @@ class StreamAndFilesystemTests(unittest.TestCase):
         )
 
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(processor.full_text.count("Посмотрю конфигурацию лимитов"), 1)
-        self.assertEqual(deltas[-1]["full_text"].count("Посмотрю конфигурацию лимитов"), 1)
-        self.assertIn("Нашёл настройки в `core/config.py`.", deltas[-1]["full_text"])
+        self.assertEqual(deltas[-1]["full_text"], "Нашёл настройки в `core/config.py`.")
+        self.assertNotIn("Посмотрю конфигурацию лимитов", deltas[-1]["full_text"])
 
     def test_stream_processor_ignores_reasoning_only_update_without_text_chunk(self):
         events = []
@@ -1385,7 +1398,9 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
     def test_stream_processor_accumulates_streamed_tool_call_chunks(self):
         events = []
-        processor = StreamProcessor(events.append)
+        processor = StreamProcessor(
+            events.append,
+        )
 
         processor._handle_agent_message(
             AIMessageChunk(
@@ -1408,14 +1423,18 @@ class StreamAndFilesystemTests(unittest.TestCase):
         )
 
         started = [event.payload for event in events if event.type == "tool_started"]
-        self.assertEqual(len(started), 1)
+        self.assertEqual(len(started), 2)
         self.assertEqual({payload["tool_id"] for payload in started}, {"call-stream"})
+        self.assertEqual(started[0]["args"], {})
+        self.assertFalse(started[0].get("refresh", False))
         self.assertEqual(started[-1]["args"], {"path": "demo.txt"})
-        self.assertFalse(started[-1].get("refresh", False))
+        self.assertTrue(started[-1].get("refresh", False))
 
-    def test_stream_processor_delays_tool_started_until_streamed_args_are_parseable(self):
+    def test_stream_processor_starts_tool_before_streamed_args_are_parseable(self):
         events = []
-        processor = StreamProcessor(events.append)
+        processor = StreamProcessor(
+            events.append,
+        )
 
         processor._handle_agent_message(
             AIMessageChunk(
@@ -1426,7 +1445,11 @@ class StreamAndFilesystemTests(unittest.TestCase):
             ),
             source="messages",
         )
-        self.assertEqual([event for event in events if event.type == "tool_started"], [])
+        started = [event.payload for event in events if event.type == "tool_started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["tool_id"], "call-delayed")
+        self.assertEqual(started[0]["name"], "read_file")
+        self.assertEqual(started[0]["args"], {})
 
         processor._handle_agent_message(
             AIMessageChunk(
@@ -1440,10 +1463,11 @@ class StreamAndFilesystemTests(unittest.TestCase):
         )
 
         started = [event.payload for event in events if event.type == "tool_started"]
-        self.assertEqual(len(started), 1)
-        self.assertEqual(started[0]["tool_id"], "call-delayed")
-        self.assertEqual(started[0]["name"], "read_file")
-        self.assertEqual(started[0]["args"], {"path": "demo.txt"})
+        self.assertEqual(len(started), 2)
+        self.assertEqual(started[-1]["tool_id"], "call-delayed")
+        self.assertEqual(started[-1]["name"], "read_file")
+        self.assertEqual(started[-1]["args"], {"path": "demo.txt"})
+        self.assertTrue(started[-1].get("refresh", False))
 
     def test_stream_processor_starts_tool_from_result_when_streamed_args_never_arrive(self):
         events = []
@@ -2336,7 +2360,80 @@ class StreamAndFilesystemTests(unittest.TestCase):
         processor._handle_agent_message(AIMessage(content="Готово."), source="updates_agent")
 
         deltas = [event.payload for event in events if event.type == "assistant_delta"]
-        self.assertEqual(deltas[-1]["full_text"], "Проверяю файлы.\n\nГотово.")
+        self.assertEqual(deltas[-1]["full_text"], "Готово.")
+
+    def test_stream_processor_holds_replayed_post_tool_tokens_out_of_live_ui(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        previous = "Рабочая директория почти пустая. Создам автономный шаблон лендинга."
+        processor._handle_agent_message(AIMessageChunk(content=previous), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+
+        processor._handle_agent_message(AIMessageChunk(content="Рабочая директория почти "), source="messages")
+        processor._handle_agent_message(AIMessageChunk(content="пустая. Создам автономный "), source="messages")
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual([payload["full_text"] for payload in deltas], [previous])
+
+        processor._handle_agent_message(
+            AIMessageChunk(content="шаблон лендинга.\n\nТеперь запишу index.html."),
+            source="messages",
+        )
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[-1]["full_text"], "Теперь запишу index.html.")
+        self.assertNotIn(previous, deltas[-1]["full_text"])
+
+    def test_stream_processor_suppresses_exact_post_tool_replay_before_next_tool(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        previous = "Проверю файл перед изменением."
+        processor._handle_agent_message(AIMessageChunk(content=previous), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+        processor._handle_agent_message(
+            AIMessage(
+                content=previous,
+                tool_calls=[{"id": "call-write", "name": "write_file", "args": {"path": "index.html"}}],
+            ),
+            source="messages",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual([payload["full_text"] for payload in deltas], [previous])
+        self.assertIn("call-write", processor.tool_start_times)
+
+    def test_stream_processor_starts_new_assistant_section_after_tool_result(self):
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_agent_message(AIMessageChunk(content="Проверю файл."), source="messages")
+        processor._emit_tool_started({"id": "call-read", "name": "read_file", "args": {"path": "index.html"}})
+        processor._handle_tool_result(ToolMessage(content="ok", tool_call_id="call-read", name="read_file"))
+        processor._handle_agent_message(AIMessageChunk(content="Файл пустой."), source="messages")
+
+        event_types = [event.type for event in events]
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual([payload["full_text"] for payload in deltas], ["Проверю файл.", "Файл пустой."])
+        self.assertIn("assistant_boundary", event_types)
+        self.assertLess(event_types.index("tool_finished"), event_types.index("assistant_boundary"))
+        self.assertLess(event_types.index("assistant_boundary"), event_types.index("assistant_delta", 2))
+
+    def test_stream_processor_removes_previous_step_replay_after_boundary(self):
+        events = []
+        processor = StreamProcessor(events.append)
+        previous = "Рабочая директория почти пустая. Создам автономный шаблон лендинга."
+        processor._handle_agent_message(AIMessageChunk(content=previous), source="messages")
+
+        processor._begin_assistant_stream_section()
+        processor._handle_agent_message(
+            AIMessage(content=f"{previous}\n\nФайл index.html создам с готовым шаблоном."),
+            source="updates_agent",
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        self.assertEqual(deltas[-1]["full_text"], "Файл index.html создам с готовым шаблоном.")
+        self.assertEqual(processor.full_text, "Файл index.html создам с готовым шаблоном.")
 
     def test_stream_processor_suppresses_fuzzy_substring_replay_with_typo(self):
         """updates_agent replays a portion of the visible messages text with a

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from shiboken6 import isValid
@@ -13,8 +12,6 @@ from shiboken6 import isValid
 from core.text_utils import build_tool_ui_labels, format_tool_display
 from ui.theme import ERROR_RED, SUCCESS_GREEN, TEXT_MUTED
 from .foundation import (
-    CLI_EXEC_MIN_VISIBLE_MS,
-    CLI_EXEC_SUCCESS_FLASH_MS,
     CodeBlockWidget,
     CollapsibleSection,
     CopySafePlainTextEdit,
@@ -172,8 +169,6 @@ class ToolCardWidget(QFrame):
         self._args_expanded = False
         self._is_cli_exec = self._is_cli_exec_name(payload.get("name", ""))
         self._cli_expanded = True
-        self._cli_started_at_monotonic = time.monotonic() if self._is_cli_exec else None
-        self._collapse_token = 0
         self._preview_token = 0
 
         layout = QVBoxLayout(self)
@@ -493,20 +488,6 @@ class ToolCardWidget(QFrame):
             return "pending"
         return "active"
 
-    @staticmethod
-    def _compose_finished_subtitle(payload: dict[str, Any]) -> str:
-        summary = _strip_ansi_for_display(payload.get("summary", ""))
-        summary = " ".join(summary.split())
-        subtitle = str(payload.get("subtitle", "") or "").strip()
-        if summary and subtitle and summary.casefold() != subtitle.casefold():
-            return f"{subtitle} · {summary}"
-        if summary:
-            return summary
-        return subtitle
-
-    def _qt_objects_alive(self) -> bool:
-        return isValid(self) and isValid(self.tool_button)
-
     def _set_tool_visible(self, visible: bool) -> None:
         if not isValid(self):
             return
@@ -624,7 +605,6 @@ class ToolCardWidget(QFrame):
         self._ensure_cli_exec_widget().append_output(text, stream=stream)
 
     def update_started_payload(self, payload: dict[str, Any]) -> None:
-        self._cancel_pending_cli_collapse()
         merged_payload = dict(self.payload)
         merged_payload.update(payload)
         self._apply_payload_visual_state(merged_payload)
@@ -632,7 +612,6 @@ class ToolCardWidget(QFrame):
 
         self._is_cli_exec = self._is_cli_exec or self._is_cli_exec_name(self.payload.get("name", ""))
         if self._is_cli_exec:
-            self._cli_started_at_monotonic = time.monotonic()
             cli_exec_widget = self._ensure_cli_exec_widget()
             command = self._command_from_args(self._normalize_args(self.payload.get("args", {})))
             if not command:
@@ -642,7 +621,7 @@ class ToolCardWidget(QFrame):
             self.tool_button.setChecked(True)
             self._set_cli_expanded(True)
 
-    def finish(self, payload: dict[str, Any], *, collapse_delay_ms: int | None = None) -> None:
+    def finish(self, payload: dict[str, Any]) -> None:
         merged_payload = dict(self.payload)
         merged_payload.update(payload)
         merged_payload["phase"] = "finished"
@@ -660,7 +639,6 @@ class ToolCardWidget(QFrame):
 
         self._is_cli_exec = self._is_cli_exec or self._is_cli_exec_name(self.payload.get("name", ""))
         if self._is_cli_exec:
-            self._cancel_pending_cli_collapse()
             cli_exec_widget = self._ensure_cli_exec_widget()
             cli_exec_widget.set_command(self._command_from_args(normalized_args))
             status_text = ""
@@ -730,8 +708,6 @@ class ToolCardWidget(QFrame):
     def _set_cli_expanded(self, expanded: bool) -> None:
         if not self._is_cli_exec:
             return
-        if expanded:
-            self._cancel_pending_cli_collapse()
         self._cli_expanded = expanded
         self.tool_button.setIcon(
             _fa_icon("fa5s.caret-down" if expanded else "fa5s.caret-right", color=TEXT_MUTED, size=8)
@@ -745,40 +721,3 @@ class ToolCardWidget(QFrame):
             event.accept()
             return
         event.ignore()
-
-    def _cancel_pending_cli_collapse(self) -> None:
-        self._collapse_token += 1
-
-    def _next_collapse_token(self) -> int:
-        self._collapse_token += 1
-        return self._collapse_token
-
-    def _schedule_safe_collapse(self, delay_ms: int, token: int) -> None:
-        QTimer.singleShot(
-            max(0, int(delay_ms)),
-            lambda current_token=token: self._safe_collapse(current_token),
-        )
-
-    def _resolve_cli_collapse_delay_ms(self, collapse_delay_ms: int | None) -> int:
-        if collapse_delay_ms is not None:
-            return max(0, int(collapse_delay_ms))
-        started_at = self._cli_started_at_monotonic
-        if started_at is None:
-            return 0
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        return max(0, CLI_EXEC_MIN_VISIBLE_MS - elapsed_ms)
-
-    def _set_cli_success_icon(self) -> None:
-        self.icon_label.setPixmap(_fa_icon("fa5s.check-circle", color=SUCCESS_GREEN, size=7).pixmap(7, 7))
-
-    def _start_cli_success_flash_window(self, token: int) -> None:
-        if not self._qt_objects_alive() or not self._is_cli_exec or token != self._collapse_token:
-            return
-        self._set_cli_success_icon()
-        self._schedule_safe_collapse(CLI_EXEC_SUCCESS_FLASH_MS, token)
-
-    def _safe_collapse(self, token: int) -> None:
-        if not self._qt_objects_alive() or not self._is_cli_exec or token != self._collapse_token:
-            return
-        self.tool_button.setChecked(False)
-        self._set_cli_expanded(False)

@@ -183,7 +183,7 @@ GUI на PySide6 и слой выполнения агента в отдельн
 - `test_tooling_refactor.py`, `test_policy_engine.py`, `test_api_key_rotation.py` - tools, policies и ключи.
 - `test_model_profiles.py`, `test_model_fetcher.py` - профили и загрузка моделей.
 - `test_cli_ux.py`, `test_main_window_facade.py`, `test_ui_helpers.py` - UI и UX.
-- `test_refactor_services.py`, `test_self_correction_engine.py`, `test_critic_graph.py`, `test_mixed_parallel_tools.py`, `test_intent_engine.py`, `test_input_sanitizer.py`, `test_logging_config.py`, `test_session_utils.py` - сервисы ядра и вспомогательная логика.
+- `test_refactor_services.py`, `test_self_correction_engine.py`, `test_critic_graph.py`, `test_mixed_parallel_tools.py`, `test_input_sanitizer.py`, `test_logging_config.py`, `test_session_utils.py` - сервисы ядра и вспомогательная логика.
 
 ## Основной поток выполнения
 

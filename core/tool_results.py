@@ -1,6 +1,6 @@
 import re
-from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any
 
 from core.message_utils import stringify_content
 
@@ -14,9 +14,6 @@ class ToolExecutionResult:
     error_type: str = ""
     message: str = ""
     retryable: bool = False
-
-    def to_event_payload(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 def parse_tool_execution_result(raw: Any) -> ToolExecutionResult:

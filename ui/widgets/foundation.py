@@ -38,8 +38,6 @@ COMPOSER_MENTION_MAX_ITEMS = 50
 COMPOSER_MENTION_EXCLUDED_DIRS = {".git", "venv", "__pycache__", ".agent_state", "dist"}
 COMPOSER_MENTION_POPUP_MIN_WIDTH = 560
 COMPOSER_MENTION_POPUP_MAX_WIDTH = 700
-CLI_EXEC_MIN_VISIBLE_MS = 800
-CLI_EXEC_SUCCESS_FLASH_MS = 250
 DIFF_ADD_LINE_BG = QColor("#1E3425")
 DIFF_REMOVE_LINE_BG = QColor("#472B2B")
 
@@ -189,6 +187,8 @@ class SummaryProgressRing(QWidget):
         self._threshold = 0
         self._remaining_tokens = 0
         self._reserved_tokens = 0
+        self._summary_tokens = 0
+        self._provider_input_tokens = 0
         self._will_summarize = False
         self.setObjectName("SummaryProgressRing")
         self.setFixedSize(18, 18)
@@ -206,12 +206,16 @@ class SummaryProgressRing(QWidget):
         estimated = max(0, int(data.get("estimated_tokens", 0) or 0))
         remaining = max(0, int(data.get("remaining_tokens", max(0, threshold - estimated)) or 0))
         reserved = max(0, int(data.get("reserved_tokens", 0) or 0))
+        summary_tokens = max(0, int(data.get("summary_tokens", 0) or 0))
+        provider_input_tokens = max(0, int(data.get("provider_input_tokens", 0) or 0))
         progress = float(data.get("progress", (estimated / threshold) if threshold else 0.0) or 0.0)
 
         self._threshold = threshold
         self._estimated_tokens = estimated
         self._remaining_tokens = remaining
         self._reserved_tokens = reserved
+        self._summary_tokens = summary_tokens
+        self._provider_input_tokens = provider_input_tokens
         self._progress = max(0.0, min(1.0, progress))
         self._will_summarize = bool(data.get("will_summarize"))
         self.setVisible(threshold > 0)
@@ -226,17 +230,28 @@ class SummaryProgressRing(QWidget):
             if self._reserved_tokens > 0
             else ""
         )
+        summary_line = (
+            f"\nIncludes ~{self._summary_tokens:,} estimated tokens from compressed memory."
+            if self._summary_tokens > 0
+            else ""
+        )
+        provider_line = (
+            f"\nLast model input: {self._provider_input_tokens:,} provider-reported tokens "
+            "(may include images and provider-specific overhead)."
+            if self._provider_input_tokens > 0
+            else ""
+        )
         if self._will_summarize:
             return (
                 "Auto-summary is ready for the next agent step.\n"
                 f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens."
-                f"{reserve_line}"
+                f"{reserve_line}{summary_line}{provider_line}"
             )
         return (
             f"Auto-summary: {self._remaining_tokens:,} estimated tokens left.\n"
             f"Context estimate: {self._estimated_tokens:,} / {self._threshold:,} tokens.\n"
             "A soft guard may delay compression until there is enough older context to summarize."
-            f"{reserve_line}"
+            f"{reserve_line}{summary_line}{provider_line}"
         )
 
     def paintEvent(self, event) -> None:  # type: ignore[override]

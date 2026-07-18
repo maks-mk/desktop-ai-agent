@@ -9,6 +9,7 @@ from core.state import AgentState
 from core.summarize_policy import (
     choose_summary_boundary,
     estimate_context_tokens,
+    estimate_summary_tokens,
     format_history_for_summary,
     should_summarize,
 )

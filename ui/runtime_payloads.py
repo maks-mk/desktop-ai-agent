@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,7 @@ from core.session_store import (
     SessionStore,
     normalize_project_path,
 )
-from core.summarize_policy import estimate_context_tokens, should_summarize
+from core.summarize_policy import estimate_context_tokens, estimate_summary_tokens, should_summarize
 from core.text_utils import build_mcp_tool_ui_labels, build_tool_ui_labels, format_tool_output, prepare_markdown_for_render
 from core.tool_args import canonicalize_tool_args
 from core.tool_policy import ToolMetadata
@@ -176,27 +177,46 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _provider_input_tokens(token_usage: Any) -> int:
+    usage = token_usage if isinstance(token_usage, dict) else {}
+    for key in ("input_tokens", "prompt_tokens", "prompt_token_count", "input_token_count"):
+        if key in usage:
+            return max(0, _safe_int(usage.get(key), 0))
+    output_tokens = 0
+    for key in ("output_tokens", "completion_tokens", "completion_token_count", "output_token_count"):
+        if key in usage:
+            output_tokens = max(0, _safe_int(usage.get(key), 0))
+            break
+    total_tokens = max(0, _safe_int(usage.get("total_tokens"), 0))
+    return max(0, total_tokens - output_tokens) if total_tokens else 0
+
+
 def build_summary_progress_payload(config: AgentConfig, state_values: dict[str, Any] | None) -> dict[str, Any]:
     values = state_values if isinstance(state_values, dict) else {}
     messages = list(values.get("messages", []) or [])
     threshold = max(0, _safe_int(getattr(config, "summary_threshold", 0), 0))
     reserved_tokens = max(0, _safe_int(getattr(config, "summary_reserved_tokens", 0), 0))
-    estimated_tokens = estimate_context_tokens(messages, reserved_tokens=reserved_tokens)
+    summary_text = str(values.get("summary") or "").strip()
+    summary_tokens = estimate_summary_tokens(summary_text)
+    effective_reserved_tokens = reserved_tokens + summary_tokens
+    estimated_tokens = estimate_context_tokens(messages, reserved_tokens=effective_reserved_tokens)
     progress = (estimated_tokens / threshold) if threshold else 0.0
-    has_summary = bool(str(values.get("summary") or "").strip())
+    has_summary = bool(summary_text)
     keep_last = _safe_int(getattr(config, "summary_keep_last", 0), 0)
     will_summarize = should_summarize(
         messages,
         threshold=threshold,
         keep_last=keep_last,
         has_summary=has_summary,
-        reserved_tokens=reserved_tokens,
+        reserved_tokens=effective_reserved_tokens,
     ) if messages and threshold > 0 else False
     return {
         "estimated_tokens": estimated_tokens,
         "threshold": threshold,
         "remaining_tokens": max(0, threshold - estimated_tokens),
         "reserved_tokens": reserved_tokens if messages else 0,
+        "summary_tokens": summary_tokens,
+        "provider_input_tokens": _provider_input_tokens(values.get("token_usage")),
         "progress": max(0.0, min(1.0, progress)),
         "message_count": len(messages),
         "has_summary": has_summary,
@@ -334,6 +354,47 @@ def _extract_ai_text(message: AIMessage | AIMessageChunk) -> str:
     return _extract_visible_text(message.content).strip()
 
 
+def _normalized_visible_text(text: str) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _assistant_replay_remainder(previous: str, incoming: str) -> str | None:
+    previous_normalized = _normalized_visible_text(previous)
+    incoming_normalized = _normalized_visible_text(incoming)
+    if not previous_normalized or not incoming_normalized:
+        return None
+    if incoming.startswith(previous):
+        return incoming[len(previous) :].lstrip()
+    if incoming_normalized == previous_normalized:
+        return ""
+
+    best_index: int | None = None
+    for match in re.finditer(r"\S+", incoming):
+        prefix = incoming[: match.end()]
+        prefix_normalized = _normalized_visible_text(prefix)
+        if not prefix_normalized:
+            continue
+        if previous_normalized.startswith(prefix_normalized):
+            best_index = match.end()
+            continue
+        if prefix_normalized.startswith(previous_normalized):
+            return incoming[best_index if best_index is not None else match.end() :].lstrip()
+        if len(prefix_normalized) >= min(len(previous_normalized), 80):
+            similarity = difflib.SequenceMatcher(None, previous_normalized, prefix_normalized).quick_ratio()
+            if similarity >= 0.94:
+                best_index = match.end()
+
+    if best_index is not None:
+        replayed_prefix = _normalized_visible_text(incoming[:best_index])
+        significant_replay = (
+            len(replayed_prefix) >= min(len(previous_normalized), 48)
+            or len(replayed_prefix) >= int(len(previous_normalized) * 0.8)
+        )
+        if significant_replay:
+            return incoming[best_index:].lstrip()
+    return None
+
+
 def _diff_from_tool_content(content: str) -> str:
     match = DIFF_BLOCK_RE.search(content or "")
     return match.group(1).strip() if match else ""
@@ -386,6 +447,16 @@ def build_transcript_payload(
                 continue
             text = _extract_ai_text(message)
             if text.strip():
+                text = text.strip()
+                if getattr(message, "tool_calls", None):
+                    current_turn["_last_assistant_before_tool"] = text
+                elif current_turn.get("_after_tool") and current_turn.get("_last_assistant_before_tool"):
+                    remainder = _assistant_replay_remainder(
+                        str(current_turn.get("_last_assistant_before_tool") or ""),
+                        text,
+                    )
+                    if remainder is not None:
+                        text = remainder
                 markdown = prepare_markdown_for_render(text.strip())
                 if markdown:
                     current_turn["blocks"].append(
@@ -425,6 +496,7 @@ def build_transcript_payload(
                 )
             else:
                 labels = build_tool_ui_labels(tool_name, tool_args, phase="finished", is_error=is_error)
+            current_turn["_after_tool"] = True
             current_turn["blocks"].append(
                 {
                     "type": "tool",
@@ -447,6 +519,10 @@ def build_transcript_payload(
                     },
                 }
             )
+
+    for turn in turns:
+        turn.pop("_after_tool", None)
+        turn.pop("_last_assistant_before_tool", None)
 
     if normalized_last_run_stats and turns:
         last_turn = turns[-1]
@@ -490,10 +566,6 @@ def find_state_snapshot_interrupt_payload(state_snapshot, *, choice_types: set[s
             if choice_types is None or choice_type in choice_types:
                 return value
     return None
-
-
-def state_snapshot_has_interrupt(state_snapshot, *, choice_type: str) -> bool:
-    return find_state_snapshot_interrupt_payload(state_snapshot, choice_types={choice_type}) is not None
 
 
 async def load_state_values(agent_app, thread_id: str) -> dict[str, Any]:
@@ -634,6 +706,7 @@ async def build_ui_payload(
         model_capabilities if model_capabilities is not None else getattr(tool_registry, "model_capabilities", None),
     )
     state_values: dict[str, Any] = {}
+    state_snapshot = None
     if agent_app is not None:
         try:
             state_snapshot = await load_state_snapshot(agent_app, snapshot.thread_id)

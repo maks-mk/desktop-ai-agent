@@ -34,6 +34,7 @@ from ui.runtime_payloads import (
     build_ui_payload,
     build_user_choice_payload,
     close_runtime_resources,
+    load_state_values,
     normalize_approval_mode,
 )
 from ui.runtime_session import RuntimeSessionCoordinator
@@ -144,6 +145,8 @@ class AgentRunWorker(QObject):
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
         self._active_summary_reserved_tokens = 0
+        self._active_summary_memory_tokens = 0
+        self._active_provider_input_tokens = 0
         self._coordinator = RuntimeSessionCoordinator(self)
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -311,20 +314,30 @@ class AgentRunWorker(QObject):
         if str(payload.get("kind", "") or "") != "auto_summary":
             return
 
-        threshold = max(0, int(getattr(self.config, "summary_threshold", 0) or 0))
-        reserved = max(0, int(getattr(self.config, "summary_reserved_tokens", 0) or 0))
-        estimated = reserved if threshold > 0 else 0
-        self._active_summary_estimated_tokens = estimated
-        self._active_summary_message_count = max(1, int(getattr(self.config, "summary_keep_last", 0) or 0))
-        self._active_summary_has_summary = True
-        self._active_summary_reserved_tokens = reserved if estimated else 0
         if self.current_session is not None:
             self.current_session.last_run_stats = ""
             try:
                 self.store.save_active_session(self.current_session, touch=False, set_active=True)
             except Exception:
                 logger.debug("Failed to persist cleared run stats after auto-summary.", exc_info=True)
-        self.event_emitted.emit(StreamEvent("summary_progress", self._build_live_summary_progress_payload()))
+        self._refresh_live_summary_progress_from_state_soon()
+
+    def _refresh_live_summary_progress_from_state_soon(self) -> None:
+        if self.config is None or self.agent_app is None or self.current_session is None:
+            return
+
+        async def _refresh() -> None:
+            await self._reset_live_summary_progress_from_state(emit=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(lambda: asyncio.create_task(_refresh()))
+                return
+            self._run(_refresh())
+            return
+        loop.create_task(_refresh())
 
     def _maybe_emit_live_summary_progress(self, event: StreamEvent) -> None:
         if event.type != "tool_finished" or self.config is None:
@@ -351,6 +364,8 @@ class AgentRunWorker(QObject):
             "threshold": threshold,
             "remaining_tokens": max(0, threshold - estimated),
             "reserved_tokens": max(0, int(self._active_summary_reserved_tokens or 0)),
+            "summary_tokens": max(0, int(self._active_summary_memory_tokens or 0)),
+            "provider_input_tokens": max(0, int(self._active_provider_input_tokens or 0)),
             "progress": max(0.0, min(1.0, (estimated / threshold) if threshold else 0.0)),
             "message_count": max(0, int(self._active_summary_message_count or 0)),
             "has_summary": bool(self._active_summary_has_summary),
@@ -359,11 +374,13 @@ class AgentRunWorker(QObject):
             "live": True,
         }
 
-    async def _reset_live_summary_progress_from_state(self) -> None:
+    async def _reset_live_summary_progress_from_state(self, *, emit: bool = False) -> None:
         self._active_summary_estimated_tokens = 0
         self._active_summary_message_count = 0
         self._active_summary_has_summary = False
         self._active_summary_reserved_tokens = 0
+        self._active_summary_memory_tokens = 0
+        self._active_provider_input_tokens = 0
         if self.config is None or self.agent_app is None or self.current_session is None:
             return
         try:
@@ -378,6 +395,10 @@ class AgentRunWorker(QObject):
         self._active_summary_message_count = max(0, int(progress.get("message_count", 0) or 0))
         self._active_summary_has_summary = bool(progress.get("has_summary"))
         self._active_summary_reserved_tokens = max(0, int(progress.get("reserved_tokens", 0) or 0))
+        self._active_summary_memory_tokens = max(0, int(progress.get("summary_tokens", 0) or 0))
+        self._active_provider_input_tokens = max(0, int(progress.get("provider_input_tokens", 0) or 0))
+        if emit:
+            self.event_emitted.emit(StreamEvent("summary_progress", self._build_live_summary_progress_payload()))
 
     @Slot()
     def initialize(self) -> None:

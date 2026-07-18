@@ -21,6 +21,7 @@ class ProtocolMixin:
         *,
         kind: str,
         ui_notice: str = "",
+        silent: bool = False,
     ) -> AIMessage:
         metadata = dict(getattr(message, "additional_kwargs", {}) or {})
         internal = dict(metadata.get("agent_internal") or {})
@@ -29,6 +30,8 @@ class ProtocolMixin:
         notice_text = str(ui_notice or "").strip()
         if notice_text:
             internal["ui_notice"] = notice_text
+        if silent:
+            internal["silent_in_ui"] = True
         metadata["agent_internal"] = internal
         return message.model_copy(update={"additional_kwargs": metadata})
 

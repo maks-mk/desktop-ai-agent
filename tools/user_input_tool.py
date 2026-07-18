@@ -39,9 +39,7 @@ class RequestUserInputInput(BaseModel):
     )
     choice_type: str = Field(
         default="clarification",
-        description=(
-            "Machine-readable reason for the choice prompt: clarification, plan_approval, or plan_revision."
-        ),
+        description="Machine-readable reason for the choice prompt: clarification.",
     )
 
     @model_validator(mode="before")
@@ -96,8 +94,8 @@ class RequestUserInputInput(BaseModel):
         if self.recommended and self.recommended not in self.options:
             raise ValueError("recommended must match one of the options exactly.")
 
-        if self.choice_type not in {"clarification", "plan_approval", "plan_revision"}:
-            raise ValueError("choice_type must be clarification, plan_approval, or plan_revision.")
+        if self.choice_type != "clarification":
+            raise ValueError("choice_type must be clarification.")
 
         return self
 

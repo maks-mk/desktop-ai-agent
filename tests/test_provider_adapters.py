@@ -41,6 +41,7 @@ from core.providers.gemini import (
 from core.reasoning_debug import preview_value
 from core.providers.openai_reasoning import (
     _build_reasoning_debug_chat_openai,
+    _normalize_responses_text_delta,
     _safe_openai_model_dump,
     create_openai_chat_model,
 )
@@ -248,6 +249,56 @@ class OpenAIAdapterStructureTests(unittest.TestCase):
         self.assertTrue(hasattr(cls, "_astream"))
         self.assertTrue(hasattr(cls, "_log_raw_provider_chunk"))
         self.assertTrue(hasattr(cls, "_attach_raw_reasoning_delta"))
+        self.assertTrue(hasattr(cls, "_attach_reasoning_content"))
+
+    @staticmethod
+    def _responses_text_event(delta):
+        from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
+
+        return ResponseTextDeltaEvent.model_construct(
+            content_index=0,
+            delta=delta,
+            item_id="msg-1",
+            output_index=0,
+            sequence_number=0,
+            type="response.output_text.delta",
+        )
+
+    def test_responses_block_delta_is_split_into_visible_and_reasoning_text(self):
+        event = self._responses_text_event(
+            [
+                {"type": "thinking", "thinking": [{"type": "text", "text": "Consider "}]},
+                {"type": "reasoning", "reasoning": "carefully."},
+                {"type": "text", "text": "Visible answer"},
+            ]
+        )
+
+        normalized, reasoning = _normalize_responses_text_delta(event)
+
+        self.assertEqual(normalized.delta, "Visible answer")
+        self.assertEqual(reasoning, "Consider carefully.")
+
+    def test_responses_thinking_only_delta_becomes_empty_visible_text(self):
+        event = self._responses_text_event(
+            [{"type": "thinking", "thinking": [{"type": "text", "text": "Hidden"}]}]
+        )
+
+        normalized, reasoning = _normalize_responses_text_delta(event)
+
+        self.assertEqual(normalized.delta, "")
+        self.assertEqual(reasoning, "Hidden")
+
+    def test_safe_openai_model_dump_suppresses_mismatched_delta_warning(self):
+        event = self._responses_text_event(
+            [{"type": "thinking", "thinking": [{"type": "text", "text": "Let"}]}]
+        )
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            dumped = _safe_openai_model_dump(event)
+
+        self.assertEqual(captured, [])
+        self.assertIsInstance(dumped["delta"], list)
 
     def test_safe_openai_model_dump_excludes_structured_parsed_without_warning(self):
         class FakeParsedPayload(BaseModel):

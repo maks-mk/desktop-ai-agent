@@ -55,6 +55,8 @@ class UiHelperTests(unittest.TestCase):
                 "threshold": 8000,
                 "remaining_tokens": 1600,
                 "reserved_tokens": 3000,
+                "summary_tokens": 850,
+                "provider_input_tokens": 229094,
                 "progress": 0.8,
                 "will_summarize": False,
             }
@@ -64,6 +66,8 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("1,600", ring.toolTip())
         self.assertIn("6,400 / 8,000", ring.toolTip())
         self.assertIn("3,000 reserved", ring.toolTip())
+        self.assertIn("850 estimated tokens from compressed memory", ring.toolTip())
+        self.assertIn("229,094 provider-reported tokens", ring.toolTip())
 
     def test_composer_file_index_refreshes_empty_mention_after_directory_change(self):
         composer = ComposerTextEdit()

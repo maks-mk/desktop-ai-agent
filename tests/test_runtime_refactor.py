@@ -1,4 +1,5 @@
 import json
+import asyncio
 import os
 import shutil
 import sqlite3
@@ -961,6 +962,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     OPENAI_API_KEY="sk-test",
                     OPENAI_MODEL="gpt-5-mini",
                     OPENAI_BASE_URL="https://api.openai.com/v1",
+                    LLM_API_MODE="responses",
                 )
             )
 
@@ -981,6 +983,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     OPENAI_MODEL="gpt-5-mini",
                     OPENAI_BASE_URL="https://api.openai.com/v1",
                     SHOW_MODEL_THOUGHTS=False,
+                    LLM_API_MODE="responses",
                 )
             )
 
@@ -1232,6 +1235,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     OPENAI_MODEL="bbl/gemini-3.5-flash",
                     OPENAI_BASE_URL="https://api.freetheai.xyz/v1",
                     MODEL_REASONING_EFFORT="xhigh",
+                    LLM_API_MODE="responses",
                 )
             )
 
@@ -1254,6 +1258,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
                     OPENAI_MODEL="wsf/kimi-k2.6",
                     OPENAI_BASE_URL="https://api.freetheai.xyz/v1",
                     MODEL_REASONING_EFFORT="high",
+                    LLM_API_MODE="responses",
                 )
             )
 
@@ -2658,14 +2663,24 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["threshold"], 100)
         self.assertTrue(payload["live"])
 
-    def test_worker_resets_summary_progress_immediately_after_auto_summary(self):
+    async def test_worker_resets_summary_progress_from_checkpoint_after_auto_summary(self):
+        checkpoint_values = {
+            "summary": "compressed earlier messages",
+            "messages": [HumanMessage(content="recent user message"), AIMessage(content="recent answer")],
+        }
         worker = gui_runtime.AgentRunWorker()
         worker.config = SimpleNamespace(
             summary_threshold=40000,
             summary_keep_last=4,
             summary_reserved_tokens=3000,
         )
-        worker.current_session = SimpleNamespace(last_run_stats="31.8s  ↓ 15921  ↑ 574")
+        worker.agent_app = SimpleNamespace(
+            get_state=lambda _config: SimpleNamespace(values=checkpoint_values),
+        )
+        worker.current_session = SimpleNamespace(
+            thread_id="thread-1",
+            last_run_stats="31.8s  ↓ 15921  ↑ 574",
+        )
         worker.store = SimpleNamespace(save_active_session=lambda *_args, **_kwargs: None)
         worker._active_summary_estimated_tokens = 57731
         worker._active_summary_message_count = 40
@@ -2675,12 +2690,15 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         worker.event_emitted.connect(emitted.append)
 
         worker._emit_stream_event(StreamEvent("summary_notice", {"kind": "auto_summary", "count": 12}))
+        await asyncio.sleep(0)
 
         progress_events = [event for event in emitted if event.type == "summary_progress"]
         self.assertEqual(len(progress_events), 1)
         payload = progress_events[0].payload
-        self.assertEqual(payload["estimated_tokens"], 3000)
-        self.assertEqual(payload["remaining_tokens"], 37000)
+        self.assertGreater(payload["estimated_tokens"], 3000)
+        self.assertNotEqual(payload["estimated_tokens"], payload["reserved_tokens"])
+        self.assertLess(payload["remaining_tokens"], 37000)
+        self.assertEqual(payload["message_count"], 2)
         self.assertTrue(payload["has_summary"])
         self.assertTrue(payload["live"])
         self.assertEqual(worker.current_session.last_run_stats, "")

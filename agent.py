@@ -118,7 +118,10 @@ def create_agent_workflow(
                 return "recovery"
             pending_ai_with_tools = nodes._get_last_pending_ai_with_tool_calls(messages)
             if isinstance(pending_ai_with_tools, AIMessage) and pending_ai_with_tools.tool_calls:
-                if approval_enabled and nodes.tool_calls_require_approval(pending_ai_with_tools.tool_calls):
+                if (
+                    approval_enabled
+                    and nodes.tool_calls_require_approval(pending_ai_with_tools.tool_calls)
+                ):
                     return "approval"
                 return "tools"
             logger.warning(
@@ -148,12 +151,24 @@ def create_agent_workflow(
         if approval_enabled:
             agent_routes.insert(0, "approval")
             workflow.add_edge("approval", "tools")
-        workflow.add_conditional_edges("agent", route_after_agent, agent_routes)
+        workflow.add_conditional_edges(
+            "agent",
+            route_after_agent,
+            agent_routes,
+        )
         workflow.add_conditional_edges("tools", route_after_tools, ["recovery", "update_step"])
     else:
-        workflow.add_conditional_edges("agent", route_after_agent, ["recovery", END])
+        workflow.add_conditional_edges(
+            "agent",
+            route_after_agent,
+            ["recovery", END],
+        )
 
-    workflow.add_conditional_edges("recovery", route_after_recovery, ["update_step", END])
+    workflow.add_conditional_edges(
+        "recovery",
+        route_after_recovery,
+        ["update_step", END],
+    )
 
     return workflow
 

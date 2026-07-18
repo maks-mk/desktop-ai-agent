@@ -64,6 +64,7 @@ class RuntimePromptPolicyBuilder:
     )
     def __init__(self, *, config: AgentConfig) -> None:
         self.config = config
+        self._execution_environment = self._detect_execution_environment()
 
     def build_messages(self, context: RuntimePromptContext) -> List[SystemMessage]:
         messages: List[SystemMessage] = [
@@ -99,15 +100,16 @@ class RuntimePromptPolicyBuilder:
         return messages
 
     def _build_runtime_contract(self, context: RuntimePromptContext) -> str:
-        environment = self._detect_execution_environment()
+        environment = self._execution_environment_for_prompt()
+        location_lines = [f"Workspace: {environment.workspace_root}"]
+        if environment.current_working_directory != environment.workspace_root:
+            location_lines.append(f"Working directory: {environment.current_working_directory}")
         lines = [
             "RUNTIME CONTRACT:",
-            "You operate in a terminal (CLI) environment without GUI.",
+            "CLI only; no GUI.",
             self._build_execution_environment_line(environment),
-            f"Workspace root: {environment.workspace_root}",
-            f"Current working directory: {environment.current_working_directory}",
-            f"Local timezone: {environment.timezone_name} ({environment.utc_offset})",
-            f"Current date: {datetime.now().strftime('%Y-%m-%d')}",
+            *location_lines,
+            f"Local time: {environment.timezone_name} ({environment.utc_offset}); date={datetime.now().strftime('%Y-%m-%d')}.",
         ]
         current_task = compact_text(str(context.current_task or "").strip(), 240)
         if current_task:
@@ -170,6 +172,20 @@ class RuntimePromptPolicyBuilder:
             current_working_directory=workspace_root,
             timezone_name=self._detect_timezone_name(now),
             utc_offset=self._format_utc_offset(now),
+        )
+
+    def _execution_environment_for_prompt(self) -> RuntimeExecutionEnvironment:
+        current_directory = str(Path.cwd().resolve())
+        if current_directory == self._execution_environment.current_working_directory:
+            return self._execution_environment
+        return RuntimeExecutionEnvironment(
+            os_family=self._execution_environment.os_family,
+            shell_family=self._execution_environment.shell_family,
+            path_style=self._execution_environment.path_style,
+            workspace_root=current_directory,
+            current_working_directory=current_directory,
+            timezone_name=self._execution_environment.timezone_name,
+            utc_offset=self._execution_environment.utc_offset,
         )
 
     @staticmethod

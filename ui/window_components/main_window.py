@@ -256,6 +256,7 @@ class MainWindow(QMainWindow):
                 "run_started": self._on_run_started,
                 "status_changed": self._on_status_changed,
                 "assistant_delta": self._on_assistant_delta,
+                "assistant_boundary": self._on_assistant_boundary,
                 "tool_started": self._on_tool_started,
                 "cli_output": self._on_cli_output,
                 "tool_finished": self._on_tool_finished,
@@ -361,6 +362,13 @@ class MainWindow(QMainWindow):
 
         self._last_assistant_delta_text = full_text
         self._queue_assistant_delta({"full_text": full_text}, force=sequence_reset)
+
+    def _on_assistant_boundary(self, _payload: dict) -> None:
+        self._flush_pending_assistant_delta()
+        self._last_assistant_delta_text = ""
+        if self.current_turn is not None:
+            self.current_turn.begin_assistant_block()
+            self.transcript.notify_content_changed()
 
     def _assistant_delta_sequence_reset_is_new_content(self, full_text: str) -> bool:
         previous = self._last_assistant_delta_text
@@ -820,7 +828,10 @@ class MainWindow(QMainWindow):
             self._show_composer_notice(sanitize_notice, level="warning")
         else:
             self._clear_composer_notice()
-        request_payload = {"text": text, "attachments": attachments}
+        request_payload = {
+            "text": text,
+            "attachments": attachments,
+        }
         self._clear_draft_image_attachments()
         self.controller.start_run(request_payload)
         self._set_input_enabled(False)
