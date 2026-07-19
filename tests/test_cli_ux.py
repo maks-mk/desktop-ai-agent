@@ -195,7 +195,7 @@ class GuiUxTests(unittest.TestCase):
         )
 
         turn.set_assistant_markdown(preface)
-        turn.start_tool({"tool_id": "search-graph", "name": "search_in_directory", "args": {"pattern": "StateGraph"}})
+        turn.start_tool({"tool_id": "search-graph", "name": "list_directory", "args": {"path": "core"}})
         turn.set_assistant_markdown(
             "Поиск по коду не нашёл прямого использования `StateGraph` в `.py` файлах — только логи. "
             "Поищу шире: файлы графа, импорты `langgraph`, и параллельно запрошу документацию. "
@@ -214,7 +214,7 @@ class GuiUxTests(unittest.TestCase):
         preface = "Посмотрю конфигурацию лимитов и логику self-correction."
 
         turn.set_assistant_markdown(preface)
-        turn.start_tool({"tool_id": "search-config", "name": "search_in_directory", "args": {"pattern": "self_correction"}})
+        turn.start_tool({"tool_id": "search-config", "name": "list_directory", "args": {"path": "core"}})
         turn.set_assistant_markdown(preface)
 
         self.assertEqual(turn.block_kinds(), ["user", "assistant", "tool_group"])

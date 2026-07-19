@@ -87,7 +87,7 @@ class ToolGroupWidget(QFrame):
             return "read"
         if name in {"execute", "RunCommand", "cli_exec"}:
             return "command"
-        if name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+        if name in {"grep", "Grep", "glob", "Glob"}:
             return "search"
         if name in {"web_search", "WebSearch", "batch_web_search"}:
             return "network"

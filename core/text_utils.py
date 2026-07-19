@@ -278,7 +278,7 @@ def _format_url_tool(tool_name: str, tool_args: Dict[str, Any]) -> str | None:
 DISPLAY_RULES: tuple[tuple[set[str], Callable[[str, Dict[str, Any]], str | None]], ...] = (
     ({"read_file", "write_file", "edit_file", "Read", "Write", "SearchReplace"}, _format_path_tool),
     ({"web_search", "WebSearch", "batch_web_search"}, _format_query_tool),
-    ({"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}, _format_pattern_tool),
+    ({"grep", "Grep", "glob", "Glob"}, _format_pattern_tool),
     ({"execute", "RunCommand", "cli_exec"}, _format_command_tool),
     ({"ls", "LS", "list_directory"}, _format_list_tool),
     ({"fetch_url", "WebFetch", "fetch_content", "download_file"}, _format_url_tool),
@@ -309,7 +309,7 @@ def classify_tool_args_state(tool_name: str, tool_args: Dict[str, Any]) -> str:
         anchor_keys = ("query",)
     elif tool_name == "batch_web_search":
         anchor_keys = ("queries",)
-    elif tool_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+    elif tool_name in {"grep", "Grep", "glob", "Glob"}:
         anchor_keys = ("pattern", "name_pattern")
     elif tool_name in {"execute", "RunCommand", "cli_exec"}:
         anchor_keys = ("command",)
@@ -399,7 +399,7 @@ def tool_target_summary(tool_name: str, tool_args: Dict[str, Any]) -> str:
     if normalized_name == "batch_web_search":
         query = _first_non_empty_item(args.get("queries"))
         return truncate_value(_single_line_preview(query), 80) if query else ""
-    if normalized_name in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+    if normalized_name in {"grep", "Grep", "glob", "Glob"}:
         pattern_val = args.get("pattern") or args.get("name_pattern")
         return truncate_value(_single_line_preview(pattern_val), 70) if pattern_val else ""
     if normalized_name in {"execute", "RunCommand", "cli_exec"}:
@@ -440,9 +440,6 @@ def build_tool_ui_labels(
         "Grep": "Searching files",
         "glob": "Finding files",
         "Glob": "Finding files",
-        "search_in_file": "Searching file",
-        "search_in_directory": "Searching directory",
-        "find_file": "Finding file",
         "fetch_url": "Fetching URL",
         "WebFetch": "Fetching URL",
         "fetch_content": "Fetching content",
@@ -468,9 +465,6 @@ def build_tool_ui_labels(
         "Grep": "Preparing search",
         "glob": "Preparing file search",
         "Glob": "Preparing file search",
-        "search_in_file": "Preparing file search",
-        "search_in_directory": "Preparing directory search",
-        "find_file": "Preparing file search",
         "fetch_url": "Preparing fetch",
         "WebFetch": "Preparing fetch",
         "fetch_content": "Preparing fetch",

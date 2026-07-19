@@ -63,9 +63,6 @@ class AgentNodes(
         {
             "read_file",
             "list_directory",
-            "search_in_file",
-            "search_in_directory",
-            "find_file",
             "web_search",
             "fetch_content",
             "batch_web_search",
@@ -80,9 +77,6 @@ class AgentNodes(
     READ_ONLY_LOOP_TOLERANT_TOOL_NAMES = frozenset(
         {
             "read_file",
-            "search_in_file",
-            "search_in_directory",
-            "find_file",
             "list_directory",
             "web_search",
             "fetch_content",

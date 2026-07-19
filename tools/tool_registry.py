@@ -116,9 +116,6 @@ class ToolRegistry:
                     "safe_delete_file",
                     "safe_delete_directory",
                     "download_file",
-                    #"search_in_file_tool",
-                    #"search_in_directory_tool",
-                    #"find_file_tool",
                 ),
                 configure=self._configure_safety,
                 metadata={
@@ -148,11 +145,6 @@ class ToolRegistry:
                         networked=True,
                         requires_approval=True,
                     ),
-                    "search_in_file_tool": ToolMetadata(name="search_in_file", read_only=True),
-                    "search_in_directory_tool": ToolMetadata(
-                        name="search_in_directory", read_only=True
-                    ),
-                    "find_file_tool": ToolMetadata(name="find_file", read_only=True),
                 },
             ),
             ToolLoaderSpec(

@@ -31,21 +31,8 @@ class FilesystemBackend(Protocol):
     def write_file(self, path: str, content: str) -> str: ...
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
     def list_files(self, path: str = ".", include_hidden: bool = False) -> str: ...
-    def search_in_file(self, path: str, pattern: str, use_regex: bool = False, ignore_case: bool = False) -> str: ...
-    def search_in_directory(
-        self,
-        path: str,
-        pattern: str,
-        use_regex: bool = False,
-        ignore_case: bool = False,
-        extensions: Optional[str] = None,
-        max_matches: int = 500,
-        max_files: int = 200,
-        max_depth: Optional[int] = None,
-    ) -> str: ...
     def delete_file(self, path: str) -> str: ...
     def delete_directory(self, path: str, recursive: bool = False) -> str: ...
-    def find_files(self, path: str, name_pattern: str, max_results: int = 200, max_depth: Optional[int] = None) -> str: ...
 
 
 FilesystemManager = _FilesystemManager
@@ -366,36 +353,6 @@ def list_directory_tool(path: str = ".", include_hidden: bool = False) -> str:
     return _get_synced_backend().list_files(path, include_hidden)
 
 
-@tool("search_in_file")
-def search_in_file_tool(path: str, pattern: str, use_regex: bool = False, ignore_case: bool = False) -> str:
-    """Search text or regex in one file."""
-    return _get_synced_backend().search_in_file(path, pattern, use_regex, ignore_case)
-
-
-@tool("search_in_directory")
-def search_in_directory_tool(
-    pattern: str,
-    path: str = ".",
-    use_regex: bool = False,
-    ignore_case: bool = False,
-    extensions: Optional[str] = None,
-    max_matches: int = 500,
-    max_files: int = 200,
-    max_depth: Optional[int] = None,
-) -> str:
-    """Search text or regex across a directory."""
-    return _get_synced_backend().search_in_directory(
-        path,
-        pattern,
-        use_regex,
-        ignore_case,
-        extensions,
-        max_matches,
-        max_files,
-        max_depth,
-    )
-
-
 @tool("safe_delete_file", args_schema=DeleteFileInput)
 async def safe_delete_file(path: str | None = None, **kwargs: Any) -> str:
     """Delete a workspace file."""
@@ -512,12 +469,6 @@ async def download_file(url: str, filename: Optional[str] = None) -> str:
         return format_error(ErrorType.EXECUTION, f"Error downloading file: {exc}")
 
 
-@tool("find_file")
-def find_file_tool(name_pattern: str, path: str = ".", max_results: int = 200, max_depth: Optional[int] = None) -> str:
-    """Find files by name pattern."""
-    return _get_synced_backend().find_files(path, name_pattern, max_results, max_depth)
-
-
 __all__ = [
     "FilesystemManager",
     "FilesystemBackend",
@@ -531,12 +482,9 @@ __all__ = [
     "write_file_tool",
     "edit_file_tool",
     "list_directory_tool",
-    "search_in_file_tool",
-    "search_in_directory_tool",
     "safe_delete_file",
     "safe_delete_directory",
     "download_file",
-    "find_file_tool",
     "_DOWNLOAD_HEADERS",
     "_format_download_http_error",
 ]

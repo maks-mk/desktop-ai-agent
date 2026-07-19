@@ -39,9 +39,6 @@ _CANONICAL_PATH_TOOL_NAMES = frozenset(
         "write_file",
         "edit_file",
         "list_directory",
-        "search_in_file",
-        "search_in_directory",
-        "find_file",
         "safe_delete_file",
         "safe_delete_directory",
     }
@@ -141,17 +138,17 @@ def _choose_context_refresh_tool(
     missing_fields: Tuple[str, ...],
 ) -> str:
     if any(field in _PATH_LIKE_FIELDS for field in missing_fields):
-        return "find_file"
+        return "list_directory"
 
     if tool_name == "write_file" and "content" in missing_fields:
         return "write_file"
 
     if tool_name == "edit_file":
         path_known = bool(str(tool_args.get("path") or "").strip())
-        return "read_file" if path_known else "find_file"
+        return "read_file" if path_known else "list_directory"
 
-    if tool_name in {"read_file", "write_file", "search_in_file"}:
-        return "find_file"
+    if tool_name in {"read_file", "write_file"}:
+        return "list_directory"
 
     return tool_name
 

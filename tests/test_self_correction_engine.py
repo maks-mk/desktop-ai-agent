@@ -61,7 +61,7 @@ class SelfCorrectionEngineTests(unittest.TestCase):
         self.assertEqual(_inject_yes_flag("npx --yes create-demo"), "npx --yes create-demo")
         self.assertEqual(_inject_yes_flag("yarn add demo-package --non-interactive"), "yarn add demo-package --non-interactive")
 
-    def test_build_repair_plan_missing_path_prefers_find_file_retry(self):
+    def test_build_repair_plan_missing_path_prefers_list_directory_retry(self):
         issue = {
             "tool_names": ["edit_file"],
             "tool_args": {"old_string": "x", "new_string": "y"},
@@ -74,7 +74,7 @@ class SelfCorrectionEngineTests(unittest.TestCase):
         assert plan is not None
         self.assertTrue(plan.retryable)
         self.assertEqual(plan.reason, "validation_missing_fields")
-        self.assertEqual(plan.suggested_tool_name, "find_file")
+        self.assertEqual(plan.suggested_tool_name, "list_directory")
 
     def test_build_repair_plan_write_file_missing_content_replans_write(self):
         issue = {

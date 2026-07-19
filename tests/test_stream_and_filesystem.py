@@ -1005,10 +1005,10 @@ class StreamAndFilesystemTests(unittest.TestCase):
             source="messages",
         )
         processor._emit_tool_started(
-            {"id": "call-search", "name": "search_in_directory", "args": {"pattern": "self_correction"}}
+            {"id": "call-search", "name": "list_directory", "args": {"path": "core"}}
         )
         processor._handle_tool_result(
-            ToolMessage(content="ok", name="search_in_directory", tool_call_id="call-search")
+            ToolMessage(content="ok", name="list_directory", tool_call_id="call-search")
         )
         processor._handle_agent_message(
             AIMessageChunk(
@@ -1698,52 +1698,6 @@ class StreamAndFilesystemTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("alpha\nbeta"))
         self.assertNotIn("     1  alpha", result)
-
-    def test_search_in_file_matches_plain_literal_substrings(self):
-        tmp = self._workspace_tempdir()
-        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
-        target = tmp / "script.js"
-        target.write_text(
-            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
-            encoding="utf-8",
-        )
-
-        result = manager.search_in_file("script.js", "resumeBtn.addEventListener")
-
-        self.assertIn("Found 1 match(es)", result)
-        self.assertIn('resumeBtn.addEventListener("click", playSound)', result)
-
-    def test_search_in_file_accepts_regex_escaped_literals_in_plain_mode(self):
-        tmp = self._workspace_tempdir()
-        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
-        target = tmp / "script.js"
-        target.write_text(
-            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
-            encoding="utf-8",
-        )
-
-        result = manager.search_in_file("script.js", r"playSound\(")
-        dotted = manager.search_in_file("script.js", r"resumeBtn\.addEventListener")
-
-        self.assertIn("Found 1 match(es)", result)
-        self.assertIn("function playSound() {}", result)
-        self.assertIn("Found 1 match(es)", dotted)
-        self.assertIn('resumeBtn.addEventListener("click", playSound)', dotted)
-
-    def test_search_in_directory_accepts_regex_escaped_literals_in_plain_mode(self):
-        tmp = self._workspace_tempdir()
-        manager = FilesystemManager(root_dir=tmp, virtual_mode=True)
-        nested = tmp / "src"
-        nested.mkdir()
-        (nested / "script.js").write_text(
-            'function playSound() {}\nresumeBtn.addEventListener("click", playSound)\n',
-            encoding="utf-8",
-        )
-
-        result = manager.search_in_directory(".", r"resumeBtn\.addEventListener")
-
-        self.assertIn("Found 1 match(es)", result)
-        self.assertIn('script.js:2  resumeBtn.addEventListener("click", playSound)', result)
 
     def test_module_filesystem_switches_workspace_after_directory_change(self):
         first = self._workspace_tempdir()

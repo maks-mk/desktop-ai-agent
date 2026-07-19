@@ -164,12 +164,12 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_parallel_safe_uses_gather(self):
         """When every call is parallel-safe, all run concurrently."""
-        owner = self._make_owner({"read_file": True, "search_in_directory": True})
+        owner = self._make_owner({"read_file": True, "list_directory": True})
         coordinator = ToolBatchCoordinator(owner)
 
         tool_calls = [
             _tc("read_file", "tc1"),
-            _tc("search_in_directory", "tc2"),
+            _tc("list_directory", "tc2"),
         ]
         state = self._make_state(tool_calls)
 
@@ -206,18 +206,18 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_mode_preserves_order(self):
         """Mixed batch: parallel-safe calls run concurrently, mutating calls sequentially,
         and the final ToolMessage order matches the original tool_calls order."""
-        # read_file and search_in_directory are parallel-safe; write_file is not.
+        # read_file and list_directory are parallel-safe; write_file is not.
         owner = self._make_owner({
             "read_file": True,
             "write_file": False,
-            "search_in_directory": True,
+            "list_directory": True,
         })
         coordinator = ToolBatchCoordinator(owner)
 
         tool_calls = [
             _tc("read_file", "tc1"),
             _tc("write_file", "tc2"),
-            _tc("search_in_directory", "tc3"),
+            _tc("list_directory", "tc3"),
         ]
         state = self._make_state(tool_calls)
 
@@ -231,14 +231,14 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
         # Content matches the tool name.
         self.assertEqual(result["messages"][0].content, "result:read_file")
         self.assertEqual(result["messages"][1].content, "result:write_file")
-        self.assertEqual(result["messages"][2].content, "result:search_in_directory")
+        self.assertEqual(result["messages"][2].content, "result:list_directory")
 
     async def test_mixed_mode_parallel_runs_concurrently(self):
         """In mixed mode, the parallel-safe calls should overlap in time
         (total time < sum of individual delays)."""
         owner = self._make_owner({
             "read_file": True,
-            "search_in_directory": True,
+            "list_directory": True,
             "write_file": False,
         })
         owner._process_delay = 0.15
@@ -246,7 +246,7 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
 
         tool_calls = [
             _tc("read_file", "tc1"),
-            _tc("search_in_directory", "tc2"),
+            _tc("list_directory", "tc2"),
             _tc("write_file", "tc3"),
         ]
         state = self._make_state(tool_calls)
@@ -277,7 +277,7 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_parallel_exception_does_not_crash_batch(self):
         """If one parallel call raises, the others should still complete."""
-        owner = self._make_owner({"read_file": True, "search_in_directory": True})
+        owner = self._make_owner({"read_file": True, "list_directory": True})
         coordinator = ToolBatchCoordinator(owner)
 
         original_process = owner._process_tool_call
@@ -291,7 +291,7 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
 
         tool_calls = [
             _tc("read_file", "tc1"),
-            _tc("search_in_directory", "tc2"),
+            _tc("list_directory", "tc2"),
         ]
         state = self._make_state(tool_calls)
 
@@ -299,13 +299,13 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result["messages"]), 2)
         # tc2 should have a valid result.
-        self.assertEqual(result["messages"][1].content, "result:search_in_directory")
+        self.assertEqual(result["messages"][1].content, "result:list_directory")
 
     # --- _partition_tool_calls unit tests ---
 
     def test_partition_all_parallel(self):
-        owner = self._make_owner({"read_file": True, "search_in_directory": True})
-        tool_calls = [_tc("read_file", "tc1"), _tc("search_in_directory", "tc2")]
+        owner = self._make_owner({"read_file": True, "list_directory": True})
+        tool_calls = [_tc("read_file", "tc1"), _tc("list_directory", "tc2")]
         parallel, sequential = owner._partition_tool_calls(tool_calls)  # type: ignore[attr-defined]
         self.assertEqual(len(parallel), 2)
         self.assertEqual(len(sequential), 0)
@@ -318,17 +318,17 @@ class MixedParallelToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sequential), 2)
 
     def test_partition_mixed(self):
-        owner = self._make_owner({"read_file": True, "write_file": False, "search_in_directory": True})
+        owner = self._make_owner({"read_file": True, "write_file": False, "list_directory": True})
         tool_calls = [
             _tc("read_file", "tc1"),
             _tc("write_file", "tc2"),
-            _tc("search_in_directory", "tc3"),
+            _tc("list_directory", "tc3"),
         ]
         parallel, sequential = owner._partition_tool_calls(tool_calls)  # type: ignore[attr-defined]
         self.assertEqual(len(parallel), 2)
         self.assertEqual(len(sequential), 1)
         self.assertEqual(parallel[0]["name"], "read_file")
-        self.assertEqual(parallel[1]["name"], "search_in_directory")
+        self.assertEqual(parallel[1]["name"], "list_directory")
         self.assertEqual(sequential[0]["name"], "write_file")
 
     # --- _parallel_mode_label unit tests ---

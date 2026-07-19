@@ -266,7 +266,7 @@ class ToolCardWidget(QFrame):
             return "read"
         if normalized in {"execute", "RunCommand", "cli_exec"}:
             return "command"
-        if normalized in {"grep", "Grep", "glob", "Glob", "search_in_file", "search_in_directory", "find_file"}:
+        if normalized in {"grep", "Grep", "glob", "Glob"}:
             return "search"
         if normalized in {"ls", "LS", "list_directory"}:
             return "list"

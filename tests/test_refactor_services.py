@@ -662,7 +662,7 @@ class RefactorServicesTests(unittest.TestCase):
         )
 
         tool_args["options"]["mode"] = "overwrite"
-        details["nested"]["retry"].append("find_file")
+        details["nested"]["retry"].append("list_directory")
 
         self.assertEqual(issue["tool_args"]["options"]["mode"], "append")
         self.assertEqual(issue["details"]["nested"]["retry"], ["read_file"])
