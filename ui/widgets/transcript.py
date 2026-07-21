@@ -78,12 +78,30 @@ class ConversationTurnWidget(QWidget):
             prefix_len >= min(len(visible), 48)
             or prefix_len >= int(len(visible) * 0.8)
         )
-        if prefix_len > 0 and (exact_prefix or significant_prefix):
+        partial_word_prefix = (
+            bool(visible)
+            and prefix_len == len(visible)
+            and prefix_len < len(incoming)
+            and not visible[-1].isspace()
+            and not incoming[prefix_len].isspace()
+        )
+        if prefix_len > 0 and (exact_prefix or significant_prefix) and not partial_word_prefix:
             return incoming[prefix_len:].lstrip()
 
         boundary = cls._markdown_boundary_after_visible_prefix(visible, incoming)
         if boundary is not None:
-            return incoming[boundary:].lstrip()
+            replayed_prefix = incoming[:boundary]
+            replayed_words = re.findall(r"\S+", replayed_prefix)
+            replayed_normalized = cls._normalized_text(replayed_prefix)
+            significant_replay = bool(replayed_normalized) and (
+                len(replayed_normalized) >= min(len(cls._normalized_text(visible)), 48)
+                or len(replayed_normalized) >= int(len(cls._normalized_text(visible)) * 0.8)
+            )
+            # A shared first word is ambiguous: it can be the beginning of a
+            # new comment, especially when the stream split that word across
+            # chunks. Only remove a replay after at least two complete words.
+            if significant_replay and len(replayed_words) >= 2:
+                return incoming[boundary:].lstrip()
 
         return incoming
 

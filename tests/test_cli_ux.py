@@ -221,6 +221,25 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(len(turn.assistant_segments), 1)
         self.assertEqual(turn.assistant_segments[0].markdown(), preface)
 
+    def test_transcript_keeps_new_comment_when_shared_prefix_is_partial_word(self):
+        turn = ConversationTurnWidget("user", parent=self.window)
+        previous = "Посмотрю конфигурацию лимитов и логику self-correction."
+        incoming = "Посмотрю структуру проекта."
+
+        turn.set_assistant_markdown(previous)
+        turn.start_tool({"tool_id": "search-config", "name": "list_directory", "args": {"path": "core"}})
+        turn.set_assistant_markdown("По")
+        turn.set_assistant_markdown(incoming)
+
+        self.assertEqual(turn.assistant_segments[-1].markdown(), incoming)
+        self.assertEqual(
+            ConversationTurnWidget._assistant_resume_text(
+                previous,
+                previous,
+            ),
+            "",
+        )
+
     def test_user_cancel_does_not_render_canceled_notice_in_transcript(self):
         self.window._handle_initialized(self._snapshot_payload())
         self.window._handle_event(StreamEvent("run_started", {"text": "Останови"}))
@@ -2834,6 +2853,33 @@ class GuiUxTests(unittest.TestCase):
         )
         self.assertEqual(self.window.model_profiles_payload["active_profile"], "gemini-1-5-flash")
 
+    def test_model_settings_panel_reopens_with_content_and_toggles_from_settings_action(self):
+        self.window._handle_initialized(self._snapshot_payload())
+
+        self.window.settings_action.trigger()
+        self._process_events()
+
+        dock = self.window._model_settings_window
+        dialog = dock.widget()
+        profile_count = dialog.profile_list.count()
+        self.assertFalse(dock.isHidden())
+        self.assertGreater(profile_count, 0)
+
+        dialog.close_button.click()
+        self._process_events()
+        self.assertTrue(dock.isHidden())
+        self.assertIs(dock.widget(), dialog)
+
+        self.window.settings_action.trigger()
+        self._process_events()
+        self.assertFalse(dock.isHidden())
+        self.assertIs(dock.widget(), dialog)
+        self.assertEqual(dialog.profile_list.count(), profile_count)
+
+        self.window.settings_action.trigger()
+        self._process_events()
+        self.assertTrue(dock.isHidden())
+
     def test_model_settings_dialog_does_not_wipe_profile_on_initial_selection(self):
         payload = {
             "active_profile": "gpt-4o",
@@ -2908,6 +2954,99 @@ class GuiUxTests(unittest.TestCase):
 
         self.assertEqual(dialog._current_row(), 1)
         self.assertIn("gemini-1-5-flash", dialog.form_hint.text())
+
+    def test_model_settings_panel_reopens_with_currently_active_profile_selected(self):
+        self.window._handle_initialized(self._snapshot_payload())
+
+        self.window.settings_action.trigger()
+        self._process_events()
+
+        dock = self.window._model_settings_window
+        dialog = dock.widget()
+        self.assertEqual(dialog._current_row(), 0)
+        self.assertIn("gpt-4o", dialog.form_hint.text())
+
+        # Switch the active model while the panel is hidden.
+        dialog.close_button.click()
+        self._process_events()
+        self.assertTrue(dock.isHidden())
+
+        switched = normalize_profiles_payload(self.window.model_profiles_payload)
+        switched["active_profile"] = "gemini-1-5-flash"
+        self.window._apply_model_profiles_payload(switched)
+        self._process_events()
+
+        self.window.settings_action.trigger()
+        self._process_events()
+
+        self.assertFalse(dock.isHidden())
+        self.assertEqual(dialog._current_row(), 1)
+        self.assertIn("gemini-1-5-flash", dialog.form_hint.text())
+
+    def _active_badge_row(self, dialog) -> int:
+        for row in range(dialog.profile_list.count()):
+            item = dialog.profile_list.item(row)
+            widget = dialog.profile_list.itemWidget(item) if item is not None else None
+            if widget is None:
+                continue
+            for label in widget.findChildren(QLabel, "ModelProfileItemBadge"):
+                if label.property("badgeVariant") == "active":
+                    return row
+        return -1
+
+    def test_model_settings_dialog_shows_active_badge_on_active_profile(self):
+        payload = {
+            "active_profile": "gemini-1-5-flash",
+            "profiles": [
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+                {
+                    "id": "gemini-1-5-flash",
+                    "provider": "gemini",
+                    "model": "gemini-1.5-flash",
+                    "api_key": "gm-demo",
+                    "base_url": "",
+                    "enabled": True,
+                },
+            ],
+        }
+        dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        self._process_events()
+
+        self.assertEqual(dialog._current_row(), 1)
+        self.assertEqual(self._active_badge_row(dialog), 1)
+
+    def test_model_settings_panel_reopens_with_active_badge_on_active_profile(self):
+        self.window._handle_initialized(self._snapshot_payload())
+        self.window.settings_action.trigger()
+        self._process_events()
+
+        dock = self.window._model_settings_window
+        dialog = dock.widget()
+        self.assertEqual(self._active_badge_row(dialog), 0)
+
+        dialog.close_button.click()
+        self._process_events()
+        self.assertTrue(dock.isHidden())
+
+        switched = normalize_profiles_payload(self.window.model_profiles_payload)
+        switched["active_profile"] = "gemini-1-5-flash"
+        self.window._apply_model_profiles_payload(switched)
+        self._process_events()
+
+        self.window.settings_action.trigger()
+        self._process_events()
+
+        self.assertFalse(dock.isHidden())
+        self.assertEqual(dialog._current_row(), 1)
+        self.assertEqual(self._active_badge_row(dialog), 1)
 
     def test_model_settings_dialog_autofills_name_from_model_suffix(self):
         dialog = agent_cli.ModelSettingsDialog({"active_profile": None, "profiles": []}, self.window)

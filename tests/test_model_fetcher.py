@@ -21,6 +21,7 @@ class _FakeAsyncClient:
     def __init__(self, *, response: httpx.Response | None = None, error: Exception | None = None) -> None:
         self._response = response
         self._error = error
+        self.requests = []
 
     async def __aenter__(self):
         return self
@@ -29,6 +30,7 @@ class _FakeAsyncClient:
         return False
 
     async def get(self, _url: str, **_kwargs):
+        self.requests.append((_url, _kwargs))
         if self._error is not None:
             raise self._error
         return self._response
@@ -149,6 +151,28 @@ class ModelFetcherTests(unittest.TestCase):
         with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
             result = self._run(OpenAICompatibleModelFetcher().fetch("sk-key", "https://example.test/v1"))
         self.assertEqual([entry.id for entry in result], ["custom-local-model", "gpt-4o"])
+
+    def test_openai_models_request_uses_configured_headers(self):
+        response = _openai_response({"id": "gpt-4o"})
+        client = _FakeAsyncClient(response=response)
+        headers = {"User-Agent": "CustomAgent/1.0", "x-provider-header": "enabled"}
+        with (
+            patch("core.model_fetcher.httpx.AsyncClient", return_value=client),
+            patch("core.model_fetcher.load_openai_headers", return_value=headers),
+        ):
+            self._run(OpenAICompatibleModelFetcher().fetch("sk-key", "https://example.test/v1"))
+
+        self.assertEqual(client.requests[0][1]["headers"], {**headers, "Authorization": "Bearer sk-key"})
+
+    def test_gemini_models_request_does_not_use_openai_headers(self):
+        response = _gemini_response(
+            {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+        )
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(GeminiModelFetcher().fetch("gm-key"))
+
+        self.assertNotIn("headers", client.requests[0][1])
 
     def test_openai_fallback_on_empty(self):
         response = _openai_response(

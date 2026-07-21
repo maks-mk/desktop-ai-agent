@@ -211,6 +211,24 @@ def build_stylesheet() -> str:
         border-radius: {SOFT_RADIUS_MD}px;
     }}
 
+    QDockWidget#ModelSettingsDock {{
+        background: {model_dialog_bg};
+        border: none;
+    }}
+
+    QDockWidget#ModelSettingsDock QWidget {{
+        background: transparent;
+        color: {model_dialog_text};
+    }}
+
+    QDockWidget#ModelSettingsDock::title {{
+        padding: 0px;
+        margin: 0px;
+        height: 0px;
+        background: transparent;
+        border: none;
+    }}
+
     QDialog#ModelSettingsDialog {{
         background: {model_dialog_bg};
         border: none;

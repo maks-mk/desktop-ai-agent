@@ -631,6 +631,7 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["model"], "gemini-2.5-flash")
         self.assertEqual(captured["google_api_key"], "gm-test")
         self.assertNotIn("convert_system_message_to_human", captured)
+        self.assertNotIn("default_headers", captured)
 
     def test_create_llm_for_gemini_does_not_send_sampling_controls(self):
         captured = {}
@@ -870,6 +871,29 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(captured["stream_usage"])
         self.assertNotIn("reasoning", captured)
         self.assertNotIn("reasoning_effort", captured)
+
+    def test_create_llm_for_openai_uses_configured_headers(self):
+        captured = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        headers = {"User-Agent": "CustomAgent/1.0", "x-provider-header": "enabled"}
+        with (
+            mock.patch.dict(sys.modules, {"langchain_openai": mock.Mock(ChatOpenAI=FakeChatOpenAI)}),
+            mock.patch("core.providers.openai_reasoning.load_openai_headers", return_value=headers),
+        ):
+            create_llm(
+                self._make_config(
+                    PROVIDER="openai",
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_MODEL="gpt-4o",
+                    OPENAI_BASE_URL="https://api.openai.com/v1",
+                )
+            )
+
+        self.assertEqual(captured["default_headers"], headers)
 
     def test_create_llm_for_openai_does_not_send_sampling_controls(self):
         captured = {}

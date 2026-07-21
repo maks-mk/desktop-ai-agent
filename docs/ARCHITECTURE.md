@@ -21,7 +21,7 @@ START
 - `MAX_LOOPS` и per-tool loop guards предотвращают бесконечные циклы.
 - Recovery использует stateful error tracking: `attempts_by_strategy`, `progress_markers`, `llm_replan_attempted_for` — адаптивные повторы с учётом уникальных fingerprints ошибок.
 - При смене проблемы (новый fingerprint) retry-бюджет сбрасывается; для одной и той же проблемы разрешены несколько `llm_replan` попыток в рамках `SELF_CORRECTION_RETRY_LIMIT`.
-- Stream-interruption recovery: при обрыве потока провайдера история автоматически чинится, ошибка классифицируется (`rate_limit` / `timeout` / `server_error` / `network`), и запуск продолжается после экспоненциального backoff с джиттером (`RETRY_DELAY * 2^attempt + random jitter`, для rate-limit — `RETRY_DELAY * 1.5`). Максимум `MAX_STREAM_REPAIR_RESUMES` попыток.
+- Stream-interruption recovery: при обрыве потока провайдера история автоматически чинится, ошибка классифицируется (`rate_limit` / `timeout` / `server_error` / `network`), и запуск продолжается после экспоненциального backoff с джиттером (`RETRY_DELAY * 2^attempt + random jitter`, для rate-limit — `RETRY_DELAY * 1.5`). Лимит попыток авто-продолжения — `min(MAX_RETRIES, 2)` (не отдельная env-переменная).
 
 ---
 

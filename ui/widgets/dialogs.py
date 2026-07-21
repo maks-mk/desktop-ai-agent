@@ -648,6 +648,15 @@ class ModelSettingsDialog(QDialog):
     def result_payload(self) -> dict[str, Any]:
         return dict(self._result_payload)
 
+    def refresh_active_selection(self, payload: dict[str, Any]) -> None:
+        """Select the currently active profile when the panel is (re)shown."""
+        normalized = normalize_profiles_payload(payload or {})
+        self._active_profile = str(normalized.get("active_profile") or "").strip()
+        self._refresh_profile_counts()
+        # Rebuild the list so the static "Active" badge follows the active profile
+        # instead of staying pinned to the row that was active when first built.
+        self._refresh_profile_list()
+
     def closeEvent(self, event) -> None:
         self._fetch_debounce.stop()
         self._fetch_request_id += 1

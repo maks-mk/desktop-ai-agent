@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 # Agent version (single source of truth)
-AGENT_VERSION = "v0.67.73.12b"
+AGENT_VERSION = "v0.67.73.21b"
 
 # Determine the project root directory
 if getattr(sys, 'frozen', False):
@@ -19,13 +19,16 @@ SUMMARY_PROMPT_TEMPLATE = (
     "Current memory:\n<previous_context>\n{summary}\n</previous_context>\n\n"
     "Operational state:\n{state_snapshot}\n\n"
     "New events:\n{history_text}\n\n"
-    "Update the memory. Rules:\n"
-    "- Merge new events, do not repeat existing facts.\n"
-    "- Preserve the active task, unresolved blockers, pending decisions, and recovery/tool state when present.\n"
-    "- Keep: paths, commands, outcomes, errors, decisions, task status.\n"
-    "- Drop: greetings, filler, raw tool output already reflected in outcomes.\n"
-    "- Be concise. Bullet points preferred.\n"
-    "- Return only the updated memory text."
+    "Produce the updated memory. Rules:\n"
+    "- Merge new information into the existing memory without duplication.\n"
+    "- Prefer newer evidence when facts conflict; preserve uncertainty when unresolved.\n"
+    "- Preserve the active task, progress, blockers, pending decisions, next steps, and tool/recovery state.\n"
+    "- Keep exact paths, commands, identifiers, outcomes, errors, decisions, and task status when relevant.\n"
+    "- Remove stale or completed details unless needed for continuity or recovery.\n"
+    "- Omit greetings, filler, reasoning, and raw tool output already captured by its outcome.\n"
+    "- Do not infer or invent facts.\n"
+    "- Write concise, self-contained bullet points.\n"
+    "- Return only the updated memory."
 )
 
 REFLECTION_PROMPT = (

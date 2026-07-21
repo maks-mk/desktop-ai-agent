@@ -44,6 +44,7 @@ The project does not try to compete with AI IDEs by feature count and does not t
 - Tools: filesystem, shell, web search, system info, process management, MCP
 - Approval pauses before mutating and destructive actions
 - Automatic context summarization for long sessions
+- Customizable HTTP headers for OpenAI-compatible requests via `headers.json` (QwenCode emulation etc.)
 - Multiple model profiles with switching directly in the GUI
 - Durable checkpoints: sessions persist between launches
 - Optional image input when the selected model supports vision
@@ -125,7 +126,7 @@ Full module map: [`docs/PROJECT_STRUCTURE.md`](./docs/PROJECT_STRUCTURE.md)
 
 ## Tests
 
-Target regression suite for runtime, GUI, and streaming: 495 tests.
+Target regression suite for runtime, GUI, and streaming: 720 tests.
 
 ```powershell
 venv\Scripts\python.exe -m pytest
@@ -157,8 +158,10 @@ For a portable build, copy `rg.exe` next to the agent executable. If `rg` is not
 | `psutil` | System tools and processes |
 | `httpx` | HTTP for MCP and fetch |
 | `aiofiles` | Async file operations |
+| `aiosqlite` | Async SQLite for checkpointing |
 | `mcp` | Model Context Protocol |
 | `requests` | HTTP client for Google API and Tavily |
+| `QtAwesome` | Icons for the GUI |
 | `sqlite-vec` | Vector extension for SQLite checkpoints |
 
 ---
@@ -168,11 +171,10 @@ For a portable build, copy `rg.exe` next to the agent executable. If `rg` is not
 | Document | Contents |
 |---|---|
 | [Architecture](./docs/ARCHITECTURE.md) | Runtime Flow, Prompt Layers, Sessions & Checkpoints |
-| [Configuration](./docs/CONFIGURATION.md) | All `.env` variables (providers, runtime, feature flags, limits, retry, persistence, diagnostics) |
+| [Configuration](./docs/CONFIGURATION.md) | All `.env` variables (providers, runtime, feature flags, limits, retry, persistence, diagnostics), HTTP headers `headers.json` |
 | [GUI](./docs/GUI_GUIDE.md) | Transcript, CLI output widget, Composer, hotkeys |
 | [Security](./docs/SECURITY.md) | Approvals, workspace boundary, `request_user_input` |
 | [Model Profiles](./docs/MODEL_PROFILES.md) | Profile management, auto-loading models, API key rotation |
 | [MCP](./docs/MCP.md) | MCP server configuration, policy, example |
 | [Project Structure](./docs/PROJECT_STRUCTURE.md) | Full module map |
 | [Provider Registry](./docs/provider_registry_guide.md) | Adding OpenAI-compatible aggregators |
-| [Dead Code Analysis](./docs/DEAD_CODE_ANALYSIS.md) | Dead code cleanup report |

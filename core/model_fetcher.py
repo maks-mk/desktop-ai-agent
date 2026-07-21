@@ -7,6 +7,8 @@ import json
 
 import httpx
 
+from core.http_headers import load_openai_headers
+
 ALLOWED_FAMILIES = ("gemini", "gemma")
 EXCLUDE_KEYWORDS = (
     "embed",
@@ -150,10 +152,8 @@ class OpenAICompatibleModelFetcher:
         if not normalized_base_url:
             raise FetchError("Base URL is required for OpenAI-compatible model discovery.")
 
-        headers = {
-            "Authorization": f"Bearer {str(api_key or '').strip()}",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
+        headers = load_openai_headers()
+        headers["Authorization"] = f"Bearer {str(api_key or '').strip()}"
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(f"{normalized_base_url}/models", headers=headers)

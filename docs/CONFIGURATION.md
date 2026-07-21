@@ -14,6 +14,7 @@
 | `OPENAI_API_KEY` | — | Обязателен для OpenAI (если нет `OPENAI_BASE_URL`) |
 | `OPENAI_MODEL` | `gpt-4o` | Имя модели OpenAI |
 | `OPENAI_BASE_URL` | — | Для OpenAI-compatible бэкендов (Ollama и др.) |
+| `LLM_API_MODE` | `chat` | Режим API для OpenAI-провайдера: `chat` (`/v1/chat/completions`, работает со всеми OpenAI-compatible) или `responses` (`/v1/responses`, для gpt-5/o-series reasoning). Если не указан, LangChain автоопределяет по модели и payload |
 | `ENABLE_MODEL_REASONING` | `true` | Включает provider-side reasoning/thinking для поддерживаемых моделей |
 | `MODEL_REASONING_EFFORT` | `medium` | Усилие reasoning для OpenAI/OpenAI-compatible моделей (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `GEMINI_THINKING_BUDGET` | `4096` | Thinking budget для `gemini-2.5*` / `gemini-3*`; старые Gemini-модели получают запрос без этого параметра |
@@ -81,6 +82,37 @@
 | `SUMMARY_KEEP_LAST` | Сколько последних сообщений не трогать при суммаризации |
 | `MAX_RETRIES` | Число попыток при ошибке LLM |
 | `RETRY_DELAY` | Базовая задержка между попытками (секунды); также используется как base delay для stream-repair backoff |
+
+---
+
+## HTTP-заголовки для OpenAI-совместимых запросов
+
+Для эмуляции QwenCode или добавления пользовательских заголовков в запросы к OpenAI-совместимым бэкендам используется файл `headers.json` в корне проекта.
+
+**Поведение:**
+- Файл отсутствует → SDK отправляет свои стандартные заголовки (`User-Agent: openai-python 2.44.0`, `X-Stainless-Lang: python` и т.д.).
+- Файл присутствует → его строковые значения переопределяют/добавляют заголовки SDK. Битый или не-объектный JSON игнорируется (возвращается пустой словарь).
+
+**Пример `headers.json` (эмуляция QwenCode):**
+```json
+{
+  "User-Agent": "QwenCode/0.12.6 (win32; x64)",
+  "x-stainless-lang": "js",
+  "x-stainless-package-version": "5.11.0",
+  "x-stainless-os": "Windows",
+  "x-stainless-arch": "x64",
+  "x-stainless-runtime": "node",
+  "x-stainless-runtime-version": "v24.3.0",
+  "accept-language": "*",
+  "sec-fetch-mode": "cors"
+}
+```
+
+**Применение:**
+- Заголовки используются в `core/model_fetcher.py` для discovery моделей и в `core/providers/openai_reasoning.py` для запросов к LLM.
+- Для Gemini-запросов заголовки не применяются.
+
+**Модуль:** `core/http_headers.py` — загрузчик `load_openai_headers()`, который безопасно читает файл и возвращает словарь заголовков.
 
 ---
 

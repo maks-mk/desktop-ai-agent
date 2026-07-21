@@ -1,5 +1,5 @@
 # ===========================
-# .env example (v0.67.0b)
+# .env example (v0.67.73.21b)
 # ===========================
 #
 # ВНИМАНИЕ:
@@ -26,6 +26,7 @@ GEMINI_THINKING_BUDGET=4096
 # OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 # OPENAI_MODEL=gpt-4o
 # OPENAI_BASE_URL=https://api.openai.com/v1
+# HTTP-заголовки для эмуляции QwenCode или кастомных заголовков: файл headers.json в корне проекта.
 # API mode: chat (/v1/chat/completions) or responses (/v1/responses).
 # "chat" is the default and works with all OpenAI-compatible providers.
 # "responses" enables the OpenAI Responses API (gpt-5, o-series reasoning, etc.).

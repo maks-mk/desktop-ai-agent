@@ -20,6 +20,8 @@
 
 Логика реализована в `core/model_fetcher.py`. При переключении между профилями с одним ключом список берётся из кеша без повторного запроса.
 
+> Для OpenAI-compatible discovery и запросов к LLM можно задать кастомные HTTP-заголовки (эмуляция QwenCode и др.) через `headers.json` — см. раздел «HTTP-заголовки» в [`CONFIGURATION.md`](./CONFIGURATION.md).
+
 ---
 
 ## Ротация API-ключей

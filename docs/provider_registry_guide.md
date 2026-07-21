@@ -4,6 +4,8 @@
 
 Registry применяется только к профилям с `provider: openai`. Gemini настраивается отдельно через Google SDK-поля `thinking_budget`, `thinking_level` и `include_thoughts`.
 
+> Кастомные HTTP-заголовки для OpenAI-compatible запросов (эмуляция QwenCode и др.) настраиваются отдельно через `headers.json` — см. раздел «HTTP-заголовки» в [`CONFIGURATION.md`](./CONFIGURATION.md).
+
 ## Где находится файл
 
 По умолчанию используется файл:
@@ -297,14 +299,12 @@ Registry матчится по hostname из `OPENAI_BASE_URL`.
 
 ## NVIDIA NIM: особенности reasoning
 
-NVIDIA NIM hosted API (`integrate.api.nvidia.com`) имеет ряд особенностей:
+NVIDIA NIM hosted API (`integrate.api.nvidia.com`, `api.nvidia.com`) имеет ряд особенностей:
 
-1. **Top-level `reasoning_effort`** — принимается API, но не все модели возвращают `reasoning_content` в streaming-чанках. Это известное ограничение (NVIDIA forum issue #346808).
+1. **`chat_template_kwargs` для thinking mode** — агент включает thinking через `extra_body.chat_template_kwargs.enable_thinking` (отправляется через `extra_body`, чтобы обойти LangChain UserWarning о нестандартных параметрах). Это работает на hosted API для моделей, перечисленных в `model_match` (`deepseek-r1`, `deepseek-v4`, `deepseek-v3`, `glm-5`, `glm-4.7`, `kimi-k2`, `qwen3`, `gemma-4`, `gpt-oss`). Модели вне `model_match` либо не поддерживают thinking, либо думают всегда.
 
-2. **Vocabulary**: `low`, `medium`, `high`, `max`. Значение `max` — самое глубокое reasoning.
+2. **Vocabulary**: `low`, `medium`, `high`, `max`. В registry все значения effort маппятся в `enable_thinking: true` (включение/выключение thinking), а `max` — самое глубокое reasoning.
 
-3. **`chat_template_kwargs`** — некоторые модели (DeepSeek V4, GLM-5, Qwen3) требуют `chat_template_kwargs` для включения thinking mode, но NVIDIA NIM **hosted API не поддерживает** этот параметр напрямую. Он работает только на self-hosted NIM через vLLM.
+3. **Reasoning в streaming** — модель может возвращать reasoning через нестандартные top-level поля в delta: `delta.reasoning`, `delta.reasoning_content`, `delta.thinking`. Наш `extract_openai_reasoning_delta` уже проверяет эти поля.
 
-4. **Reasoning в streaming** — модель может возвращать reasoning через нестандартные top-level поля в delta: `delta.reasoning`, `delta.reasoning_content`, `delta.thinking`. Наш `extract_openai_reasoning_delta` уже проверяет эти поля.
-
-5. **`reasoning_detected=false`** — если модель не возвращает reasoning content в потоке, это не значит, что `reasoning_effort` не был передан. Параметр влияет на поведение модели, но reasoning tokens могут не возвращаться клиенту.
+4. **`reasoning_detected=false`** — если модель не возвращает reasoning content в потоке, это не значит, что thinking не был включён. Параметр влияет на поведение модели, но reasoning tokens могут не возвращаться клиенту.

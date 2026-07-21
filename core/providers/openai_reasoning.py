@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatResult
 
 from core.config import AgentConfig
+from core.http_headers import load_openai_headers
 from core.providers.base import normalized_reasoning_effort
 from core.provider_registry import (
     ProviderRegistry,
@@ -535,6 +536,7 @@ def create_openai_chat_model(config: AgentConfig, *, api_key_override: str | Non
         "temperature": config.temperature,
         "api_key": api_key,
         "base_url": config.openai_base_url,
+        "default_headers": load_openai_headers(),
         "max_retries": 0,
         "stream_usage": True,
     }

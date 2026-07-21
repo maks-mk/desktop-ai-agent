@@ -44,6 +44,7 @@
 - Инструменты: filesystem, shell, web search, system info, process management, MCP
 - Approval-паузы перед мутирующими и деструктивными действиями
 - Автосуммаризация контекста при длинных сессиях
+- Настраиваемые HTTP-заголовки для OpenAI-совместимых запросов через `headers.json` (эмуляция QwenCode и др.)
 - Несколько профилей моделей с переключением прямо в GUI
 - Durable checkpoints — сессии сохраняются между запусками
 - Опциональный image input, если модель его поддерживает
@@ -125,7 +126,7 @@ START
 
 ## Тесты
 
-Полный целевой regression-набор для runtime/GUI/streaming: 495 тестов.
+Полный целевой regression-набор для runtime/GUI/streaming: 720 тестов.
 
 ```powershell
 venv\Scripts\python.exe -m pytest
@@ -157,8 +158,10 @@ venv\Scripts\python.exe -m pytest
 | `psutil` | Системные инструменты и процессы |
 | `httpx` | HTTP для MCP и fetch |
 | `aiofiles` | Async файловые операции |
+| `aiosqlite` | Async SQLite для checkpointing |
 | `mcp` | Model Context Protocol |
 | `requests` | HTTP-клиент (Google API, Tavily) |
+| `QtAwesome` | Иконки для GUI |
 | `sqlite-vec` | Vector-расширение для SQLite checkpoints |
 
 ---
@@ -168,11 +171,10 @@ venv\Scripts\python.exe -m pytest
 | Документ | Содержание |
 |---|---|
 | [Архитектура](./docs/ARCHITECTURE.md) | Runtime Flow, Prompt Layers, Sessions & Checkpoints |
-| [Конфигурация](./docs/CONFIGURATION.md) | Все переменные `.env` (провайдеры, runtime, фиче-флаги, лимиты, retry, персистентность, диагностика) |
+| [Конфигурация](./docs/CONFIGURATION.md) | Все переменные `.env` (провайдеры, runtime, фиче-флаги, лимиты, retry, персистентность, диагностика), HTTP-заголовки `headers.json` |
 | [GUI](./docs/GUI_GUIDE.md) | Transcript, CLI output widget, Composer, горячие клавиши |
 | [Безопасность](./docs/SECURITY.md) | Approvals, workspace boundary, `request_user_input` |
 | [Профили моделей](./docs/MODEL_PROFILES.md) | Управление профилями, автозагрузка моделей, ротация API-ключей |
 | [MCP](./docs/MCP.md) | Конфигурация MCP-серверов, policy, пример |
 | [Структура проекта](./docs/PROJECT_STRUCTURE.md) | Полная карта модулей |
 | [Provider Registry](./docs/provider_registry_guide.md) | Добавление OpenAI-compatible агрегаторов |
-| [Dead Code Analysis](./docs/DEAD_CODE_ANALYSIS.md) | Отчёт по очистке мёртвого кода |

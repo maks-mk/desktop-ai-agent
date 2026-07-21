@@ -5,9 +5,9 @@ import os
 import sys
 from typing import Final
 
-from PySide6.QtCore import QMessageLogContext, QtMsgType, QSize, QTimer, qInstallMessageHandler
+from PySide6.QtCore import QMessageLogContext, Qt, QtMsgType, QSize, QTimer, qInstallMessageHandler
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenuBar, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDockWidget, QFileDialog, QMainWindow, QMenuBar, QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 
 from core.constants import AGENT_VERSION
 from core.input_sanitizer import build_user_input_notice, sanitize_user_text
@@ -683,18 +683,59 @@ class MainWindow(QMainWindow):
         if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
             QMessageBox.information(self, "Busy", "Wait for the current run to finish before changing settings.")
             return
-        if self._model_settings_window is not None and self._model_settings_window.isVisible():
+        if self._model_settings_window is not None:
+            if isinstance(self._model_settings_window, QDockWidget):
+                dock = self._model_settings_window
+                dock.setVisible(dock.isHidden())
+                if not dock.isHidden():
+                    dock.raise_()
+                    dialog = dock.widget()
+                    if dialog is not None and hasattr(dialog, "refresh_active_selection"):
+                        dialog.refresh_active_selection(self.model_profiles_payload)
+                return
+            self._model_settings_window.show()
             self._model_settings_window.raise_()
             self._model_settings_window.activateWindow()
+            if hasattr(self._model_settings_window, "refresh_active_selection"):
+                self._model_settings_window.refresh_active_selection(self.model_profiles_payload)
             return
         dialog_class = self._resolve_model_settings_dialog_class()
         dialog = dialog_class(self.model_profiles_payload, self)
-        self._model_settings_window = dialog
         dialog.profiles_saved.connect(self._save_model_profiles_from_dialog)
-        dialog.destroyed.connect(lambda *_args: setattr(self, "_model_settings_window", None))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+
+        if not isinstance(dialog, QWidget):
+            self._model_settings_window = dialog
+            dialog.destroyed.connect(lambda *_args: setattr(self, "_model_settings_window", None))
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dock = QDockWidget("Model Profiles", self)
+        dock.setObjectName("ModelSettingsDock")
+        dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        dock.setTitleBarWidget(QWidget(dock))
+        dock.setFloating(False)
+        dock.setMinimumWidth(760)
+        dock.resize(860, max(420, self.height()))
+        dock.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        dialog.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        dock.setWidget(dialog)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.resizeDocks([dock], [860], Qt.Orientation.Horizontal)
+        self._model_settings_window = dock
+
+        if close_button := getattr(dialog, "close_button", None):
+            try:
+                close_button.clicked.disconnect(dialog.reject)
+            except (RuntimeError, TypeError):
+                pass
+            close_button.clicked.connect(dock.close)
+        dock.destroyed.connect(lambda *_args: setattr(self, "_model_settings_window", None))
+        dock.show()
+        dock.raise_()
 
     def _save_model_profiles_from_dialog(self, payload: dict | None) -> None:
         normalized = normalize_profiles_payload(payload or {})

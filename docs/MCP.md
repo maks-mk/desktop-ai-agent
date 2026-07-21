@@ -1,6 +1,6 @@
 # MCP (Model Context Protocol)
 
-`mcp.json` задаёт опциональные MCP-серверы. По умолчанию все серверы выключены, кроме `context7` (remote, read-only) — он включён из коробки.
+`mcp.json` задаёт опциональные MCP-серверы. По умолчанию все серверы выключены. В комплекте идут примеры: `filesystem` (stdio), `context7` (remote, read-only) и `sequential-thinking` (stdio) — все с `enabled: false`. Включите нужный сервер, выставив `enabled: true`.
 
 ## Policy
 
