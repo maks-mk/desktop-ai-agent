@@ -182,12 +182,12 @@ class InspectorPanelWidget(QWidget):
         header_row.setSpacing(6)
 
         title = QLabel("Inspector")
-        title.setObjectName("SectionTitle")
+        title.setObjectName("InspectorSectionTitle")
         header_row.addWidget(title)
         header_row.addStretch(1)
 
         hint = QLabel("Run details, tools, and help")
-        hint.setObjectName("MetaText")
+        hint.setObjectName("InspectorMetaText")
         header_row.addWidget(hint, 0, Qt.AlignRight)
         layout.addLayout(header_row)
 

@@ -633,13 +633,22 @@ def format_exception_friendly(e: Exception) -> str:
 
 
 class TokenTracker:
-    __slots__ = ("max_input", "total_output", "_streaming_len", "_seen_msg_ids")
+    __slots__ = (
+        "total_input",
+        "total_output",
+        "_streaming_len",
+        "_seen_msg_ids",
+        "_last_usage_fingerprint",
+        "_last_usage_source",
+    )
 
     def __init__(self):
-        self.max_input = 0
+        self.total_input = 0
         self.total_output = 0
         self._streaming_len = 0
         self._seen_msg_ids: set = set()
+        self._last_usage_fingerprint: tuple[int, int] | None = None
+        self._last_usage_source = ""
 
     def update_from_message(self, msg: Any):
         if isinstance(msg, (AIMessage, AIMessageChunk)):
@@ -656,7 +665,11 @@ class TokenTracker:
                 self._streaming_len = chunk_len
 
         if hasattr(msg, "usage_metadata") and msg.usage_metadata:
-            self._apply_metadata(msg.usage_metadata, msg_id=getattr(msg, "id", None))
+            self._apply_metadata(
+                msg.usage_metadata,
+                msg_id=getattr(msg, "id", None),
+                source="message",
+            )
 
     def update_from_node_update(self, update: Dict):
         if not isinstance(update, dict):
@@ -667,7 +680,7 @@ class TokenTracker:
                 continue
             usage = node_payload.get("token_usage")
             if isinstance(usage, dict):
-                self._apply_metadata(usage)
+                self._apply_metadata(usage, source="update")
 
     @staticmethod
     def _coerce_token_int(value: Any) -> int:
@@ -694,7 +707,7 @@ class TokenTracker:
             return max(0, total_tokens - output_tokens)
         return 0
 
-    def _apply_metadata(self, usage: Dict, msg_id: str = None):
+    def _apply_metadata(self, usage: Dict, msg_id: str = None, source: str = ""):
         if msg_id:
             if msg_id in self._seen_msg_ids:
                 return
@@ -702,15 +715,24 @@ class TokenTracker:
 
         out_t = self._extract_output_tokens(usage)
         in_t = self._extract_input_tokens(usage, out_t)
-        if in_t > self.max_input:
-            self.max_input = in_t
+        fingerprint = (in_t, out_t)
+        if (
+            self._last_usage_fingerprint == fingerprint
+            and self._last_usage_source
+            and source
+            and self._last_usage_source != source
+        ):
+            return
 
+        self.total_input += in_t
         self.total_output += out_t
+        self._last_usage_fingerprint = fingerprint
+        self._last_usage_source = source
 
     def render(self, duration: float) -> str:
         display_out = self.total_output
         if self._streaming_len > 10 and display_out < (self._streaming_len // 10):
             display_out = self._streaming_len // 3
 
-        in_display = str(self.max_input if self.max_input > 0 else 0)
+        in_display = str(self.total_input if self.total_input > 0 else 0)
         return f"{duration:.1f}s  ↓ {in_display}  ↑ {display_out}"

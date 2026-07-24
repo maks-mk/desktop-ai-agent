@@ -421,6 +421,29 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertIn("↓ 321", stats)
         self.assertIn("↑ 8", stats)
 
+    def test_stream_processor_sums_input_tokens_across_model_steps(self):
+        processor = StreamProcessor()
+        processor._handle_updates({"agent": {"token_usage": {"input_tokens": 16, "output_tokens": 32}}})
+        processor._handle_updates({"agent": {"token_usage": {"input_tokens": 59, "output_tokens": 71}}})
+        processor._handle_updates({"agent": {"token_usage": {"input_tokens": 117, "output_tokens": 609}}})
+
+        stats = processor.tracker.render(0.1)
+        self.assertIn("↓ 192", stats)
+        self.assertIn("↑ 712", stats)
+
+    def test_stream_processor_deduplicates_usage_between_messages_and_updates(self):
+        processor = StreamProcessor()
+        message = AIMessage(
+            content="",
+            usage_metadata={"input_tokens": 117, "output_tokens": 609, "total_tokens": 726},
+        )
+        processor._handle_messages((message, {"langgraph_node": "agent"}))
+        processor._handle_updates({"agent": {"token_usage": {"input_tokens": 117, "output_tokens": 609}}})
+
+        stats = processor.tracker.render(0.1)
+        self.assertIn("↓ 117", stats)
+        self.assertIn("↑ 609", stats)
+
     def test_stream_processor_accumulates_total_elapsed_from_previous_segments(self):
         events = []
         perf_values = iter([100.0, 100.0])
@@ -621,6 +644,75 @@ class StreamAndFilesystemTests(unittest.TestCase):
         self.assertEqual(statuses[-1]["node"], "agent")
         self.assertEqual(statuses[-1]["label"], "Thinking...")
         self.assertEqual(deltas, [])
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_anthropic_thinking_block(self):
+        """Anthropic extended thinking emits content blocks with type=thinking
+        and a thinking/signature pair. The UI status must switch to Thinking."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(
+                    content=[
+                        {"type": "thinking", "thinking": "Размышляю над задачей.", "signature": "sig_abc"},
+                        {"type": "text", "text": "Ответ"},
+                    ]
+                ),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+
+    def test_stream_processor_reports_agent_status_as_thinking_for_anthropic_redacted_thinking_block(self):
+        """Anthropic redacted_thinking blocks (display=omitted) must also trigger
+        the Thinking status in the UI."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(
+                    content=[
+                        {"type": "redacted_thinking", "data": "encrypted_blob"},
+                        {"type": "text", "text": "Ответ"},
+                    ]
+                ),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        statuses = [event.payload for event in events if event.type == "status_changed"]
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1]["node"], "agent")
+        self.assertEqual(statuses[-1]["label"], "Thinking...")
+
+    def test_stream_processor_suppresses_anthropic_redacted_thinking_as_visible_text(self):
+        """redacted_thinking blocks must not leak as visible assistant text —
+        only the text block content should appear."""
+        events = []
+        processor = StreamProcessor(events.append)
+
+        processor._handle_messages(
+            (
+                AIMessage(
+                    content=[
+                        {"type": "redacted_thinking", "data": "encrypted_blob"},
+                        {"type": "text", "text": "Видимый ответ"},
+                    ]
+                ),
+                {"langgraph_node": "agent"},
+            )
+        )
+
+        deltas = [event.payload for event in events if event.type == "assistant_delta"]
+        visible_text = "".join(delta.get("text", "") for delta in deltas)
+        self.assertNotIn("encrypted_blob", visible_text)
+        self.assertIn("Видимый ответ", visible_text)
 
     def test_stream_processor_skips_unknown_node_status_instead_of_fallback_thinking(self):
         events = []

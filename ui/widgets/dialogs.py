@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.model_fetcher import (
+    AnthropicModelFetcher,
     AuthError,
     EmptyResultError,
     FetchError,
@@ -169,8 +170,8 @@ class ModelSettingsDialog(QDialog):
         self.setModal(False)
         self.setWindowModality(Qt.NonModal)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
-        self.resize(1050, 670)
-        self.setMinimumSize(760, 420)
+        self.resize(1070, 680)
+        self.setMinimumSize(850, 450)
 
         normalized = normalize_profiles_payload(payload or {})
         self._profiles: list[dict[str, Any]] = [dict(item) for item in normalized.get("profiles", [])]
@@ -213,33 +214,13 @@ class ModelSettingsDialog(QDialog):
         header_title.setObjectName("ModelSettingsTitle")
         hero_copy.addWidget(header_title, 0, Qt.AlignLeft | Qt.AlignTop)
 
-        header_hint = QLabel(
-            "Keep providers tidy, switch the active profile for new runs, and tune image support without losing your place."
-        )
-        header_hint.setObjectName("ModelSettingsSubtitle")
-        header_hint.setWordWrap(True)
-        hero_copy.addWidget(header_hint)
-
         active_name = str(self._active_profile or "").strip() or "none"
-        self.active_profile_label = QLabel(f"Active now: {active_name}")
+        self.active_profile_label = QLabel(f"Active: {active_name}")
         self.active_profile_label.setObjectName("ModelSettingsMeta")
         self.active_profile_label.setWordWrap(True)
         hero_copy.addWidget(self.active_profile_label)
         hero_layout.addLayout(hero_copy, 1)
 
-        hero_stats = QVBoxLayout()
-        hero_stats.setContentsMargins(0, 0, 0, 0)
-        hero_stats.setSpacing(4)
-
-        self.profile_count_chip = QLabel("")
-        self.profile_count_chip.setObjectName("ModelSettingsChip")
-        hero_stats.addWidget(self.profile_count_chip, 0, Qt.AlignRight)
-
-        self.left_meta_chip = QLabel("")
-        self.left_meta_chip.setObjectName("ModelSettingsChip")
-        hero_stats.addWidget(self.left_meta_chip, 0, Qt.AlignRight)
-        hero_stats.addStretch(1)
-        hero_layout.addLayout(hero_stats, 0)
         root.addWidget(hero_card)
 
         self.body_splitter = QSplitter(Qt.Horizontal)
@@ -291,11 +272,6 @@ class ModelSettingsDialog(QDialog):
         left_buttons.addWidget(self.delete_button)
         left.addLayout(left_buttons)
 
-        left_hint = QLabel("Tip: leave Name empty and it will be generated from the model automatically.")
-        left_hint.setObjectName("ModelSettingsMeta")
-        left_hint.setWordWrap(True)
-        left.addWidget(left_hint)
-
         right_container = QFrame()
         right_container.setObjectName("ModelSettingsPane")
         right_container.setProperty("paneRole", "editor")
@@ -306,7 +282,7 @@ class ModelSettingsDialog(QDialog):
         right_header = QHBoxLayout()
         right_header.setContentsMargins(0, 0, 0, 0)
         right_header.setSpacing(4)
-        right_label = QLabel("Selected profile")
+        right_label = QLabel("Profile")
         right_label.setObjectName("ModelSettingsSectionTitle")
         right_header.addWidget(right_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
         right_header.addStretch(1)
@@ -318,52 +294,11 @@ class ModelSettingsDialog(QDialog):
         right_header.addWidget(self.duplicate_button, 0, Qt.AlignRight | Qt.AlignVCenter)
         right.addLayout(right_header)
 
-        self.selected_profile_header = QFrame()
-        self.selected_profile_header.setObjectName("ModelSettingsSelectedProfileHeader")
-        selected_header_layout = QVBoxLayout(self.selected_profile_header)
-        selected_header_layout.setContentsMargins(8, 7, 8, 7)
-        selected_header_layout.setSpacing(5)
-
-        selected_title_row = QHBoxLayout()
-        selected_title_row.setContentsMargins(0, 0, 0, 0)
-        selected_title_row.setSpacing(6)
-
-        self.selected_profile_title = QLabel("No profile selected")
-        self.selected_profile_title.setObjectName("ModelSettingsSelectedProfileTitle")
-        self.selected_profile_title.setWordWrap(True)
-        selected_title_row.addWidget(self.selected_profile_title, 1, Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.profile_state_chip = QLabel("No profile selected")
-        self.profile_state_chip.setObjectName("ModelSettingsChip")
-        selected_title_row.addWidget(self.profile_state_chip, 0, Qt.AlignRight | Qt.AlignVCenter)
-        selected_header_layout.addLayout(selected_title_row)
-
-        self.form_hint = QLabel("Select a profile to review credentials, key rotation, model settings, and image support.")
-        self.form_hint.setObjectName("ModelSettingsMeta")
-        self.form_hint.setWordWrap(True)
-        selected_header_layout.addWidget(self.form_hint)
-
         self.save_state_label = QLabel("")
         self.save_state_label.setObjectName("ModelSettingsMeta")
         self.save_state_label.setWordWrap(True)
         self.save_state_label.setVisible(False)
         right.addWidget(self.save_state_label)
-
-        summary_layout = QHBoxLayout()
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(6)
-
-        self.summary_provider = QLabel("Provider: —")
-        self.summary_provider.setObjectName("ModelSettingsSummaryLabel")
-        self.summary_model = QLabel("Model: —")
-        self.summary_model.setObjectName("ModelSettingsSummaryLabel")
-        self.summary_images = QLabel("Image input: off")
-        self.summary_images.setObjectName("ModelSettingsSummaryLabel")
-        summary_layout.addWidget(self.summary_provider)
-        summary_layout.addWidget(self.summary_model, 1)
-        summary_layout.addWidget(self.summary_images)
-        selected_header_layout.addLayout(summary_layout)
-        right.addWidget(self.selected_profile_header)
 
         editor_scroll = QScrollArea()
         editor_scroll.setObjectName("ModelSettingsScrollArea")
@@ -393,7 +328,7 @@ class ModelSettingsDialog(QDialog):
         self.name_edit.setAccessibleName("Profile name")
 
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["openai", "gemini"])
+        self.provider_combo.addItems(["openai", "gemini", "anthropic"])
         self.provider_combo.setAccessibleName("Provider")
 
         self.model_combo = SearchableModelComboBox()
@@ -444,12 +379,6 @@ class ModelSettingsDialog(QDialog):
         self.api_key_copy_button.setToolTip("Copy API key")
         self.api_key_copy_button.setAccessibleName("Copy API key")
 
-        self.api_key_rotation_button = QToolButton()
-        self.api_key_rotation_button.setObjectName("ModelSettingsInlineToolButton")
-        self.api_key_rotation_button.setIcon(_fa_icon("fa5s.sync-alt", color=TEXT_MUTED, size=10))
-        self.api_key_rotation_button.setToolTip("Configure API key rotation")
-        self.api_key_rotation_button.setAccessibleName("Configure API key rotation")
-
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setPlaceholderText("https://api.openai.com/v1")
         self.base_url_edit.setClearButtonEnabled(True)
@@ -460,10 +389,6 @@ class ModelSettingsDialog(QDialog):
         self.supports_images_checkbox.setToolTip("Allow image attachments for this profile.")
         self.supports_images_checkbox.setAccessibleName("Image input support")
 
-        self.images_hint_label = QLabel("Enables sending images with prompts when the selected model supports vision input.")
-        self.images_hint_label.setObjectName("ModelSettingsHintText")
-        self.images_hint_label.setWordWrap(True)
-
         api_key_row = QWidget()
         api_key_row.setObjectName("ModelSettingsFieldRow")
         api_key_layout = QHBoxLayout(api_key_row)
@@ -472,7 +397,6 @@ class ModelSettingsDialog(QDialog):
         api_key_layout.addWidget(self.api_key_edit, 1)
         api_key_layout.addWidget(self.api_key_reveal_button, 0, Qt.AlignVCenter)
         api_key_layout.addWidget(self.api_key_copy_button, 0, Qt.AlignVCenter)
-        api_key_layout.addWidget(self.api_key_rotation_button, 0, Qt.AlignVCenter)
 
         model_row = QWidget()
         model_row.setObjectName("ModelSettingsFieldRow")
@@ -494,9 +418,8 @@ class ModelSettingsDialog(QDialog):
         images_row = QWidget()
         images_layout = QVBoxLayout(images_row)
         images_layout.setContentsMargins(0, 2, 0, 2)
-        images_layout.setSpacing(4)
+        images_layout.setSpacing(0)
         images_layout.addWidget(self.supports_images_checkbox)
-        images_layout.addWidget(self.images_hint_label)
 
         label_width = 68
         name_label = QLabel("&Name")
@@ -521,9 +444,17 @@ class ModelSettingsDialog(QDialog):
         form_layout.addRow(provider_label, self.provider_combo)
         form_layout.addRow(model_label, model_field)
         form_layout.addRow(api_key_label, api_key_row)
-        form_layout.addRow(base_url_label, self.base_url_edit)
-        form_layout.addRow(images_label, images_row)
         editor_layout.addWidget(form_frame)
+
+        advanced_content = QWidget()
+        advanced_layout = QFormLayout(advanced_content)
+        advanced_layout.setContentsMargins(6, 4, 6, 4)
+        advanced_layout.setHorizontalSpacing(6)
+        advanced_layout.setVerticalSpacing(5)
+        advanced_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        advanced_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        advanced_layout.addRow(base_url_label, self.base_url_edit)
+        advanced_layout.addRow(images_label, images_row)
 
         rotation_content = QWidget()
         rotation_content_layout = QVBoxLayout(rotation_content)
@@ -535,20 +466,6 @@ class ModelSettingsDialog(QDialog):
         rotation_card_layout = QVBoxLayout(rotation_card)
         rotation_card_layout.setContentsMargins(8, 8, 8, 8)
         rotation_card_layout.setSpacing(6)
-
-        rotation_meta_row = QHBoxLayout()
-        rotation_meta_row.setContentsMargins(0, 0, 0, 0)
-        rotation_meta_row.setSpacing(6)
-
-        rotation_helper = QLabel("Add one API key per line. The active key field stays in sync with this pool.")
-        rotation_helper.setObjectName("ModelSettingsHintText")
-        rotation_helper.setWordWrap(True)
-        rotation_meta_row.addWidget(rotation_helper, 1)
-
-        self.api_key_rotation_count_chip = QLabel("")
-        self.api_key_rotation_count_chip.setObjectName("ModelSettingsChip")
-        rotation_meta_row.addWidget(self.api_key_rotation_count_chip, 0, Qt.AlignRight | Qt.AlignTop)
-        rotation_card_layout.addLayout(rotation_meta_row)
 
         self.api_key_rotation_editor = CopySafePlainTextEdit()
         self.api_key_rotation_editor.setPlaceholderText("sk-key-1\nsk-key-2\ngm-key-3")
@@ -565,39 +482,29 @@ class ModelSettingsDialog(QDialog):
 
         rotation_content_layout.addWidget(rotation_card)
         self.api_key_rotation_section = CollapsibleSection(
-            "API key rotation",
+            "API key pool",
             rotation_content,
             expanded=False,
             content_margins=(0, 0, 0, 0),
         )
-        editor_layout.addWidget(self.api_key_rotation_section)
-
-        helper_card = QFrame()
-        helper_card.setObjectName("ModelSettingsHelperCard")
-        helper_layout = QVBoxLayout(helper_card)
-        helper_layout.setContentsMargins(8, 6, 8, 6)
-        helper_layout.setSpacing(3)
-
-        helper_title = QLabel("Editing notes")
-        helper_title.setObjectName("ModelSettingsHelperTitle")
-        helper_body = QLabel(
-            "Only enabled profiles can become active. Toggling a model keeps your current place in the list and preserves the editor state."
+        advanced_layout.addRow(self.api_key_rotation_section)
+        self.advanced_section = CollapsibleSection(
+            "Additional settings",
+            advanced_content,
+            expanded=False,
+            content_margins=(0, 0, 0, 0),
         )
-        helper_body.setObjectName("ModelSettingsHintText")
-        helper_body.setWordWrap(True)
-        helper_layout.addWidget(helper_title)
-        helper_layout.addWidget(helper_body)
-        editor_layout.addWidget(helper_card)
+        editor_layout.addWidget(self.advanced_section)
         editor_layout.addStretch(1)
 
         editor_scroll.setWidget(editor_content)
         right.addWidget(editor_scroll, 1)
 
-        left_container.setMinimumWidth(260)
-        right_container.setMinimumWidth(360)
+        left_container.setMinimumWidth(300)
+        right_container.setMinimumWidth(500)
         self.body_splitter.addWidget(left_container)
         self.body_splitter.addWidget(right_container)
-        self.body_splitter.setSizes([270, 500])
+        self.body_splitter.setSizes([420, 720])
         root.addWidget(self.body_splitter, 1)
 
         actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
@@ -629,7 +536,6 @@ class ModelSettingsDialog(QDialog):
         self.api_key_edit.textChanged.connect(self._on_api_key_changed)
         self.api_key_reveal_button.clicked.connect(self._toggle_api_key_visibility)
         self.api_key_copy_button.clicked.connect(self._copy_api_key)
-        self.api_key_rotation_button.clicked.connect(self._edit_api_key_rotation)
         self.api_key_rotation_editor.textChanged.connect(self._on_api_key_rotation_text_changed)
         self.base_url_edit.textChanged.connect(self._on_base_url_changed)
         self.model_popup_button.clicked.connect(self._show_model_popup)
@@ -678,9 +584,9 @@ class ModelSettingsDialog(QDialog):
             self.name_edit,
             self.provider_combo,
             self.api_key_edit,
-            self.api_key_rotation_button,
             self.api_key_rotation_editor,
             self.api_key_rotation_section.toggle_button,
+            self.advanced_section.toggle_button,
             self.base_url_edit,
             self.supports_images_checkbox,
         ):
@@ -862,6 +768,8 @@ class ModelSettingsDialog(QDialog):
         if provider == "gemini":
             return provider, api_key, "", GeminiModelFetcher(), (provider, api_key)
         base_url = str(self.base_url_edit.text() or "").strip().rstrip("/")
+        if provider == "anthropic":
+            return provider, api_key, base_url, AnthropicModelFetcher(), (provider, api_key, base_url)
         if not base_url:
             return None
         return provider, api_key, base_url, OpenAICompatibleModelFetcher(), (provider, api_key, base_url)
@@ -966,7 +874,7 @@ class ModelSettingsDialog(QDialog):
             selected_index = self.model_combo.findText(selected_model)
             if selected_index >= 0:
                 self.model_combo.setCurrentIndex(selected_index)
-            elif provider == "openai":
+            elif provider in {"openai", "anthropic"}:
                 self.model_combo.setEditText(selected_model)
         self.model_combo.blockSignals(False)
 
@@ -1022,7 +930,7 @@ class ModelSettingsDialog(QDialog):
             return
         current_value = self._get_current_model_value()
         self._set_current_model_widgets_text(current_value)
-        if self._normalized_provider() == "openai":
+        if self._normalized_provider() in {"openai", "anthropic"}:
             self._set_model_state(ModelLoadState.FALLBACK, message=message)
             return
         self._set_combo_placeholder(current_value or "Модели недоступны")
@@ -1065,7 +973,7 @@ class ModelSettingsDialog(QDialog):
     def _on_base_url_changed(self, _text: str) -> None:
         if self._loading_form:
             return
-        if self._normalized_provider() == "openai":
+        if self._normalized_provider() in {"openai", "anthropic"}:
             self._invalidate_pending_fetches()
             self._clear_model_options()
             self._set_model_state(ModelLoadState.IDLE)
@@ -1102,14 +1010,13 @@ class ModelSettingsDialog(QDialog):
     def _update_api_key_rotation_summary(self, *, api_keys: list[str] | None = None, active_key: str | None = None) -> None:
         keys = normalize_api_key_list(api_keys if api_keys is not None else self.api_key_rotation_editor.toPlainText())
         active = str(self.api_key_edit.text() if active_key is None else active_key or "").strip()
-        self.api_key_rotation_count_chip.setText(f"{len(keys)} key(s)")
         if not keys:
-            self.api_key_rotation_status_label.setText("If the pool is empty, the API key field is used on its own.")
+            self.api_key_rotation_status_label.setText("Uses the API key above.")
             return
         if active and active in keys:
-            self.api_key_rotation_status_label.setText(f"Active key: entry {keys.index(active) + 1} of {len(keys)}.")
+            self.api_key_rotation_status_label.setText(f"Using key {keys.index(active) + 1} of {len(keys)}.")
             return
-        self.api_key_rotation_status_label.setText("Pool ready. The first valid key will be used.")
+        self.api_key_rotation_status_label.setText("The first valid key will be used.")
 
     def _set_save_state(self, message: str) -> None:
         text = str(message or "").strip()
@@ -1131,13 +1038,9 @@ class ModelSettingsDialog(QDialog):
         return -1
 
     def _refresh_profile_counts(self) -> None:
-        total = len(self._profiles)
-        enabled = sum(1 for profile in self._profiles if bool(profile.get("enabled", True)))
-        self.profile_count_chip.setText(f"{total} total")
-        self.left_meta_chip.setText(f"{enabled} enabled")
         active_name = str(self._active_profile or "").strip() or "none"
         self.active_profile_label.setText(
-            f"Active now: <span style='color:#D5D9DF;font-weight:700'>{active_name}</span>"
+            f"Active: <span style='color:#D5D9DF;font-weight:700'>{active_name}</span>"
         )
 
     def _apply_profile_filter(self, value: str) -> None:
@@ -1169,14 +1072,18 @@ class ModelSettingsDialog(QDialog):
 
     def _update_base_url_field_state(self, provider: str) -> None:
         provider_normalized = str(provider or "").strip().lower()
-        enabled = provider_normalized == "openai"
+        enabled = provider_normalized in {"openai", "anthropic"}
         self.base_url_edit.setEnabled(enabled)
         if enabled:
-            self.base_url_edit.setPlaceholderText("https://api.openai.com/v1")
-            self.base_url_edit.setToolTip("")
+            if provider_normalized == "anthropic":
+                self.base_url_edit.setPlaceholderText("https://api.anthropic.com (optional, no /v1)")
+                self.base_url_edit.setToolTip("Optional Anthropic-compatible Base URL. Do not include /v1; the SDK adds it automatically.")
+            else:
+                self.base_url_edit.setPlaceholderText("https://api.openai.com/v1")
+                self.base_url_edit.setToolTip("")
         else:
-            self.base_url_edit.setPlaceholderText("Not used for gemini")
-            self.base_url_edit.setToolTip("Base URL is only used for openai profiles.")
+            self.base_url_edit.setPlaceholderText(f"Not used for {provider_normalized or 'this provider'}")
+            self.base_url_edit.setToolTip(f"Base URL is only used for openai or anthropic profiles.")
 
     def _display_name(self, profile: dict[str, str]) -> str:
         profile_id = str(profile.get("id") or "").strip()
@@ -1271,15 +1178,6 @@ class ModelSettingsDialog(QDialog):
             self._loading_form = False
             self._update_api_key_rotation_summary(api_keys=cleaned_keys, active_key=active_api_key)
 
-    def _edit_api_key_rotation(self) -> None:
-        row = self._current_row()
-        if row < 0 or row >= len(self._profiles):
-            return
-        self.api_key_rotation_section.set_expanded(True)
-        self.api_key_rotation_editor.setFocus(Qt.OtherFocusReason)
-        self.api_key_rotation_editor.ensureCursorVisible()
-        self._set_save_state("Edit the rotation pool inline and press Save to persist.")
-
     def _build_profile_item_widget(self, profile: dict[str, Any], row: int) -> QWidget:
         container = QWidget()
         container.setObjectName("ModelProfileRowCard")
@@ -1331,8 +1229,7 @@ class ModelSettingsDialog(QDialog):
         text_column.addLayout(first_row)
 
         model_name = str(profile.get("model") or "").strip()
-        details = " · ".join(part for part in (provider, model_name) if part)
-        details_label = QLabel(details)
+        details_label = QLabel(model_name)
         details_label.setObjectName("ModelProfileItemMeta")
         details_label.setEnabled(is_enabled)
         details_label.setMargin(0)
@@ -1399,12 +1296,6 @@ class ModelSettingsDialog(QDialog):
         if not self._profiles:
             self._selected_row = -1
             self._set_form_enabled(False)
-            self.form_hint.setText("Add a profile to start configuring models.")
-            self.selected_profile_title.setText("No profile selected")
-            self.profile_state_chip.setText("No profile selected")
-            self.summary_provider.setText("Provider: —")
-            self.summary_model.setText("Model: —")
-            self.summary_images.setText("Image input: off")
             self.duplicate_button.setEnabled(False)
             return
 
@@ -1438,12 +1329,6 @@ class ModelSettingsDialog(QDialog):
             self._selected_row = -1
             self._set_form_enabled(False)
             self._set_model_state(ModelLoadState.IDLE)
-            self.form_hint.setText("Select a profile and edit keys, model settings, and image support on the right.")
-            self.selected_profile_title.setText("No profile selected")
-            self.profile_state_chip.setText("No profile selected")
-            self.summary_provider.setText("Provider: —")
-            self.summary_model.setText("Model: —")
-            self.summary_images.setText("Image input: off")
             self.duplicate_button.setEnabled(False)
             self._refresh_profile_item_states()
             return
@@ -1470,20 +1355,7 @@ class ModelSettingsDialog(QDialog):
         self._set_model_state(ModelLoadState.IDLE)
         self._loading_form = False
         self._selected_row = row
-        profile_id = str(profile.get("id") or "").strip() or "(unnamed)"
-        status = "enabled" if bool(profile.get("enabled", True)) else "disabled"
-        self.selected_profile_title.setText(profile_id)
-        self.form_hint.setText(f"Editing profile: {profile_id} ({status})")
-        is_active = bool(profile_id != "(unnamed)" and profile_id == self._active_profile)
-        self.profile_state_chip.setText("Active profile" if is_active else status.title())
         self.duplicate_button.setEnabled(True)
-        provider_text = str(profile.get("provider") or "—").strip() or "—"
-        model_name = str(profile.get("model") or "—").strip() or "—"
-        self.summary_provider.setText(f"Provider: {provider_text}")
-        self.summary_model.setText(f"Model: {model_name}")
-        self.summary_images.setText(
-            "Image input: on" if bool(profile.get("supports_image_input")) else "Image input: off"
-        )
         self._refresh_profile_counts()
         self._refresh_profile_item_states()
         if self._current_fetch_inputs() is not None:
@@ -1496,7 +1368,7 @@ class ModelSettingsDialog(QDialog):
         if target_row < 0 or target_row >= len(self._profiles):
             return
         provider = self._normalized_provider()
-        base_url = str(self.base_url_edit.text() or "").strip() if provider == "openai" else ""
+        base_url = str(self.base_url_edit.text() or "").strip() if provider in {"openai", "anthropic"} else ""
         existing_profile = dict(self._profiles[target_row])
         current_api_key = str(self.api_key_edit.text() or "").strip()
         api_keys = self._current_rotation_api_keys()
@@ -1537,16 +1409,6 @@ class ModelSettingsDialog(QDialog):
             model_name = str(self._profiles[target_row].get("model") or "").strip()
             enabled = "yes" if bool(self._profiles[target_row].get("enabled", True)) else "no"
             item.setToolTip(f"Provider: {provider_text}\nModel: {model_name}\nEnabled: {enabled}".strip())
-        if target_row == self._selected_row:
-            profile_id = str(self._profiles[target_row].get("id") or "").strip() or "(unnamed)"
-            status = "enabled" if bool(self._profiles[target_row].get("enabled", True)) else "disabled"
-            self.selected_profile_title.setText(profile_id)
-            self.form_hint.setText(f"Editing profile: {profile_id} ({status})")
-            self.summary_provider.setText(f"Provider: {provider or '—'}")
-            self.summary_model.setText(f"Model: {self._profiles[target_row].get('model') or '—'}")
-            self.summary_images.setText(
-                "Image input: on" if bool(self._profiles[target_row].get("supports_image_input")) else "Image input: off"
-            )
         self._refresh_profile_counts()
 
     def _reconcile_active_profile(self) -> None:
@@ -1641,7 +1503,7 @@ class ModelSettingsDialog(QDialog):
         self._clear_model_options()
         self._loading_form = True
         self._set_current_model_widgets_text("")
-        if str(provider or "").strip().lower() != "openai":
+        if str(provider or "").strip().lower() not in {"openai", "anthropic"}:
             self.base_url_edit.clear()
         self._loading_form = False
         self._set_model_state(ModelLoadState.IDLE)
@@ -1713,7 +1575,7 @@ class ModelSettingsDialog(QDialog):
             model_name = str(profile.get("model") or "").strip()
             if provider not in ALLOWED_PROVIDERS:
                 self.profile_list.setCurrentRow(idx)
-                QMessageBox.warning(self, "Validation", "Provider must be openai or gemini.")
+                QMessageBox.warning(self, "Validation", "Provider must be openai, gemini, or anthropic.")
                 return None
             if not model_name:
                 self.profile_list.setCurrentRow(idx)

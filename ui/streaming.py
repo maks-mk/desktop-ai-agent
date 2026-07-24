@@ -78,7 +78,7 @@ def _describe_thinking_signal(content: Any) -> str:
         item_type = str(content.get("type") or "").strip().lower()
         if bool(content.get("thought")):
             return "thought_flag"
-        if item_type in {"thinking", "thought", "reasoning", "reasoning_content", "reasoning_summary"}:
+        if item_type in {"thinking", "thought", "reasoning", "reasoning_content", "reasoning_summary", "redacted_thinking"}:
             return f"type:{item_type}"
         if item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
             return f"type:{item_type}"
@@ -931,6 +931,7 @@ class StreamProcessor:
                 "analysis",
                 "analysis_content",
                 "summary_text",
+                "redacted_thinking",
             } or item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
                 return ""
             for key in ("text", "output_text", "content", "answer", "response", "final", "final_text"):
@@ -1005,6 +1006,7 @@ class StreamProcessor:
                 "reasoning_summary",
                 "analysis",
                 "analysis_content",
+                "redacted_thinking",
             } or item_type.startswith(("reasoning.", "thinking.", "thought.", "analysis.")):
                 return True
             for key in (

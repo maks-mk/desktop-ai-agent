@@ -3734,6 +3734,105 @@ class GuiUxTests(unittest.TestCase):
         self.assertEqual(dialog._model_popup_list.count(), 2)
         dialog._close_model_popup()
 
+    def test_model_settings_dialog_enables_base_url_for_anthropic(self):
+        payload = {
+            "active_profile": "claude-sonnet",
+            "profiles": [
+                {
+                    "id": "claude-sonnet",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5-20250929",
+                    "api_key": "sk-ant-demo",
+                    "base_url": "https://api.anthropic.com",
+                }
+            ],
+        }
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+            self.addCleanup(dialog.close)
+            self._process_events()
+
+            self.assertTrue(dialog.base_url_edit.isEnabled())
+            self.assertIn("anthropic", dialog.base_url_edit.placeholderText().lower())
+
+    def test_model_settings_dialog_anthropic_fetch_inputs_use_anthropic_fetcher(self):
+        from core.model_fetcher import AnthropicModelFetcher
+
+        payload = {
+            "active_profile": "claude-sonnet",
+            "profiles": [
+                {
+                    "id": "claude-sonnet",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5-20250929",
+                    "api_key": "sk-ant-demo",
+                    "base_url": "https://api.anthropic.com",
+                }
+            ],
+        }
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+            self.addCleanup(dialog.close)
+            self._process_events()
+
+            request = dialog._current_fetch_inputs()
+            self.assertIsNotNone(request)
+            provider, _api_key, base_url, fetcher, _cache_key = request
+            self.assertEqual(provider, "anthropic")
+            self.assertEqual(base_url, "https://api.anthropic.com")
+            self.assertIsInstance(fetcher, AnthropicModelFetcher)
+
+    def test_model_settings_dialog_anthropic_persists_base_url_on_save(self):
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog({"active_profile": None, "profiles": []}, self.window)
+            self.addCleanup(dialog.close)
+            dialog._add_profile()
+            self._process_events()
+            dialog.provider_combo.setCurrentText("anthropic")
+            dialog.model_edit.setText("claude-sonnet-4-5-20250929")
+            dialog.api_key_edit.setText("sk-ant-demo")
+            dialog.base_url_edit.setText("https://api.anthropic.com")
+            self._process_events()
+
+            dialog._save_and_accept()
+            result = dialog.result_payload()
+            self.assertEqual(result["profiles"][0]["provider"], "anthropic")
+            self.assertEqual(result["profiles"][0]["base_url"], "https://api.anthropic.com")
+
+    def test_model_settings_dialog_anthropic_loaded_state_shows_popup_and_reload_buttons(self):
+        payload = {
+            "active_profile": "claude-sonnet",
+            "profiles": [
+                {
+                    "id": "claude-sonnet",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5-20250929",
+                    "api_key": "sk-ant-demo",
+                    "base_url": "https://api.anthropic.com",
+                }
+            ],
+        }
+        with mock.patch.object(agent_cli.ModelSettingsDialog, "_schedule_fetch", autospec=True):
+            dialog = agent_cli.ModelSettingsDialog(payload, self.window)
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self._process_events()
+
+        dialog._invalidate_pending_fetches()
+        dialog._apply_loaded_models(
+            [
+                ModelEntry(id="claude-sonnet-4-5-20250929", family="", supports_image_input=True),
+                ModelEntry(id="claude-opus-4-20250514", family="", supports_image_input=True),
+            ]
+        )
+        self._process_events()
+
+        self.assertTrue(dialog.model_combo.isVisible())
+        self.assertTrue(dialog.model_popup_button.isVisible())
+        self.assertTrue(dialog.model_popup_button.isEnabled())
+        self.assertTrue(dialog.model_reload_button.isVisible())
+        self.assertTrue(dialog.model_reload_button.isEnabled())
+
     def test_composer_expands_to_max_height_then_uses_internal_scroll(self):
         self.window._handle_initialized(self._snapshot_payload())
         long_text = "\n".join(f"line-{idx}" for idx in range(80))

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-ALLOWED_PROVIDERS = {"openai", "gemini"}
+ALLOWED_PROVIDERS = {"openai", "gemini", "anthropic"}
 _ID_ALLOWED_RE = re.compile(r"[^a-z0-9_-]+")
 
 
@@ -137,7 +137,7 @@ def normalize_profiles_payload(payload: Any) -> dict[str, Any]:
         if not provider or not model_name:
             continue
         api_keys, api_key_index, invalid_api_keys, api_key, key_error_timestamps = _normalized_rotation_fields(raw)
-        base_url = _clean_text(raw.get("base_url")) if provider == "openai" else ""
+        base_url = _clean_text(raw.get("base_url")) if provider in {"openai", "anthropic"} else ""
         supports_image_input = _normalize_bool(raw.get("supports_image_input"))
         enabled = _normalize_bool(raw.get("enabled")) if "enabled" in raw else True
 
@@ -206,6 +206,7 @@ def bootstrap_profiles_from_env(env: Mapping[str, str] | None = None) -> dict[st
 
     openai_model = _clean_text(source.get("OPENAI_MODEL"))
     gemini_model = _clean_text(source.get("GEMINI_MODEL"))
+    anthropic_model = _clean_text(source.get("ANTHROPIC_MODEL"))
 
     chosen_provider = ""
     chosen_model = ""
@@ -221,6 +222,11 @@ def bootstrap_profiles_from_env(env: Mapping[str, str] | None = None) -> dict[st
         chosen_provider = "gemini"
         chosen_model = gemini_model
         chosen_api_key = _clean_text(source.get("GEMINI_API_KEY"))
+    elif provider_hint == "anthropic" and anthropic_model:
+        chosen_provider = "anthropic"
+        chosen_model = anthropic_model
+        chosen_api_key = _clean_text(source.get("ANTHROPIC_API_KEY"))
+        chosen_base_url = _clean_text(source.get("ANTHROPIC_BASE_URL"))
     elif openai_model:
         chosen_provider = "openai"
         chosen_model = openai_model
@@ -230,6 +236,11 @@ def bootstrap_profiles_from_env(env: Mapping[str, str] | None = None) -> dict[st
         chosen_provider = "gemini"
         chosen_model = gemini_model
         chosen_api_key = _clean_text(source.get("GEMINI_API_KEY"))
+    elif anthropic_model:
+        chosen_provider = "anthropic"
+        chosen_model = anthropic_model
+        chosen_api_key = _clean_text(source.get("ANTHROPIC_API_KEY"))
+        chosen_base_url = _clean_text(source.get("ANTHROPIC_BASE_URL"))
 
     if chosen_provider and chosen_model:
         return normalize_profiles_payload(
@@ -273,7 +284,7 @@ def find_profile_by_id(payload: Any, profile_id: Any) -> dict[str, Any] | None:
 def _profile_merge_key(profile: Mapping[str, Any]) -> tuple[str, str, str]:
     provider = _normalize_provider(profile.get("provider"))
     model_name = _clean_text(profile.get("model"))
-    base_url = _clean_text(profile.get("base_url")) if provider == "openai" else ""
+    base_url = _clean_text(profile.get("base_url")) if provider in {"openai", "anthropic"} else ""
     return provider, model_name, base_url
 
 
@@ -307,7 +318,7 @@ def merge_profiles_with_env(existing_payload: Any, env_payload: Any) -> dict[str
         env_api_key = _clean_text(env_profile.get("api_key"))
         if env_api_key and not _clean_text(existing_profile.get("api_key")):
             existing_profile["api_key"] = env_api_key
-        if env_key[0] == "openai":
+        if env_key[0] in {"openai", "anthropic"}:
             env_base_url = _clean_text(env_profile.get("base_url"))
             if env_base_url and not _clean_text(existing_profile.get("base_url")):
                 existing_profile["base_url"] = env_base_url

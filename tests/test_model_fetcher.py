@@ -5,8 +5,10 @@ from unittest.mock import patch
 import httpx
 
 from core.model_fetcher import (
+    AnthropicModelFetcher,
     AuthError,
     EmptyResultError,
+    FetchError,
     GeminiModelFetcher,
     InvalidResponseError,
     ModelEntry,
@@ -34,6 +36,22 @@ class _FakeAsyncClient:
         if self._error is not None:
             raise self._error
         return self._response
+
+
+class _PagedFakeAsyncClient:
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self._responses = list(responses)
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, _url: str, **_kwargs):
+        self.requests.append((_url, _kwargs))
+        return self._responses.pop(0)
 
 
 class _FailingFetcher:
@@ -221,6 +239,142 @@ class ModelFetcherTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(captured, [(42, "Не удалось загрузить модели.")])
+
+    def test_anthropic_returns_models_from_data(self):
+        response = _openai_response(
+            {"id": "claude-sonnet-4-5-20250929"},
+            {"id": "claude-opus-4-20250514"},
+        )
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
+            result = self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+        self.assertEqual([entry.id for entry in result], ["claude-sonnet-4-5-20250929", "claude-opus-4-20250514"])
+        self.assertTrue(all(entry.supports_image_input for entry in result))
+
+    def test_anthropic_fetches_all_pages_with_after_id_cursor(self):
+        responses = [
+            httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "claude-sonnet-5"}, {"id": "claude-opus-4-8"}],
+                    "has_more": True,
+                    "last_id": "claude-opus-4-8",
+                },
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+            httpx.Response(
+                200,
+                json={"data": [{"id": "claude-haiku-4-5"}], "has_more": False},
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+        ]
+        client = _PagedFakeAsyncClient(responses)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            result = self._run(AnthropicModelFetcher().fetch("sk-ant-key", "https://proxy.example"))
+
+        self.assertEqual([entry.id for entry in result], ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"])
+        self.assertEqual(client.requests[0][0], "https://proxy.example/v1/models")
+        self.assertNotIn("params", client.requests[0][1])
+        self.assertEqual(client.requests[1][1]["params"], {"after_id": "claude-opus-4-8"})
+
+    def test_anthropic_pagination_deduplicates_model_ids(self):
+        responses = [
+            httpx.Response(
+                200,
+                json={"data": [{"id": "claude-sonnet-5"}], "has_more": True, "last_id": "cursor-1"},
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+            httpx.Response(
+                200,
+                json={"data": [{"id": "claude-sonnet-5"}, {"id": "claude-opus-4-8"}], "has_more": False},
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+        ]
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_PagedFakeAsyncClient(responses)):
+            result = self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+        self.assertEqual([entry.id for entry in result], ["claude-sonnet-5", "claude-opus-4-8"])
+
+    def test_anthropic_pagination_requires_last_id(self):
+        response = httpx.Response(
+            200,
+            json={"data": [{"id": "claude-sonnet-5"}], "has_more": True},
+            request=httpx.Request("GET", "https://example.test/v1/models"),
+        )
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
+            with self.assertRaisesRegex(FetchError, "without last_id"):
+                self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+
+    def test_anthropic_pagination_rejects_repeated_last_id(self):
+        responses = [
+            httpx.Response(
+                200,
+                json={"data": [{"id": "claude-sonnet-5"}], "has_more": True, "last_id": "cursor-1"},
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+            httpx.Response(
+                200,
+                json={"data": [{"id": "claude-opus-4-8"}], "has_more": True, "last_id": "cursor-1"},
+                request=httpx.Request("GET", "https://example.test/v1/models"),
+            ),
+        ]
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_PagedFakeAsyncClient(responses)):
+            with self.assertRaisesRegex(FetchError, "repeated last_id"):
+                self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+
+    def test_anthropic_uses_x_api_key_header(self):
+        response = _openai_response({"id": "claude-sonnet-4-5-20250929"})
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+        headers = client.requests[0][1]["headers"]
+        self.assertEqual(headers["x-api-key"], "sk-ant-key")
+        self.assertEqual(headers["anthropic-version"], "2023-06-01")
+        self.assertNotIn("Authorization", headers)
+
+    def test_anthropic_default_endpoint_without_base_url(self):
+        response = _openai_response({"id": "claude-sonnet-4-5-20250929"})
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+        self.assertEqual(client.requests[0][0], "https://api.anthropic.com/v1/models")
+
+    def test_anthropic_custom_base_url(self):
+        response = _openai_response({"id": "claude-sonnet-4-5-20250929"})
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(AnthropicModelFetcher().fetch("sk-ant-key", "https://proxy.example/v1"))
+        self.assertEqual(client.requests[0][0], "https://proxy.example/v1/models")
+
+    def test_anthropic_custom_base_url_without_v1(self):
+        response = _openai_response({"id": "claude-sonnet-4-5-20250929"})
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(AnthropicModelFetcher().fetch("sk-ant-key", "https://proxy.example"))
+        self.assertEqual(client.requests[0][0], "https://proxy.example/v1/models")
+
+    def test_anthropic_custom_base_url_with_trailing_slash(self):
+        response = _openai_response({"id": "claude-sonnet-4-5-20250929"})
+        client = _FakeAsyncClient(response=response)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=client):
+            self._run(AnthropicModelFetcher().fetch("sk-ant-key", "https://proxy.example/"))
+        self.assertEqual(client.requests[0][0], "https://proxy.example/v1/models")
+
+    def test_anthropic_empty_raises(self):
+        response = _openai_response()
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
+            with self.assertRaises(EmptyResultError):
+                self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
+
+    def test_anthropic_auth_error_on_401(self):
+        response = _openai_response(status_code=401)
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(response=response)):
+            with self.assertRaises(AuthError):
+                self._run(AnthropicModelFetcher().fetch("bad-key"))
+
+    def test_anthropic_network_error_on_timeout(self):
+        timeout_error = httpx.ReadTimeout("timed out")
+        with patch("core.model_fetcher.httpx.AsyncClient", return_value=_FakeAsyncClient(error=timeout_error)):
+            with self.assertRaises(NetworkError):
+                self._run(AnthropicModelFetcher().fetch("sk-ant-key"))
 
 
 if __name__ == "__main__":

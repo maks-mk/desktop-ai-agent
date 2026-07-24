@@ -2193,6 +2193,41 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(remapped_id, r"^[A-Za-z0-9]{9}$")
         self.assertEqual(sanitized[1].tool_call_id, remapped_id)
 
+    def test_anthropic_context_preserves_provider_tool_use_ids_for_tool_results(self):
+        config = self._make_config(
+            PROVIDER="anthropic",
+            ANTHROPIC_API_KEY="test-key",
+            ANTHROPIC_MODEL="claude-haiku-4-5-20251001",
+        )
+        nodes = AgentNodes(
+            config=config,
+            llm=FakeLLM([]),
+            tools=[],
+            llm_with_tools=FakeLLM([]),
+        )
+        source_id = "toolu_016HR4mVCZZjkeCPZvWq5Htu"
+        sanitized = nodes._sanitize_messages_for_model(
+            [
+                AIMessage(
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "id": source_id,
+                            "name": "list_directory",
+                            "input": {"path": "."},
+                        }
+                    ],
+                    tool_calls=[{"id": source_id, "name": "list_directory", "args": {"path": "."}}],
+                ),
+                ToolMessage(tool_call_id=source_id, name="list_directory", content="index.html found"),
+            ]
+        )
+
+        ai_message, tool_message = sanitized
+        self.assertEqual(ai_message.tool_calls[0]["id"], source_id)
+        self.assertEqual(ai_message.content[0]["id"], source_id)
+        self.assertEqual(tool_message.tool_call_id, source_id)
+
     async def test_openai_context_stringifies_assistant_content_lists_before_invoke(self):
         config = self._make_config()
         llm = OpenAIContentSafeFakeLLM([AIMessage(content="ok")])
@@ -4042,6 +4077,24 @@ class RuntimeRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env_map["API_KEY"], "sk-config")
         self.assertEqual(env_map["BASE_URL"], "https://openrouter.ai/api/v1")
         self.assertEqual(env_map["OPENAI_MODEL"], "openai/gpt-oss-120b")
+
+    def test_profile_bootstrap_env_uses_anthropic_base_url_for_anthropic(self):
+        config = self._make_config(
+            PROVIDER="anthropic",
+            ANTHROPIC_MODEL="claude-haiku-4-5-20251001",
+            ANTHROPIC_API_KEY="sk-ant-config",
+            ANTHROPIC_BASE_URL="https://cc.freemodel.dev",
+            OPENAI_MODEL="gpt-4o",
+            OPENAI_API_KEY="sk-openai-config",
+            OPENAI_BASE_URL="https://api.openai.com/v1",
+        )
+        env_map = gui_runtime.AgentRunWorker._profile_bootstrap_env_from_config(config)
+        self.assertEqual(env_map["PROVIDER"], "anthropic")
+        self.assertEqual(env_map["MODEL"], "claude-haiku-4-5-20251001")
+        self.assertEqual(env_map["API_KEY"], "sk-ant-config")
+        self.assertEqual(env_map["BASE_URL"], "https://cc.freemodel.dev")
+        self.assertEqual(env_map["ANTHROPIC_BASE_URL"], "https://cc.freemodel.dev")
+        self.assertEqual(env_map["OPENAI_BASE_URL"], "https://api.openai.com/v1")
 
     def test_worker_start_run_with_missing_model_profile_emits_notice(self):
         worker = gui_runtime.AgentRunWorker()

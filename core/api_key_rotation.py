@@ -287,13 +287,19 @@ class RotatingChatModel:
         self._model_cache.clear()
 
     def _initial_api_key(self) -> str:
-        if getattr(self._config, "provider", "") == "gemini":
+        provider = getattr(self._config, "provider", "")
+        if provider == "gemini":
             secret = getattr(self._config, "gemini_api_key", None)
+        elif provider == "anthropic":
+            secret = getattr(self._config, "anthropic_api_key", None)
         else:
             secret = getattr(self._config, "openai_api_key", None)
         return secret.get_secret_value() if secret is not None else ""
 
     def _model_label(self) -> str:
-        if getattr(self._config, "provider", "") == "gemini":
+        provider = getattr(self._config, "provider", "")
+        if provider == "gemini":
             return str(getattr(self._config, "gemini_model", "") or self._profile_id or "model")
+        if provider == "anthropic":
+            return str(getattr(self._config, "anthropic_model", "") or self._profile_id or "model")
         return str(getattr(self._config, "openai_model", "") or self._profile_id or "model")

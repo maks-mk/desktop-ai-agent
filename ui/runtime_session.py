@@ -231,19 +231,30 @@ class RuntimeSessionCoordinator:
         provider = str(config.provider or "").strip().lower()
         openai_key = config.openai_api_key.get_secret_value() if config.openai_api_key else ""
         gemini_key = config.gemini_api_key.get_secret_value() if config.gemini_api_key else ""
-        model = config.openai_model if provider == "openai" else config.gemini_model
-        api_key = openai_key if provider == "openai" else gemini_key
+        anthropic_key = config.anthropic_api_key.get_secret_value() if config.anthropic_api_key else ""
+        if provider == "openai":
+            model, api_key = config.openai_model, openai_key
+            base_url = str(config.openai_base_url or "")
+        elif provider == "anthropic":
+            model, api_key = config.anthropic_model, anthropic_key
+            base_url = str(config.anthropic_base_url or "")
+        else:
+            model, api_key = config.gemini_model, gemini_key
+            base_url = ""
 
         return {
             "PROVIDER": provider,
             "MODEL": str(model or ""),
             "API_KEY": str(api_key or ""),
-            "BASE_URL": str(config.openai_base_url or ""),
+            "BASE_URL": base_url,
             "OPENAI_MODEL": str(config.openai_model or ""),
             "OPENAI_API_KEY": str(openai_key or ""),
             "OPENAI_BASE_URL": str(config.openai_base_url or ""),
             "GEMINI_MODEL": str(config.gemini_model or ""),
             "GEMINI_API_KEY": str(gemini_key or ""),
+            "ANTHROPIC_MODEL": str(config.anthropic_model or ""),
+            "ANTHROPIC_API_KEY": str(anthropic_key or ""),
+            "ANTHROPIC_BASE_URL": str(config.anthropic_base_url or ""),
             "SHOW_MODEL_THOUGHTS": "false",
         }
 
@@ -263,6 +274,10 @@ class RuntimeSessionCoordinator:
             overrides["openai_model"] = model_name
             overrides["openai_api_key"] = SecretStr(api_key) if api_key else None
             overrides["openai_base_url"] = base_url or None
+        elif provider == "anthropic":
+            overrides["anthropic_model"] = model_name
+            overrides["anthropic_api_key"] = SecretStr(api_key) if api_key else None
+            overrides["anthropic_base_url"] = base_url or None
         else:
             overrides["gemini_model"] = model_name
             overrides["gemini_api_key"] = SecretStr(api_key) if api_key else None

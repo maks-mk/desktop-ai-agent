@@ -339,6 +339,17 @@ def strip_image_content_from_message_content(content: Any) -> tuple[Any, int]:
     return sanitized_items, removed_blocks
 
 
+def _as_anthropic_image_block(base64_data: str, mime_type: str) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": mime_type,
+            "data": base64_data,
+        },
+    }
+
+
 def _as_openai_image_url_block(base64_data: str, mime_type: str) -> dict[str, Any]:
     return {
         "type": "image_url",
@@ -378,6 +389,9 @@ def materialize_user_message_content_for_model(content: Any, *, provider: str = 
         mime_type = str(item.get("mime_type") or _image_mime_type(file_path))
         if provider_name == "openai":
             materialized.append(_as_openai_image_url_block(base64_data, mime_type))
+            continue
+        if provider_name == "anthropic":
+            materialized.append(_as_anthropic_image_block(base64_data, mime_type))
             continue
         materialized.append(
             {

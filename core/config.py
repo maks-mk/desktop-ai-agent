@@ -116,7 +116,7 @@ class AgentConfig(BaseSettings):
     log_file: Path = Field(default=BASE_DIR / "logs" / "agent.log", alias="LOG_FILE")
 
     # Provider Settings
-    provider: Literal["gemini", "openai"] = Field(default="gemini", alias="PROVIDER")
+    provider: Literal["gemini", "openai", "anthropic"] = Field(default="gemini", alias="PROVIDER")
     active_model_profile_id: Optional[str] = Field(default=None, alias="ACTIVE_MODEL_PROFILE_ID")
 
     # Tavily Search
@@ -130,6 +130,14 @@ class AgentConfig(BaseSettings):
     openai_api_key: Optional[SecretStr] = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o", alias="OPENAI_MODEL")
     openai_base_url: Optional[str] = Field(default=None, alias="OPENAI_BASE_URL")
+
+    # Anthropic
+    anthropic_api_key: Optional[SecretStr] = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-sonnet-4-5-20250929", alias="ANTHROPIC_MODEL")
+    anthropic_base_url: Optional[str] = Field(default=None, alias="ANTHROPIC_BASE_URL")
+    anthropic_max_tokens: int = Field(default=8192, alias="ANTHROPIC_MAX_TOKENS")
+    anthropic_thinking_budget: int = Field(default=4096, alias="ANTHROPIC_THINKING_BUDGET")
+    anthropic_reasoning: str = Field(default="", alias="ANTHROPIC_REASONING")
     enable_model_reasoning: bool = Field(default=True, alias="ENABLE_MODEL_REASONING")
     debug_reasoning_stream: bool = Field(default=False, alias="DEBUG_REASONING_STREAM")
     model_reasoning_effort: str = Field(default="medium", alias="MODEL_REASONING_EFFORT")
@@ -411,6 +419,18 @@ class AgentConfig(BaseSettings):
 
     @model_validator(mode="after")
     def validate_provider_keys(self) -> "AgentConfig":
+        if self.provider == "anthropic":
+            reasoning = str(self.anthropic_reasoning or "").strip().lower()
+            allowed = {"", "off", "none", "low", "medium", "high", "xhigh", "max"}
+            if reasoning not in allowed:
+                raise ValueError(
+                    f"ANTHROPIC_REASONING='{self.anthropic_reasoning}' is invalid. "
+                    "Allowed: low, medium, high, xhigh, max, off, none, or empty."
+                )
+            self.anthropic_reasoning = reasoning
+            if not self.anthropic_api_key and not self.anthropic_base_url:
+                raise ValueError("ANTHROPIC_API_KEY required for anthropic provider.")
+
         if self.provider == "gemini" and not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY required for gemini provider.")
 

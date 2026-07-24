@@ -16,6 +16,7 @@ from langchain_core.language_models import BaseChatModel
 
 from core.api_key_rotation import RotatingChatModel
 from core.config import AgentConfig
+from core.providers.anthropic import create_anthropic_chat_model
 from core.providers.gemini import create_gemini_chat_model
 from core.providers.openai_reasoning import create_openai_chat_model
 
@@ -32,6 +33,8 @@ def create_llm(config: AgentConfig, *, api_key_override: str | None = None) -> B
         return create_gemini_chat_model(config, api_key_override=api_key_override)
     if config.provider == "openai":
         return create_openai_chat_model(config, api_key_override=api_key_override)
+    if config.provider == "anthropic":
+        return create_anthropic_chat_model(config, api_key_override=api_key_override)
     raise ValueError(f"Unknown provider: {config.provider}")
 
 

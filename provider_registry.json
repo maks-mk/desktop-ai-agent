@@ -278,6 +278,32 @@
       "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through freemodel.dev."
     },
 	{
+      "id": "tokenlayer",
+      "enabled": true,
+      "priority": 60,
+      "match": [
+        "api.tokenlayer.net"
+      ],
+      "match_type": "exact",
+      "supports_reasoning": true,
+      "validation": "map",
+      "reasoning": {
+        "path": "reasoning_effort",
+        "allowed_values": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "value_map": {
+          "xhigh": "high"
+        },
+        "extra_fields": {
+          "reasoning.summary": "auto"
+        }
+      },
+      "notes": "Experimental: testing OpenAI-style reasoning payload for GPT-5 models through tokenlayer.net."
+    },
+	{
       "id": "agentrouter",
       "enabled": true,
       "priority": 60,

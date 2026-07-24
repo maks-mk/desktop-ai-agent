@@ -303,13 +303,26 @@ class ContextBuilder:
         if isinstance(content, list):
             new_content: list = []
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "reasoning":
-                    # OpenAI Responses API reasoning blocks have ``summary`` (list)
-                    # but no ``reasoning`` string key.  Gemini's native reasoning
-                    # blocks have ``reasoning`` (string) and ``extras.signature``
-                    # — those must be preserved for multi-turn tool-calling.
-                    if "reasoning" not in block:
-                        block_count += 1
+                if isinstance(block, dict):
+                    block_type = block.get("type")
+                    if block_type == "reasoning":
+                        # OpenAI Responses API reasoning blocks have ``summary`` (list)
+                        # but no ``reasoning`` string key.  Gemini's native reasoning
+                        # blocks have ``reasoning`` (string) and ``extras.signature``
+                        # — those must be preserved for multi-turn tool-calling.
+                        if "reasoning" not in block:
+                            block_count += 1
+                            continue
+                    elif block_type == "thinking":
+                        # Anthropic thinking blocks carry ``thinking`` (text) and
+                        # ``signature`` for multi-turn continuity.  Preserve them
+                        # so extended thinking round-trips across turns.  When the
+                        # API returns ``display="omitted"`` the block arrives as
+                        # ``redacted_thinking`` with ``data`` instead — also keep.
+                        continue
+                    elif block_type == "redacted_thinking":
+                        # Anthropic redacted thinking blocks contain ``data`` and
+                        # must be preserved verbatim for multi-turn continuity.
                         continue
                 new_content.append(block)
             if block_count:
@@ -401,7 +414,7 @@ class ContextBuilder:
                 system_messages.append(message)
             else:
                 non_system_messages.append(message)
-        if self.config.provider == "openai" and len(system_messages) > 1:
+        if self.config.provider in ("openai", "anthropic") and len(system_messages) > 1:
             merged_system_content = "\n\n".join(
                 stringify_content(message.content).strip()
                 for message in system_messages
@@ -471,6 +484,12 @@ class ContextBuilder:
 
     def _normalize_tool_call_id_for_provider(self, raw_id: str, *, used_ids: set[str]) -> str:
         normalized = str(raw_id or "").strip()
+        # Anthropic tool_use IDs are provider-issued opaque values (``toolu_…``).
+        # They must remain identical to the ID in the assistant content block so
+        # the following ToolMessage serializes as its matching tool_result.
+        if self.config.provider == "anthropic" and normalized.startswith("toolu_") and normalized not in used_ids:
+            used_ids.add(normalized)
+            return normalized
         if self._provider_safe_tool_call_id_re.match(normalized) and normalized not in used_ids:
             used_ids.add(normalized)
             return normalized

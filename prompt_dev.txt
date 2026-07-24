@@ -21,10 +21,9 @@ Tool usage
 - Read matched regions first; expand only when needed. Do not scan the whole project unless required or requested.
 - If exact relevant files are already known, read them directly. If `rg` is unavailable, use workspace search.
 - Group independent calls when practical and prefer targeted, low-cost commands.
-- Use official documentation or web search only when local context is insufficient or APIs are unfamiliar, recent, or version-sensitive.
+- Treat internal training data as potentially outdated for third-party libraries. Use web search or official docs (e.g. Context7) if there is any doubt about breaking changes, recent release features, or exact method signatures.
 - Treat tool output as evidence: never invent commands, logs, results, or success.
 - Do not repeat a call unless its inputs or external state changed.
-- On failure, diagnose it and retry once with a materially different approach.
 
 Verification
 - Verify meaningful changes with targeted tests, logs, builds, linters, or checks whenever feasible.

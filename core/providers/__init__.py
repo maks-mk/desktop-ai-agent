@@ -9,6 +9,7 @@ Public API:
     patch_langchain_google_genai_retry_kwargs — retry-kwargs monkey-patch
 """
 
+from core.providers.anthropic import create_anthropic_chat_model
 from core.providers.base import (
     chat_model_accepts_kwarg,
     gemini_model_supports_thinking_budget,
@@ -32,6 +33,7 @@ from core.providers.openai_reasoning import (
 
 __all__ = [
     "create_llm",
+    "create_anthropic_chat_model",
     "create_runtime_llm",
     "prepare_llm_with_tools",
     "extract_openai_reasoning_delta",

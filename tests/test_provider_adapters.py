@@ -518,5 +518,291 @@ class LlmApiModeTests(unittest.TestCase):
         self.assertTrue(model._use_responses_api(payload))
 
 
+class AnthropicCompatibleStreamTests(unittest.TestCase):
+    def test_message_delta_dict_metadata_is_compatible_with_chat_anthropic(self):
+        from types import SimpleNamespace
+
+        from core.providers.anthropic import _build_anthropic_compatible_stream_adapter
+
+        class FakeBase:
+            def _make_message_chunk_from_anthropic_event(self, event, *args, **kwargs):
+                return (
+                    event.usage.cache_creation.model_dump(),
+                    event.context_management.model_dump(),
+                    event.delta.container.model_dump(mode="json"),
+                )
+
+        event = SimpleNamespace(
+            type="message_delta",
+            usage=SimpleNamespace(cache_creation={"ephemeral_5m_input_tokens": 0}),
+            context_management={"edits": []},
+            delta=SimpleNamespace(container={"id": "container-1"}),
+        )
+        adapter = _build_anthropic_compatible_stream_adapter(FakeBase)()
+
+        cache_creation, context_management, container = adapter._make_message_chunk_from_anthropic_event(event)
+
+        self.assertEqual(cache_creation, {"ephemeral_5m_input_tokens": 0})
+        self.assertEqual(context_management, {"edits": []})
+        self.assertEqual(container, {"id": "container-1"})
+
+    def test_non_message_delta_event_is_not_changed(self):
+        from types import SimpleNamespace
+
+        from core.providers.anthropic import _normalize_anthropic_message_delta_event
+
+        event = SimpleNamespace(type="content_block_delta", delta={"text": "hello"})
+        self.assertIs(_normalize_anthropic_message_delta_event(event), event)
+
+
+class AnthropicReasoningTests(unittest.TestCase):
+    """Tests for Anthropic effort-based reasoning configuration (section 17.10)."""
+
+    def _make_config(self, **overrides) -> "AgentConfig":
+        import os
+        from core.config import AgentConfig
+
+        env = {
+            "PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_MAX_TOKENS": "8192",
+        }
+        env.update(overrides)
+        with mock.patch.dict(os.environ, env, clear=False):
+            return AgentConfig()
+
+    def test_reasoning_effort_low_sets_adaptive_thinking(self):
+        """ANTHROPIC_REASONING=low → thinking.type=adaptive, effort=low."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="low")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "adaptive"})
+        self.assertEqual(model.effort, "low")
+
+    def test_reasoning_effort_max_sets_adaptive_thinking(self):
+        """ANTHROPIC_REASONING=max → thinking.type=adaptive, effort=max."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="max")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "adaptive"})
+        self.assertEqual(model.effort, "max")
+
+    def test_reasoning_off_disables_thinking(self):
+        """ANTHROPIC_REASONING=off → thinking.type=disabled."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="off")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "disabled"})
+
+    def test_reasoning_empty_uses_budget_mode(self):
+        """ANTHROPIC_REASONING empty → budget-based thinking.type=enabled."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking.get("type"), "enabled")
+        self.assertIn("budget_tokens", model.thinking)
+
+    def test_adaptive_only_models_omit_sampling_and_manual_budget(self):
+        """New Claude models use adaptive thinking without temperature or a budget."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        for model_name in (
+            "claude-sonnet-5",
+            "claude-sonnet-5-20260101",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+        ):
+            with self.subTest(model_name=model_name):
+                cfg = self._make_config(ANTHROPIC_MODEL=model_name, ANTHROPIC_REASONING="")
+                model = create_anthropic_chat_model(cfg)
+                payload = model._get_request_payload([{"role": "user", "content": "hi"}])
+                self.assertEqual(payload["thinking"], {"type": "adaptive"})
+                self.assertNotIn("budget_tokens", payload["thinking"])
+                self.assertNotIn("temperature", payload)
+
+    def test_adaptive_only_model_passes_effort_through_output_config(self):
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_MODEL="claude-sonnet-5", ANTHROPIC_REASONING="high")
+        model = create_anthropic_chat_model(cfg)
+        payload = model._get_request_payload([{"role": "user", "content": "hi"}])
+        self.assertEqual(payload["thinking"], {"type": "adaptive"})
+        self.assertEqual(payload["output_config"], {"effort": "high"})
+        self.assertNotIn("temperature", payload)
+
+    def test_reasoning_off_disables_adaptive_only_models(self):
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_MODEL="claude-opus-4-8", ANTHROPIC_REASONING="off")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "disabled"})
+
+    def test_sonnet_4_5_keeps_budget_thinking_and_temperature(self):
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="")
+        model = create_anthropic_chat_model(cfg)
+        payload = model._get_request_payload([{"role": "user", "content": "hi"}])
+        self.assertEqual(payload["thinking"]["type"], "enabled")
+        self.assertIn("budget_tokens", payload["thinking"])
+        self.assertEqual(payload["temperature"], cfg.temperature)
+
+    def test_opus_4_6_empty_reasoning_uses_adaptive_thinking(self):
+        """Opus 4.6 must not receive deprecated budget-based thinking."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(
+            ANTHROPIC_MODEL="claude-opus-4-6",
+            ANTHROPIC_REASONING="",
+            ANTHROPIC_THINKING_BUDGET="4096",
+        )
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "adaptive"})
+
+    def test_reasoning_effort_priority_over_budget(self):
+        """When both ANTHROPIC_REASONING and ANTHROPIC_THINKING_BUDGET are set,
+        effort-based mode takes priority and budget is ignored."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="high", ANTHROPIC_THINKING_BUDGET="8192")
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.thinking, {"type": "adaptive"})
+        self.assertEqual(model.effort, "high")
+
+    def test_reasoning_budget_clamped_to_max_tokens(self):
+        """budget_tokens must be >= 1024 and < max_tokens."""
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        cfg = self._make_config(ANTHROPIC_REASONING="", ANTHROPIC_THINKING_BUDGET="99999", ANTHROPIC_MAX_TOKENS="8192")
+        model = create_anthropic_chat_model(cfg)
+        budget = model.thinking.get("budget_tokens")
+        self.assertGreaterEqual(budget, 1024)
+        self.assertLess(budget, 8192)
+
+    def test_reasoning_invalid_raises(self):
+        """Invalid ANTHROPIC_REASONING value must raise ValueError."""
+        from core.config import AgentConfig
+
+        with self.assertRaises(Exception):
+            AgentConfig(
+                PROVIDER="anthropic",
+                ANTHROPIC_API_KEY="sk-ant-test",
+                ANTHROPIC_MODEL="claude-sonnet-4-5-20250929",
+                ANTHROPIC_REASONING="invalid_level",
+            )
+
+
+class AnthropicHeadersTests(unittest.TestCase):
+    """Tests for Anthropic header overrides from headers.json (like OpenAI)."""
+
+    def test_anthropic_factory_uses_native_chat_anthropic_parameter_names(self):
+        """Do not rely on OpenAI-style aliases accepted by a LangChain version."""
+        import os
+        from core.config import AgentConfig
+        from core.providers.anthropic import create_anthropic_chat_model
+
+        received_kwargs = {}
+
+        class FakeChatAnthropic:
+            def __init__(self, **kwargs):
+                received_kwargs.update(kwargs)
+
+        env = {
+            "PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = AgentConfig()
+        with mock.patch("langchain_anthropic.ChatAnthropic", FakeChatAnthropic):
+            create_anthropic_chat_model(cfg)
+
+        kwargs = received_kwargs
+        self.assertEqual(kwargs["anthropic_api_key"], "sk-ant-test")
+        self.assertEqual(kwargs["anthropic_api_url"], "https://proxy.example")
+        self.assertNotIn("api_key", kwargs)
+        self.assertNotIn("base_url", kwargs)
+
+    def test_load_provider_headers_alias_matches_openai(self):
+        from core.http_headers import load_openai_headers, load_provider_headers
+
+        # load_openai_headers is a backward-compatible wrapper that delegates
+        # to load_provider_headers — both must return identical results.
+        import json
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "headers.json"
+            path.write_text(json.dumps({"User-Agent": "X/1", "x-y": "z"}), encoding="utf-8")
+            self.assertEqual(load_openai_headers(path), load_provider_headers(path))
+
+    def test_anthropic_factory_passes_default_headers(self):
+        """The Anthropic factory must pass default_headers from headers.json,
+        mirroring the OpenAI provider behavior."""
+        import os
+        from core.providers.anthropic import create_anthropic_chat_model
+        from core.config import AgentConfig
+
+        env = {
+            "PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_MAX_TOKENS": "8192",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = AgentConfig()
+        with mock.patch(
+            "core.providers.anthropic.load_provider_headers",
+            return_value={"User-Agent": "CustomAgent/2.0", "x-custom": "yes"},
+        ):
+            model = create_anthropic_chat_model(cfg)
+        self.assertEqual(model.default_headers.get("User-Agent"), "CustomAgent/2.0")
+        self.assertEqual(model.default_headers.get("x-custom"), "yes")
+
+    def test_anthropic_factory_strips_v1_from_base_url(self):
+        """The Anthropic SDK appends /v1/messages itself, so a base_url ending
+        with /v1 must be stripped to avoid .../v1/v1/messages."""
+        import os
+        from core.providers.anthropic import create_anthropic_chat_model
+        from core.config import AgentConfig
+
+        env = {
+            "PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_MAX_TOKENS": "8192",
+            "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = AgentConfig()
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(str(model.anthropic_api_url), "https://proxy.example")
+
+    def test_anthropic_factory_keeps_base_url_without_v1(self):
+        """A base_url without /v1 must be passed through unchanged."""
+        import os
+        from core.providers.anthropic import create_anthropic_chat_model
+        from core.config import AgentConfig
+
+        env = {
+            "PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_MAX_TOKENS": "8192",
+            "ANTHROPIC_BASE_URL": "https://proxy.example",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = AgentConfig()
+        model = create_anthropic_chat_model(cfg)
+        self.assertEqual(str(model.anthropic_api_url), "https://proxy.example")
+
+
 if __name__ == "__main__":
     unittest.main()

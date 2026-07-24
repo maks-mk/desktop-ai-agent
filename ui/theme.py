@@ -824,6 +824,14 @@ def build_stylesheet() -> str:
         font-size: 12pt;
     }}
 
+    QLabel#InspectorSectionTitle {{
+        color: {TEXT_PRIMARY};
+        font-weight: 600;
+        font-size: 12pt;
+        background: transparent;
+        border: none;
+    }}
+
     QLabel#ModelSettingsSectionTitle {{
         color: {TEXT_PRIMARY};
         font-weight: 600;
@@ -1033,6 +1041,12 @@ def build_stylesheet() -> str:
     QLabel#MutedText,
     QLabel#MetaText {{
         color: {TEXT_MUTED};
+    }}
+
+    QLabel#InspectorMetaText {{
+        color: {TEXT_MUTED};
+        background: transparent;
+        border: none;
     }}
 
     QLabel#MetaText[severity="error"] {{

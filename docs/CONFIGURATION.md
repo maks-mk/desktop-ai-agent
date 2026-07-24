@@ -8,12 +8,18 @@
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `PROVIDER` | `gemini` | `gemini` или `openai` |
+| `PROVIDER` | `gemini` | `gemini`, `openai` или `anthropic` |
 | `GEMINI_API_KEY` | — | Обязателен для Gemini |
 | `GEMINI_MODEL` | `gemini-1.5-flash` | Имя модели Gemini |
 | `OPENAI_API_KEY` | — | Обязателен для OpenAI (если нет `OPENAI_BASE_URL`) |
 | `OPENAI_MODEL` | `gpt-4o` | Имя модели OpenAI |
 | `OPENAI_BASE_URL` | — | Для OpenAI-compatible бэкендов (Ollama и др.) |
+| `ANTHROPIC_API_KEY` | — | API-ключ Anthropic |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-5-20250929` | Имя модели Anthropic |
+| `ANTHROPIC_BASE_URL` | — | Необязательный URL Anthropic-compatible API (без `/v1` — SDK добавляет его сам) |
+| `ANTHROPIC_MAX_TOKENS` | `8192` | Максимум выходных токенов Anthropic |
+| `ANTHROPIC_THINKING_BUDGET` | `4096` | Fixed-budget thinking для старых Claude; не применяется к Sonnet 5 и Opus 4.7/4.8 |
+| `ANTHROPIC_REASONING` | — | Adaptive thinking effort для новых Claude: `low`, `medium`, `high`, `xhigh`, `max`; `off` и `none` отключают thinking |
 | `LLM_API_MODE` | `chat` | Режим API для OpenAI-провайдера: `chat` (`/v1/chat/completions`, работает со всеми OpenAI-compatible) или `responses` (`/v1/responses`, для gpt-5/o-series reasoning). Если не указан, LangChain автоопределяет по модели и payload |
 | `ENABLE_MODEL_REASONING` | `true` | Включает provider-side reasoning/thinking для поддерживаемых моделей |
 | `MODEL_REASONING_EFFORT` | `medium` | Усилие reasoning для OpenAI/OpenAI-compatible моделей (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) |

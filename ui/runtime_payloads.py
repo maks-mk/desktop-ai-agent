@@ -55,6 +55,8 @@ class ApprovalSummary:
 def _provider_model(config: AgentConfig) -> tuple[str, str]:
     if config.provider == "gemini":
         return "Gemini", config.gemini_model
+    if config.provider == "anthropic":
+        return "Anthropic", config.anthropic_model
     return "OpenAI", config.openai_model
 
 

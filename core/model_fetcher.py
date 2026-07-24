@@ -23,6 +23,7 @@ EXCLUDE_KEYWORDS = (
 )
 
 _GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+_ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,66 @@ class GeminiModelFetcher:
 
         if not entries:
             raise EmptyResultError("No Gemini models matched the filter.")
+        return entries
+
+
+def _anthropic_models_url(base_url: str) -> str:
+    """Build the Anthropic models-list URL from a (possibly /v1-less) base URL.
+
+    The Anthropic SDK expects ``base_url`` WITHOUT ``/v1`` (it appends
+    ``/v1/messages`` internally).  The models endpoint, however, lives at
+    ``/v1/models``.  This helper normalises any user-supplied base URL so that
+    the resulting path always contains ``/v1`` exactly once.
+    """
+    normalized = _normalize_base_url(base_url)
+    if not normalized:
+        return _ANTHROPIC_MODELS_URL
+    if normalized.endswith("/v1"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+class AnthropicModelFetcher:
+    async def fetch(self, api_key: str, base_url: str = "") -> list[ModelEntry]:
+        models_url = _anthropic_models_url(base_url)
+        headers = {
+            "x-api-key": str(api_key or "").strip(),
+            "anthropic-version": "2023-06-01",
+        }
+        entries: list[ModelEntry] = []
+        seen_model_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        params: dict[str, str] | None = None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                while True:
+                    request_kwargs: dict[str, Any] = {"headers": headers}
+                    if params is not None:
+                        request_kwargs["params"] = params
+                    response = await client.get(models_url, **request_kwargs)
+                    _raise_for_status(response)
+                    payload = _json_payload(response)
+                    for item in _coerce_items(payload, "data"):
+                        model_id = str(item.get("id") or "").strip()
+                        if model_id and model_id not in seen_model_ids:
+                            seen_model_ids.add(model_id)
+                            entries.append(ModelEntry(id=model_id, family="", supports_image_input=True))
+
+                    has_more = isinstance(payload, dict) and payload.get("has_more") is True
+                    if not has_more:
+                        break
+                    last_id = str(payload.get("last_id") or "").strip()
+                    if not last_id:
+                        raise FetchError("Anthropic models response has_more=true without last_id.")
+                    if last_id in seen_cursors:
+                        raise FetchError("Anthropic models response repeated last_id.")
+                    seen_cursors.add(last_id)
+                    params = {"after_id": last_id}
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise NetworkError("Failed to reach Anthropic models endpoint.") from exc
+
+        if not entries:
+            raise EmptyResultError("No Anthropic models were returned.")
         return entries
 
 

@@ -53,7 +53,7 @@ The project does not try to compete with AI IDEs by feature count and does not t
 
 ## Quick Start
 
-Requirements: **Python 3.10+**, plus a Gemini or OpenAI API key.
+Requirements: **Python 3.10+**, plus a Gemini, OpenAI, or Anthropic API key.
 
 ```powershell
 python -m venv venv

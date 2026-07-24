@@ -53,7 +53,7 @@
 
 ## Быстрый старт
 
-Требования: **Python 3.10+**, API-ключ Gemini или OpenAI.
+Требования: **Python 3.10+**, API-ключ Gemini, OpenAI или Anthropic.
 
 ```powershell
 python -m venv venv
@@ -62,6 +62,8 @@ Copy-Item env_example.txt .env
 # Открой .env и укажи API-ключ
 python main.py
 ```
+
+Для Claude Sonnet 5 и Opus 4.7/4.8 задавайте adaptive thinking через `ANTHROPIC_REASONING`; `ANTHROPIC_THINKING_BUDGET` предназначен для старых моделей. Полный список параметров находится в [документации конфигурации](./docs/CONFIGURATION.md).
 
 ---
 

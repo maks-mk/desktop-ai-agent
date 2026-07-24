@@ -10,12 +10,15 @@ from core.constants import BASE_DIR
 logger = logging.getLogger("agent")
 
 
-def load_openai_headers(path: Path | None = None) -> dict[str, str]:
-    """Load editable headers for OpenAI-compatible requests without failing startup.
+def load_provider_headers(path: Path | None = None) -> dict[str, str]:
+    """Load editable headers for provider requests without failing startup.
 
     When the headers file is absent, an empty mapping is returned so the
     underlying SDK sends its own standard headers (no spoofing). When the file
     exists, only its string-valued entries are applied as overrides.
+
+    Used by both OpenAI-compatible and Anthropic providers to allow custom
+    ``User-Agent`` / ``x-*`` header overrides from ``headers.json``.
     """
     headers_path = path or BASE_DIR / "headers.json"
     try:
@@ -23,11 +26,11 @@ def load_openai_headers(path: Path | None = None) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        logger.warning("Could not load OpenAI-compatible headers from %s: %s", headers_path, exc)
+        logger.warning("Could not load provider headers from %s: %s", headers_path, exc)
         return {}
 
     if not isinstance(payload, dict):
-        logger.warning("Ignoring OpenAI-compatible headers from %s: expected a JSON object", headers_path)
+        logger.warning("Ignoring provider headers from %s: expected a JSON object", headers_path)
         return {}
 
     return {
@@ -35,3 +38,8 @@ def load_openai_headers(path: Path | None = None) -> dict[str, str]:
         for key, value in payload.items()
         if isinstance(key, str) and key.strip() and isinstance(value, str)
     }
+
+
+def load_openai_headers(path: Path | None = None) -> dict[str, str]:
+    """Backward-compatible alias for :func:`load_provider_headers`."""
+    return load_provider_headers(path)

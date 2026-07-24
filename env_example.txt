@@ -11,7 +11,7 @@
 # 1) Провайдеры LLM (Обязательно)
 # ===========================
 
-# Выбор провайдера: gemini или openai
+# Выбор провайдера: gemini, openai или anthropic
 PROVIDER=gemini
 
 # --- Google Gemini ---
@@ -21,6 +21,17 @@ GEMINI_MODEL=gemini-1.5-flash
 ENABLE_MODEL_REASONING=true
 # Gemini thinking budget применяется к gemini-2.5* / gemini-3*.
 GEMINI_THINKING_BUDGET=4096
+
+# --- Anthropic ---
+# ANTHROPIC_API_KEY=sk-ant-REPLACE_WITH_YOUR_KEY
+# ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+# ANTHROPIC_BASE_URL=https://api.anthropic.com
+# NOTE: Do NOT include /v1 — the Anthropic SDK appends /v1/messages automatically.
+# ANTHROPIC_MAX_TOKENS=8192
+# For Claude Sonnet 5 and Opus 4.7/4.8, use adaptive thinking effort.
+# ANTHROPIC_REASONING=medium
+# Fixed-budget thinking for older Claude models only.
+# ANTHROPIC_THINKING_BUDGET=4096
 
 # --- OpenAI / Compatible (OpenRouter, LocalLLM, etc.) ---
 # OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY

@@ -551,8 +551,10 @@ class MainWindow(QMainWindow):
         self.add_image_action.setEnabled(attach_enabled and self._has_active_model and self._active_model_supports_images())
         self.insert_file_path_action.setEnabled(attach_enabled)
         self.model_chip.setEnabled(can_edit and self._has_active_model)
-        self.open_settings_inline_button.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
-        self.settings_button.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
+        model_settings_open = self._model_settings_window is not None and not self._model_settings_window.isHidden()
+        can_open_model_settings = enabled and not has_pending_interrupt and not self.is_busy
+        self.open_settings_inline_button.setEnabled(can_open_model_settings)
+        self.settings_button.setEnabled(can_open_model_settings or model_settings_open)
         self.info_button.setEnabled(enabled)
         self.sidebar.setEnabled(enabled and not has_pending_interrupt and not self.is_busy)
         self.approval_card.set_actions_enabled(self.awaiting_approval and not self.is_busy)
@@ -680,12 +682,13 @@ class MainWindow(QMainWindow):
         return ModelSettingsDialog
 
     def _open_settings_dialog(self) -> None:
-        if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
-            QMessageBox.information(self, "Busy", "Wait for the current run to finish before changing settings.")
-            return
         if self._model_settings_window is not None:
             if isinstance(self._model_settings_window, QDockWidget):
                 dock = self._model_settings_window
+                if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
+                    if not dock.isHidden():
+                        dock.hide()
+                    return
                 dock.setVisible(dock.isHidden())
                 if not dock.isHidden():
                     dock.raise_()
@@ -693,11 +696,17 @@ class MainWindow(QMainWindow):
                     if dialog is not None and hasattr(dialog, "refresh_active_selection"):
                         dialog.refresh_active_selection(self.model_profiles_payload)
                 return
+            if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
+                self._model_settings_window.hide()
+                return
             self._model_settings_window.show()
             self._model_settings_window.raise_()
             self._model_settings_window.activateWindow()
             if hasattr(self._model_settings_window, "refresh_active_selection"):
                 self._model_settings_window.refresh_active_selection(self.model_profiles_payload)
+            return
+        if self.is_busy or self.awaiting_approval or self.awaiting_user_choice:
+            QMessageBox.information(self, "Busy", "Wait for the current run to finish before changing settings.")
             return
         dialog_class = self._resolve_model_settings_dialog_class()
         dialog = dialog_class(self.model_profiles_payload, self)
@@ -717,14 +726,14 @@ class MainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         dock.setTitleBarWidget(QWidget(dock))
         dock.setFloating(False)
-        dock.setMinimumWidth(760)
-        dock.resize(860, max(420, self.height()))
+        dock.setMinimumWidth(850)
+        dock.resize(1070, max(420, self.height()))
         dock.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         dialog.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         dock.setWidget(dialog)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.resizeDocks([dock], [860], Qt.Orientation.Horizontal)
+        self.resizeDocks([dock], [1070], Qt.Orientation.Horizontal)
         self._model_settings_window = dock
 
         if close_button := getattr(dialog, "close_button", None):

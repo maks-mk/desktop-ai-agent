@@ -969,6 +969,118 @@ class RefactorServicesTests(unittest.TestCase):
         self.assertEqual(sanitized[0].content, "Ответ")
         self.assertNotIn("reasoning", sanitized[0].additional_kwargs)
 
+    def test_sanitize_preserves_anthropic_thinking_blocks_for_anthropic(self):
+        """Anthropic thinking blocks (type=thinking, thinking+signature) must be
+        preserved for multi-turn continuity — they carry the signature needed
+        for extended thinking round-trip."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="anthropic", ANTHROPIC_API_KEY="test-key"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "My reasoning", "signature": "sig_abc"},
+                {"type": "text", "text": "Ответ"},
+            ],
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([ai_msg])
+
+        self.assertEqual(len(sanitized), 1)
+        # Both blocks preserved — thinking block has signature for round-trip
+        self.assertEqual(len(sanitized[0].content), 2)
+        self.assertEqual(sanitized[0].content[0]["type"], "thinking")
+        self.assertIn("signature", sanitized[0].content[0])
+        self.assertEqual(sanitized[0].content[1]["type"], "text")
+
+    def test_sanitize_preserves_anthropic_redacted_thinking_blocks(self):
+        """Anthropic redacted_thinking blocks (display=omitted) contain ``data``
+        and must be preserved verbatim for multi-turn continuity."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="anthropic", ANTHROPIC_API_KEY="test-key"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "redacted_thinking", "data": "encrypted_blob"},
+                {"type": "text", "text": "Ответ"},
+            ],
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([ai_msg])
+
+        self.assertEqual(len(sanitized), 1)
+        self.assertEqual(len(sanitized[0].content), 2)
+        self.assertEqual(sanitized[0].content[0]["type"], "redacted_thinking")
+        self.assertIn("data", sanitized[0].content[0])
+
+    def test_sanitize_strips_openai_reasoning_blocks_for_anthropic(self):
+        """When switching from OpenAI to Anthropic, OpenAI reasoning blocks
+        (type=reasoning, summary=[...]) must be stripped — they are incompatible
+        with Anthropic and are ephemeral."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="anthropic", ANTHROPIC_API_KEY="test-key"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        ai_msg = AIMessage(
+            content=[
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Thinking..."}], "id": "rs_001"},
+                {"type": "text", "text": "Ответ модели"},
+            ],
+            tool_calls=[],
+        )
+
+        sanitized = builder.sanitize_messages([HumanMessage(content="Вопрос"), ai_msg])
+
+        self.assertEqual(len(sanitized), 2)
+        self.assertIsInstance(sanitized[1], AIMessage)
+        # OpenAI reasoning block removed, text block preserved
+        self.assertEqual(len(sanitized[1].content), 1)
+        self.assertEqual(sanitized[1].content[0]["type"], "text")
+
+    def test_normalize_system_prefix_merges_multiple_system_messages_for_anthropic(self):
+        """Anthropic (like OpenAI) benefits from merging multiple SystemMessage
+        into a single top-level system prompt."""
+        builder = ContextBuilder(
+            config=self._make_config(PROVIDER="anthropic", ANTHROPIC_API_KEY="test-key"),
+            prompt_loader=lambda: "Base prompt {{current_date}}",
+            is_internal_retry=lambda _msg: False,
+            log_run_event=lambda *_args, **_kwargs: None,
+            recovery_message_builder=lambda _state: None,
+            provider_safe_tool_call_id_re=__import__("re").compile(r"^[A-Za-z0-9]{9}$"),
+        )
+
+        context = [
+            SystemMessage(content="System rule A"),
+            SystemMessage(content="System rule B"),
+            HumanMessage(content="Вопрос"),
+        ]
+
+        normalized = builder.normalize_system_prefix(context)
+
+        self.assertEqual(len(normalized), 2)
+        self.assertIsInstance(normalized[0], SystemMessage)
+        self.assertIn("System rule A", normalized[0].content)
+        self.assertIn("System rule B", normalized[0].content)
+        self.assertIsInstance(normalized[1], HumanMessage)
+
 
 if __name__ == "__main__":
     unittest.main()
